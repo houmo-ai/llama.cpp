@@ -7,6 +7,8 @@
 #include "llama-memory.h"
 #include "llama-vocab.h"
 
+#include "houmo-llmodel.h"
+
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -327,6 +329,8 @@ struct llama_model {
     llama_hparams hparams = {};
     llama_vocab   vocab;
 
+    std::shared_ptr<HouMoLLModel> hm_llmodel = std::make_shared<HouMoLLModel>();
+
     struct ggml_tensor * tok_embd   = nullptr;
     struct ggml_tensor * type_embd  = nullptr;
     struct ggml_tensor * pos_embd   = nullptr;
@@ -372,6 +376,8 @@ struct llama_model {
     void load_hparams(llama_model_loader & ml);
     void load_vocab  (llama_model_loader & ml);
     bool load_tensors(llama_model_loader & ml); // returns false if cancelled by progress_callback
+    // TODO: @guoxing.xu check again.
+    bool load_hmmodels(llama_model_loader & ml);
 
     std::string arch_name() const;
     std::string type_name() const;

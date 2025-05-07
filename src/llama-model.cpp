@@ -1435,6 +1435,9 @@ void llama_model::load_vocab(llama_model_loader & ml) {
 
     vocab.load(ml, kv);
 }
+bool llama_model::load_hmmodels(llama_model_loader & ml) {
+    return hm_llmodel->houmo_load(ml.fname_);
+}
 
 bool llama_model::load_tensors(llama_model_loader & ml) {
     const auto & split_mode   = params.split_mode;

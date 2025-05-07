@@ -12,6 +12,17 @@ if (NOT XCODE AND NOT MSVC AND NOT CMAKE_BUILD_TYPE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
+
+set(HOUMO_TCIM_RUNTIME_PATH "/usr/local/houmo")
+find_library(HOUMO_RUNTIME_LIBRARIES NAMES tcim_runtime_lite PATHS ${HOUMO_TCIM_RUNTIME_PATH}/lib)
+message("LLAMA HOUMO_TCIM_LIBRARY=${HOUMO_RUNTIME_LIBRARIES}")
+set(CMAKE_PREFIX_PATH /usr/local/libtorch)
+find_package(Torch REQUIRED)
+message("LLAMA TORCH_LIBRARIES=${TORCH_LIBRARIES}")
+add_definitions(-DENABLE_HOUMO)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+
 # Add path to modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 

@@ -121,6 +121,12 @@ static int llama_model_load(const std::string & fname, std::vector<std::string> 
             LLAMA_LOG_INFO("%s: vocab only - skipping tensors\n", __func__);
             return 0;
         }
+        model.hparams.is_hmm = model.gguf_kv.count("is_hmm") > 0;
+        LLAMA_LOG_INFO("%s:%d: loading hmmodes %d\n", __func__, __LINE__, model.hparams.is_hmm);
+        if (model.hparams.is_hmm) {
+            model.load_hmmodels(ml);
+            return 0;
+        }
 
         if (!model.load_tensors(ml)) {
             return -2;

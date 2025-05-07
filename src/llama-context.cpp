@@ -9,10 +9,24 @@
 #include <cstring>
 #include <stdexcept>
 #include <cinttypes>
+#include <fstream>
 
-//
-// llama_context
-//
+void llama_context::houmo_init(int32_t seq_max) {
+    std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
+    hm_llmodel->houmo_init(seq_max);
+    LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
+    // graph outputs buffer
+    {
+        // resized during inference when a batch uses more outputs
+        if (output_reserve(seq_max) < seq_max) {
+            throw std::runtime_error("failed to reserve initial output buffer");
+        }
+
+        LLAMA_LOG_INFO("%s: %10s  output buffer size = %8.2f MiB\n", __func__,
+                ggml_backend_buffer_name    (buf_output.get()),
+                ggml_backend_buffer_get_size(buf_output.get()) / 1024.0 / 1024.0);
+    }
+}
 
 llama_context::llama_context(
         const llama_model & model,
@@ -118,7 +132,7 @@ llama_context::llama_context(
 
     logits_all = params.logits_all;
 
-    if (!hparams.vocab_only) {
+    if (!hparams.vocab_only && !hparams.is_hmm) {
         // GPU backends
         for (auto * dev : model.devices) {
             ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
@@ -175,7 +189,7 @@ llama_context::llama_context(
     }
 
     // init the memory module
-    if (!hparams.vocab_only) {
+    if (!hparams.vocab_only && !hparams.is_hmm) {
         llama_memory_params params_mem = {
             /*.type_k =*/ params.type_k,
             /*.type_v =*/ params.type_v,
@@ -185,7 +199,7 @@ llama_context::llama_context(
     }
 
     // init backends
-    if (!hparams.vocab_only) {
+    if (!hparams.vocab_only && !hparams.is_hmm) {
         LLAMA_LOG_DEBUG("%s: enumerating backends\n", __func__);
 
         backend_buft.clear();
@@ -253,7 +267,7 @@ llama_context::llama_context(
     }
 
     // reserve worst-case graph
-    if (!hparams.vocab_only) {
+    if (!hparams.vocab_only && !hparams.is_hmm) {
         const uint32_t n_seqs = 1; // TODO: worst-case number of sequences
         const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
 
@@ -358,11 +372,19 @@ llama_context::llama_context(
             LLAMA_LOG_INFO("%s: graph splits = %d (with bs=%d), %d (with bs=1)\n", __func__, n_splits_pp, n_tokens, n_splits_tg);
         }
     }
+
+    if (hparams.is_hmm) {
+        houmo_init(cparams.n_seq_max);
+    }
 }
 
 llama_context::~llama_context() = default;
 
 void llama_context::synchronize() {
+    if (model.hparams.is_hmm) {
+        // TODO: @guoxing.xu. synchronize HMM graph
+        return;
+    }
     ggml_backend_sched_synchronize(sched.get());
 
     // FIXME: if multiple single tokens are evaluated without a synchronization,
@@ -512,7 +534,6 @@ float * llama_context::get_logits_ith(int32_t i) {
             // This should not happen
             throw std::runtime_error(format("corrupt output buffer (j=%d, n_outputs=%d)", j, n_outputs));
         }
-
         return logits + j*model.vocab.n_tokens();
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid logits id %d, reason: %s\n", __func__, i, err.what());
@@ -833,11 +854,124 @@ int llama_context::encode(llama_batch & inp_batch) {
 
     return 0;
 }
+static std::string common_token_to_piece(const struct llama_vocab * vocab, llama_token token, bool special) {
+    std::string piece;
+    piece.resize(piece.capacity());  // using string internal cache, 15 bytes + '\n'
+    const int n_chars = llama_token_to_piece(vocab, token, &piece[0], piece.size(), 0, special);
+    if (n_chars < 0) {
+        piece.resize(-n_chars);
+        int check = llama_token_to_piece(vocab, token, &piece[0], piece.size(), 0, special);
+        GGML_ASSERT(check == -n_chars);
+    }
+    else {
+        piece.resize(n_chars);
+    }
+
+    return piece;
+}
+
+int llama_context::houmo_decode(const llama_batch &batch) {
+    LLAMA_LOG_DEBUG("****batch.n_tokens: %d\n", batch.n_tokens);
+    std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
+    const int32_t n_vocab = model.vocab.n_tokens();
+
+    // 记录每个序列
+    int n_parallel = 1;
+    std::map<int, std::vector<llama_token>> seqid_token_map;
+    std::map<int, int> seqid_pos_map;
+    int pos = 0;
+    // 恢复不同seq的tokens, 没有序列信息默认seq_id=0
+    int seq_id = 0;
+    // reserve output buffer
+    if (batch.seq_id == nullptr) {
+        // 单序列推理
+        for (int j = 0; j < batch.n_tokens; j++) {
+            if (seqid_token_map.count(seq_id) == 0)
+                seqid_token_map[seq_id] = std::vector<llama_token>();
+            seqid_token_map[seq_id].push_back(batch.token[j]);
+        }
+        // keep last output only
+        output_ids[batch.n_tokens - 1] = seq_id;
+    } else {
+        // 多序列推理
+        for (int j = 0; j < batch.n_tokens; j++) {
+            for (int s = 0; s < batch.n_seq_id[j]; s++) {
+                seq_id = batch.seq_id[j][s];
+                if (seqid_token_map.count(seq_id) == 0)
+                    seqid_token_map[seq_id] = std::vector<llama_token>();
+                seqid_token_map[seq_id].push_back(batch.token[j]);
+                // 记录不同序列的logits位置
+                if (batch.logits && batch.logits[j] == 1) {
+                    // std::cout << "set output_ids[" << j << "] = " << pos << std::endl;
+                    output_ids[j] = pos;
+                    seqid_pos_map[seq_id] = pos;
+                    pos++;
+                }
+            }
+        }
+    }
+    n_parallel = seqid_token_map.size();
+
+    int n_outputs_all = n_parallel;
+    std::vector<llama_token> decode_batches;
+    std::vector<int > seq_ids;
+    // 先计算已经存在的decode
+    for (auto &[k, v] : seqid_token_map) {
+        // prefill阶段
+        if (v.size() == 1) {
+            // 缓存需要decode的batch
+            decode_batches.push_back(v[0]);
+            seq_ids.push_back(k);
+        }
+    }
+    for (size_t i = 0; i < decode_batches.size();
+         i += hm_llmodel->n_decode_batch()) {
+        int n_decode_batch =
+            std::min(hm_llmodel->n_decode_batch(), (int)decode_batches.size());
+        std::vector<llama_token> decode_batch(decode_batches.begin() + i,
+                                              decode_batches.begin() + i +
+                                                  n_decode_batch);
+        std::vector<int> seq_id(seq_ids.begin() + i,
+                                seq_ids.begin() + i + n_decode_batch);
+        std::vector<float *> logits_ptrs;
+        for (auto seq : seq_id) {
+            logits_ptrs.push_back(logits + seqid_pos_map[seq] * n_vocab);
+        }
+        hm_llmodel->houmo_decode(decode_batch, seq_id, logits_ptrs);
+        // for debug...
+        // auto prefill_output_opts =
+        // torch::TensorOptions().dtype(torch::kFloat); auto
+        // prefill_output_tensor = torch::from_blob(logits_ptrs[0], {n_vocab},
+        // prefill_output_opts).clone(); auto selected_output =
+        // torch::argmax(prefill_output_tensor).to(torch::kInt32); auto
+        // generate_token = *(int32_t *)selected_output.data_ptr<int32_t>();
+        // std::cout << "generate_token: " << generate_token << ","
+        //           << common_token_to_piece(
+        //                 & model.vocab, generate_token, true)
+        //           << std::endl;
+    }
+
+    // 再计算需要prefill的seq
+    for (auto &[k, v] : seqid_token_map) {
+        // prefill阶段
+        if (v.size() > 1) {
+            // std::cout <<k <<"prefill seq_id pos " << seqid_pos_map[k] << std::endl;
+            auto logits_out = logits + seqid_pos_map[k] * n_vocab;
+            hm_llmodel->houmo_prefill(v, k, logits_out);
+        }
+    }
+    n_outputs = n_outputs_all;
+    return 0;
+}
 
 int llama_context::decode(llama_batch & inp_batch) {
     if (inp_batch.n_tokens == 0) {
         LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
         return -1;
+    }
+
+    if (model.hparams.is_hmm) {
+        return houmo_decode(inp_batch);
     }
 
     llama_kv_cache * kv_self = static_cast<llama_kv_cache *>(memory.get());

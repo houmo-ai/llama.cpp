@@ -25,6 +25,8 @@ struct llama_hparams_convnext {
 };
 
 struct llama_hparams {
+    // TODO: check if these are still needed. add by guoxing.xu
+    bool is_hmm;
     bool vocab_only;
     bool rope_finetuned;
     bool use_par_res;

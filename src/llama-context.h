@@ -10,7 +10,6 @@
 
 #include <map>
 #include <vector>
-
 struct llama_model;
 struct llama_kv_cache;
 
@@ -134,6 +133,9 @@ struct llama_context {
     void perf_reset();
 
 private:
+    // houmo patch for decoding
+    void houmo_init(int32_t n_seq_max);
+    int houmo_decode(const llama_batch &batch);
     //
     // output
     //
