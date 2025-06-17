@@ -28,6 +28,7 @@ class HouMoLLModel {
                      std::vector<int> &seq_ids, std::vector<float *> logits);
     int n_decode_batch();
     int n_prefill_batch();
+    uint32_t n_context_length();
     class Impl;  // Forward declaration of the implementation class
   private:
     Impl *impl_; // Pointer to the implementation

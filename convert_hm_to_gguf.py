@@ -74,6 +74,8 @@ class Model:
     model_name: str | None
     metadata_override: Path | None
     dir_model_card: Path
+    model_description: str | None = None
+    cache_name_template: str | None = None
 
     # subclasses should define this!
     model_arch: gguf.MODEL_ARCH
@@ -93,6 +95,8 @@ class Model:
         dry_run: bool = False,
         small_first_shard: bool = False,
         hparams: dict[str, Any] | None = None,
+        model_description: str | None = None,
+        cache_name_template: str | None = None,
     ):
         if type(self) is Model:
             raise TypeError(
@@ -127,7 +131,8 @@ class Model:
         self.metadata_override = metadata_override
         self.model_name = model_name
         self.dir_model_card = dir_model  # overridden in convert_lora_to_gguf.py
-
+        self.cache_name_template = cache_name_template
+        self.model_description = model_description
         # Apply heuristics to figure out typical tensor encoding based on first layer tensor encoding type
 
         # Configure GGUF Writer
@@ -1192,11 +1197,11 @@ class Qwen2Model(Model):
 
     def conver_embedding(self, embedding_path: Path):
         # 加载嵌入权重
-        embedding_weight = torch.load(embedding_path, map_location="cpu")
-        if isinstance(embedding_weight, torch.jit.ScriptModule):
-            print("====embedding_weight is torch.jit.ScriptModule no need to convert")
-            return embedding_path
-
+        embedding_weight = torch.load(
+            embedding_path, map_location="cpu", weights_only=True
+        )
+        if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
+            embedding_weight = embedding_weight["weight"]
         embedding_weight = embedding_weight.to(torch.float16)  # 转换为float16
         # 创建空模块并手动注册参数
         m = nn.Module()
@@ -1230,6 +1235,10 @@ class Qwen2Model(Model):
                     self.hparams["rope_scaling"]["original_max_position_embeddings"]
                 )
         self.gguf_writer.add_bool("is_hmm", True)
+        if self.model_description:
+            self.gguf_writer.add_string("model.description", self.model_description)
+        if self.cache_name_template:
+            self.gguf_writer.add_string("cachename.template", self.cache_name_template)
 
     def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
         # TODO: @guoxing.xu check & test this block
@@ -1529,6 +1538,18 @@ def parse_args() -> argparse.Namespace:
         help="Specify the path for an authorship metadata override file",
     )
     parser.add_argument(
+        "--hmm-info",
+        type=str,
+        default="dadao",
+        help="Specify Description of the HMM model to be used for conversion",
+    )
+    parser.add_argument(
+        "--cache-name-template",
+        type=str,
+        default="model_layers_%d_self_attn_%scache_input",
+        help="Specify Description of the HMM model to be used for conversion",
+    )
+    parser.add_argument(
         "--print-supported-models",
         action="store_true",
         help="Print the supported models",
@@ -1626,6 +1647,8 @@ def main() -> None:
             split_max_size=split_str_to_n_bytes(args.split_max_size),
             dry_run=args.dry_run,
             small_first_shard=args.no_tensor_first_split,
+            model_description=args.hmm_info,
+            cache_name_template=args.cache_name_template,
         )
 
         if args.vocab_only:

@@ -26,6 +26,8 @@ void llama_context::houmo_init(int32_t seq_max) {
                 ggml_backend_buffer_name    (buf_output.get()),
                 ggml_backend_buffer_get_size(buf_output.get()) / 1024.0 / 1024.0);
     }
+    // 修正n_ctx
+    cparams.n_ctx = std::max(cparams.n_ctx, hm_llmodel->n_context_length());
 }
 
 llama_context::llama_context(
