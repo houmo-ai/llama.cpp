@@ -13,15 +13,21 @@ if (NOT XCODE AND NOT MSVC AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 
-set(HOUMO_TCIM_RUNTIME_PATH "/usr/local/houmo")
+set(HOUMO_TCIM_RUNTIME_PATH ${CMAKE_SOURCE_DIR}/third_party/houmo)
 find_library(HOUMO_RUNTIME_LIBRARIES NAMES tcim_runtime_lite PATHS ${HOUMO_TCIM_RUNTIME_PATH}/lib)
 message("LLAMA HOUMO_TCIM_LIBRARY=${HOUMO_RUNTIME_LIBRARIES}")
-set(CMAKE_PREFIX_PATH /usr/local/libtorch)
+set(HOUMO_RUNTIME_LIBRARIES ${HOUMO_RUNTIME_LIBRARIES})
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+    set(CMAKE_PREFIX_PATH /opt/libtorch/aarch64/libtorch/ third_party/libtorch)
+else()
+    set(CMAKE_PREFIX_PATH /usr/local/lib/python3.10/dist-packages/torch third_party/libtorch)
+endif()
 find_package(Torch REQUIRED)
+
 message("LLAMA TORCH_LIBRARIES=${TORCH_LIBRARIES}")
-add_definitions(-DENABLE_HOUMO)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+# add_definitions(-DENABLE_HOUMO)
+# set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g ")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g ")
 
 # Add path to modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
