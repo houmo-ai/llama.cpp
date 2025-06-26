@@ -106,12 +106,14 @@ package_llama() {
     cp -r common/*.h* "$release_dir/include/" || true
 
     # 复制库文件
-    cp build/bin/Release/*.dll "$release_dir/lib/" || true
-    cp build/bin/Release/*.dll "$release_dir/lib/" || true
+    cp build/src/Release/*.lib "$release_dir/lib/" || true
+    cp build/common/Release/*.lib "$release_dir/lib/" || true
 
-    cp third_party/houmo/lib/*.dll "$release_dir/lib/" || true
-	cp -r third_party/houmo/lib/bin "$release_dir/lib/" || true
-    cp third_party/libtorch/lib/*.dll* "$release_dir/lib/" || true
+    cp build/bin/Release/*.dll "$release_dir/bin/" || true
+
+    cp third_party/houmo/lib/*.dll "$release_dir/bin/" || true
+	cp -r third_party/houmo/lib/bin "$release_dir/bin/" || true
+    cp third_party/libtorch/lib/*.dll* "$release_dir/bin/" || true
 
     # 复制可执行文件
     cp build/bin/Release/llama-server* "$release_dir/bin/" || true
@@ -121,7 +123,7 @@ package_llama() {
     cp build/bin/Release/llama-cli* "$release_dir/bin/" || true
     cp build/bin/Release/llama-bench* "$release_dir/bin/" || true
     cp build/bin/Release/llama-mtmd-cli* "$release_dir/bin/" || true
-
+    cp ci/run_llama_server_win.sh "$release_dir/bin/" || true
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
 
