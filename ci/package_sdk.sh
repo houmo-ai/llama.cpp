@@ -39,8 +39,8 @@ xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/2025/06/24/
 xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/2025/06/24/2330/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-2.4.0.tar.gz"
 xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/2025/06/24/2330/ubuntu2004/houmo_drv_xh1_v2.4.0_ubuntu2004_${ARCH}.run"
 #FIXME:
-#xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/2025/06/24/2330/ubuntu2004/houmo_drv_xh2_v0.0.0_ubuntu2004_${ARCH}.run"
-xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/libxh2a_hal.so"
+xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/2025/06/24/2330/ubuntu2004/houmo_drv_xh2_v0.0.0_ubuntu2004_${ARCH}.run"
+xh2_sw_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/libxh2a_hal.so"
 # 下载文件并检查是否成功
 download_file() {
     local url=$1
@@ -64,20 +64,23 @@ deploy_dadao_sdk() {
     tar -xzf dadao_sdk.tar.gz -C third_party/houmo --strip-components=1
     rm dadao_sdk.tar.gz
 
-    # 下载并解压 SystemWare SDK
-    download_file "$sw_url" "third_party/sw_sdk.run"
 
     # 提取SDK
     if [[ $PLATFORM == "xh2"  && "$ARCH" == "aarch64" ]]; then
-        download_file "$sw_url" third_party/houmo/lib/libxh2a_hal.so
+        download_file "$xh2_sw_sdk_url_aarch64" third_party/houmo/lib/libxh2a_hal.so
     else
+        # 下载并解压 SystemWare SDK
+        download_file "$sw_url" "third_party/sw_sdk.run"
         bash third_party/sw_sdk.run extract --path third_party/
     fi
 
     if [[ $PLATFORM == "xh2" && "$ARCH" == "x86_64" ]]; then
         cp third_party/houmo-sdk/hal/lib/*.so third_party/houmo/lib/
         rm -rf third_party/houmo-sdk third_party/sw_sdk.run third_party/houmo_drv*
-        # FIXME: 临时解决方案，等待SystemWare SDK更新
+    fi
+
+    if [ $PLATFORM == "xh2" ]; then
+        # FIXME: xh2 还需下载xh1的包，临时解决方案，等待SystemWare SDK更新
         download_file "$xh1_sw_sdk_url" "third_party/sw_sdk.run"
         bash third_party/sw_sdk.run extract --path third_party/
     fi
