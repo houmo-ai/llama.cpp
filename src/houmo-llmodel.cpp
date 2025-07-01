@@ -429,7 +429,7 @@ void HouMoSingleCardModel::houmo_init(int seq_max) {
                 v_cache_name =
                     "past_value_cache_" + std::to_string(idx) + ".hmcc.format";
             } else if (!xh1_ &&
-                       prefill_model_->GetInputName(4).find(".hmcc.format")) {
+                       prefill_model_->GetInputName(4).find(".hmcc.format") != std::string::npos) {
                 k_cache_name += ".hmcc.format";
                 v_cache_name += ".hmcc.format";
             }
