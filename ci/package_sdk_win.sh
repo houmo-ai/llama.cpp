@@ -126,7 +126,8 @@ package_llama() {
     cp build/bin/Release/*.dll "$release_dir/bin/" || true
 
     cp third_party/houmo/lib/*.dll "$release_dir/bin/" || true
-	cp -r third_party/houmo/lib/bin "$release_dir/bin/" || true
+    # not check.
+    cp -r third_party/houmo/lib/bin "$release_dir/bin/"
     cp third_party/libtorch/lib/*.dll* "$release_dir/bin/" || true
 
     # 复制可执行文件
