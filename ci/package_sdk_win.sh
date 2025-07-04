@@ -15,7 +15,7 @@ xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0
 xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/06/30/1110/windows11/houmo_drv_xh2_v0.0.0_windows11_x86_64.zip"
 
 # libtorch 下载地址
-libtorch_url="https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.7.1%2Bcpu.zip"
+libtorch_url="http://10.10.1.53:8082/artifactory/thirdparty_local/libtorch/torch.zip"
 # 下载文件并检查是否成功
 download_file() {
     local url=$1
