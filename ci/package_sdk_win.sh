@@ -151,7 +151,6 @@ package_llama() {
 # 主函数
 main() {
     # 确定使用的SDK URL
-    deploy_torch
     case "$PLATFORM" in
         xh1)
             deploy_dadao_sdk "$xh1_dadao_sdk_url" "$xh1_sw_sdk_url"
@@ -162,6 +161,7 @@ main() {
     esac
 
     echo "Deployed Dadao SDK and System SDK for $PLATFORM/$ARCH."
+    deploy_torch
 
     # 编译和打包
     build_llama
