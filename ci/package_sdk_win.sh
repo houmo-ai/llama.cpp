@@ -25,7 +25,21 @@ download_file() {
     echo "Download completed: $output"
 }
 deploy_torch() {
-    download_file "$libtorch_url" "torch.zip"
+    # 检查torch.zip是否存在
+    if [ ! -f "third_party/torch.zip" ]; then
+        echo "未找到torch.zip，开始下载..."
+        download_file "$libtorch_url" "third_party/torch.zip"
+    else
+        echo "找到torch.zip文件，跳过下载"
+    fi
+
+    # 检查目标目录是否存在，若存在则删除
+    if [ -d "third_party/libtorch" ]; then
+        echo "删除已存在的 third_party/libtorch 目录..."
+        rm -rf third_party/libtorch
+    fi
+
+    # 解压文件
     unzip -o third_party/torch.zip -d third_party/
 }
 
