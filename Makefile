@@ -367,7 +367,7 @@ ifdef LLAMA_SERVER_SSL
 endif
 
 ifndef GGML_NO_CPU_AARCH64
-	MK_CPPFLAGS += -DGGML_USE_CPU_AARCH64
+	MK_CPPFLAGS += -DGGML_USE_CPU_REPACK
 endif
 
 # warnings
@@ -970,7 +970,7 @@ OBJ_GGML = \
 	$(DIR_GGML)/src/ggml-threading.o \
 	$(DIR_GGML)/src/ggml-cpu/ggml-cpu.o \
 	$(DIR_GGML)/src/ggml-cpu/ggml-cpu_cpp.o \
-	$(DIR_GGML)/src/ggml-cpu/ggml-cpu-aarch64.o \
+	$(DIR_GGML)/src/ggml-cpu/repack.o \
 	$(DIR_GGML)/src/ggml-cpu/ggml-cpu-hbm.o \
 	$(DIR_GGML)/src/ggml-cpu/ggml-cpu-quants.o \
 	$(DIR_GGML)/src/ggml-cpu/ggml-cpu-traits.o \
@@ -1186,11 +1186,6 @@ llama-cli: tools/main/main.cpp \
 	@echo
 	@echo '====  Run ./llama-cli -h for help.  ===='
 	@echo
-
-llama-infill: examples/infill/infill.cpp \
-	$(OBJ_ALL)
-	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
-	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 
 llama-run: tools/run/run.cpp \
 	$(OBJ_ALL)
