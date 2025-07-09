@@ -138,7 +138,7 @@ package_llama() {
     cp build/bin/Release/llama-cli* "$release_dir/bin/" || true
     cp build/bin/Release/llama-bench* "$release_dir/bin/" || true
     cp build/bin/Release/llama-mtmd-cli* "$release_dir/bin/" || true
-    cp ci/run_llama_server_win.sh "$release_dir/bin/" || true
+    cp ci/run_llama_server_win.* "$release_dir/bin/" || true
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
 

@@ -20,7 +20,7 @@ set(HOUMO_RUNTIME_LIBRARIES ${HOUMO_RUNTIME_LIBRARIES})
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     set(CMAKE_PREFIX_PATH /opt/libtorch/aarch64/libtorch/ third_party/libtorch)
 else()
-    set(CMAKE_PREFIX_PATH /usr/local/lib/python3.10/dist-packages/torch third_party/libtorch)
+    set(CMAKE_PREFIX_PATH /opt/libtorch/x86_64/libtorch/ third_party/libtorch)
 endif()
 find_package(Torch REQUIRED)
 

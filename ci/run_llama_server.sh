@@ -7,28 +7,41 @@ set -o pipefail  # 管道命令中任何一个失败都算失败
 # 设置默认值
 default_port=31808
 default_device_id=0
-
+default_model_path="/data/xh1/model/HiModel-Qwen3-8B-F16-2k-4core-xh1-v0.0.1.gguf"
+if [ $1 == "xh2" ]; then
+    default_model_path="/data/xh2/model/HiModel-Qwen3-8B-F16-2k-2core-xh2-v0.0.1.gguf"
+fi
 # 参数处理
 case $# in
     1)
         xh_type="$1"
         port="$default_port"
         device_id="$default_device_id"
+        model_path="$default_model_path"
         ;;
     2)
         xh_type="$1"
-        port="$2"
+        model_path="$2"
+        port="$default_port"
         device_id="$default_device_id"
         ;;
     3)
         xh_type="$1"
-        port="$2"
-        device_id="$3"
+        model_path="$2"
+        port="$3"
+        device_id="$default_device_id"
+        ;;
+    4)
+        xh_type="$1"
+        model_path="$2"
+        port="$3"
+        device_id="$4"
         ;;
     *)
-        echo "Usage: $0 <xh1|xh2> [port] [device_id]"
+        echo "Usage: $0 <xh1|xh2> [model_path] [port] [device_id]"
         echo "  port:        默认 $default_port"
         echo "  device_id:   默认 $default_device_id"
+        echo "  model_path:  默认 $default_model_path"
         exit 1
         ;;
 esac
@@ -44,13 +57,10 @@ export HOUMO_DEVICE_ID=${device_id}
 export LD_LIBRARY_PATH=$(pwd)/lib
 
 # 设置模型路径和环境变量
-if [ "${xh_type}" = "xh1" ]; then
-    model_path=/data/xh1/model/qwen2.5-7B-4batch-instruct-hf-F16.gguf
-elif [ "${xh_type}" = "xh2" ]; then
-    model_path=/data/xh2/model/qwen2.5-7B-F16.gguf
+if [ "${xh_type}" = "xh2" ]; then
     export TCIM_BACKEND=Xh2HalBackend
     export TCIM_RUNTIME_PATH=$(pwd)
-    NP=4
+    # NP=4
 fi
 
 # 验证模型文件是否存在
