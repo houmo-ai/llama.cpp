@@ -6,7 +6,7 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
-
+#include "houmo-memory.h"
 #include <cinttypes>
 #include <fstream>
 #include <cstring>
@@ -211,6 +211,10 @@ llama_context::llama_context(
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
+    }
+    if (hparams.is_hmm) {
+        // FIXME: @guoxing.xu. 空实现
+        memory = std::make_unique<houmo_memory_i>();
     }
 
     // init backends
