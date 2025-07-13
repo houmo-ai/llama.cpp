@@ -580,6 +580,9 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         set_source_files_properties(${GGML_KLEIDIAI_SOURCES} PROPERTIES COMPILE_OPTIONS "${PRIVATE_ARCH_FLAGS}")
         list(APPEND GGML_CPU_SOURCES ${GGML_KLEIDIAI_SOURCES})
     endif()
+    # 移除特定架构选项，使用通用优化
+    set(ARCH_FLAGS "-mtune=generic")
+    set(ARCH_DEFINITIONS "")
 
     message(STATUS "Adding CPU backend variant ${GGML_CPU_NAME}: ${ARCH_FLAGS} ${ARCH_DEFINITIONS}")
     target_sources(${GGML_CPU_NAME} PRIVATE ${GGML_CPU_SOURCES})
