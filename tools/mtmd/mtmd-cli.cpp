@@ -202,7 +202,7 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg, bool add_
     tmpl_inputs.add_generation_prompt = true;
     tmpl_inputs.use_jinja = false; // jinja is buggy here
     auto formatted_chat = common_chat_templates_apply(ctx.tmpls.get(), tmpl_inputs);
-    LOG_DBG("formatted_chat.prompt: %s\n", formatted_chat.prompt.c_str());
+    LOG("formatted_chat.prompt: %s\n", formatted_chat.prompt.c_str());
 
     mtmd_input_text text;
     text.text          = formatted_chat.prompt.c_str();
@@ -213,6 +213,7 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg, bool add_
 
     mtmd::input_chunks chunks(mtmd_input_chunks_init());
     auto bitmaps_c_ptr = ctx.bitmaps.c_ptr();
+    LOG("Before tokenization: %s\n", text.text);
     int32_t res = mtmd_tokenize(ctx.ctx_vision.get(),
                         chunks.ptr.get(), // output
                         &text, // text
@@ -293,6 +294,7 @@ int main(int argc, char ** argv) {
         if (params.prompt.find(mtmd_default_marker()) == std::string::npos) {
             for (size_t i = 0; i < params.image.size(); i++) {
                 params.prompt += mtmd_default_marker();
+                LOG_INF("====%s\n", params.prompt.c_str());
             }
         }
         common_chat_msg msg;

@@ -1,100 +1,16 @@
 #include "houmo-llmodel.h"
-
+#include "houmo-vllmodel.h"
+#include "ggml.h"
+#include "gguf.h"
+#include "llama-batch.h"
+#include "llama-impl.h"
+#include "tcim/tcim_runtime.h"
+#include "torch/torch.h"
+#include <fstream>
 #include <map>
 #include <regex>
 #include <string>
 #include <vector>
-#include <fstream>
-#include "llama-batch.h"
-#include "tcim/tcim_runtime.h"
-#include "torch/torch.h"
-#include "ggml.h"
-#include "gguf.h"
-#include "llama-impl.h"
-
-struct kv_cache_item {
-    std::vector<tcim::Tensor> tensors;
-    std::vector<std::string> names;
-    int seq_id = 0;
-};
-/**
- * @brief HouMoLLModel is the base class for HouMo model.
- * @details It contains the common interface and data members for HouMo model
- * inference. Derived classes will implement specific behavior for single-card
- * and dual-card models.
- */
-class HouMoLLModel::Impl {
-  public:
-  Impl() = default;
-    virtual ~Impl() = default;
-
-    virtual bool houmo_load(const std::string &file_name) = 0;
-    virtual void houmo_init(int seq_max = 4) = 0;
-    virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
-                              float *logits) = 0;
-    virtual int houmo_decode(std::vector<llama_token> &batches,
-                             std::vector<int> &seq_ids,
-                             std::vector<float *> logits) = 0;
-
-    int n_decode_batch() const { return n_decode_batch_; }
-    int n_prefill_batch() const { return n_prefill_batch_; }
-    uint32_t n_context_length() const { return context_length_;}
-
-  protected:
-    void
-    prefill_input_init(std::shared_ptr<tcim::Module> prefill_model,
-                       std::map<std::string, tcim::Tensor> &prefill_input_map);
-    void
-    prefill_output_init(std::shared_ptr<tcim::Module> prefill_model,
-                        std::map<std::string, tcim::Tensor> &prefill_output_map,
-                        std::vector<std::string> &prefill_output_names);
-    void
-    decode_input_init(std::shared_ptr<tcim::Module> decode_model,
-                      std::map<std::string, tcim::Tensor> &decode_input_map);
-    void
-    decode_output_init(std::shared_ptr<tcim::Module> decode_model,
-                       std::map<std::string, tcim::Tensor> &decode_output_map,
-                       std::vector<std::string> &decode_output_names);
-    void fill_parameters(struct gguf_context *ctx);
-  protected:
-    int prefill_length_ = 256;
-    int context_length_ = 4096;
-    std::map<int, int32_t> decode_valid_length_;
-    int n_blocks_ = 28;
-    int64_t n_embd_ = 3584;
-    int64_t n_vocab_ = 30522;
-    int n_prefill_batch_ = 1;
-    int n_decode_batch_ = 1;
-    torch::nn::Embedding embedding_ = nullptr;
-    std::map<std::string, tcim::Tensor> prefill_input_map_;
-    std::map<std::string, tcim::Tensor> prefill_output_map_;
-    std::map<std::string, tcim::Tensor> decode_input_map_;
-    std::map<std::string, tcim::Tensor> decode_output_map_;
-    std::vector<std::string> decode_output_names_;
-    std::vector<std::string> prefill_output_names_;
-
-    std::map<int, kv_cache_item> kv_cache_;
-    int need_set_kv_cache_ = 0; // 0: no need, 1: need
-    std::string kGeneralArch = "general.architecture";
-    std::string kEmbeddingLengthEx = ".embedding_length";
-    std::string kBlockCountEx = ".block_count";
-    bool xh1_ = true;
-};
-// 封装数据类型无关的操作
-template <typename T>
-void SetInputData(tcim::Tensor& tensor, int batch_size, int value) {
-    std::vector<T> data_vec(batch_size, value);
-    tensor.Buffer().CopyFromHost(
-        data_vec.data(), tensor.MemSize());
-}
-template <typename T>
-void SetInputData(tcim::Tensor &tensor, std::vector<int32_t> &int32_vec) {
-    std::vector<T> data_vec;
-    for (auto val: int32_vec) {
-        data_vec.push_back(static_cast<T>(val));
-    }
-    tensor.Buffer().CopyFromHost(data_vec.data(), tensor.MemSize());
-}
 /**
  * @brief HouMoSingleCardModel is the derived class for single-card HouMo model.
  * @details 试用一张卡可以加载整个模型，不需要拆分模型。
@@ -142,7 +58,7 @@ class HouMoDualCardModel : public HouMoLLModel::Impl {
     std::shared_ptr<tcim::Module> decode_model_card1_;
     std::vector<std::string> decode_inner_output_names_;
     std::vector<std::string> prefill_inner_output_names_;
-    int kSeqMax = 2;     // maximum sequence number for dual-card model
+    int kSeqMax = 2;        // maximum sequence number for dual-card model
     size_t split_size_ = 0; // split size for kv cache
 };
 
@@ -153,24 +69,45 @@ void HouMoLLModel::Impl::prefill_input_init(
     for (size_t idx = 0; idx < input_num; idx++) {
         auto input_name = prefill_model->GetInputName(idx);
         LLAMA_LOG_DEBUG("%s: prefill input_name: %s\n", __func__,
-                       input_name.c_str());
+                        input_name.c_str());
     }
-    for (size_t idx = 0; idx < 3; idx++) {
+    // only for text model
+    input_num = 3;
+    if (model_type_ == 1) {
+        input_num = 6;
+    }
+    for (size_t idx = 0; idx < input_num; idx++) {
         auto input_name = prefill_model->GetInputName(idx);
         LLAMA_LOG_INFO("%s: prefill input_name: %s\n", __func__,
                        input_name.c_str());
         auto input_info =
             prefill_model->GetInputInfo(input_name).AsContiguous();
+        auto shape = input_info.Shape();
+        for (int i = 0; i < shape.size(); i++) {
+            LLAMA_LOG_INFO("%s: prefill input_shape: %d, type = %d\n", __func__,
+                           shape[i], input_info.DataType());
+        }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
         prefill_input_map.insert(
             std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
     }
     // 填充prefill_length_ & n_prefill_batch_
-    n_prefill_batch_ = prefill_input_map_[prefill_model->GetInputName(1)].Info().Shape()[0];
-    prefill_length_ = (prefill_input_map_[prefill_model->GetInputName(0)].Info().Shape()[0] *
-                       prefill_input_map_[prefill_model->GetInputName(0)].Info().Shape()[1]) /
-                      n_prefill_batch_;
-    xh1_ = !(prefill_input_map_[prefill_model->GetInputName(0)].Info().DataType() == tcim::DataType::FLOAT16);
+    if (model_type_ == 1) {
+        n_prefill_batch_ = prefill_input_map_[prefill_model->GetInputName(4)]
+                               .Info()
+                               .Shape()[0];
+    } else {
+        n_prefill_batch_ = prefill_input_map_[prefill_model->GetInputName(1)]
+                               .Info()
+                               .Shape()[0];
+    }
+    prefill_length_ =
+        (prefill_input_map_[prefill_model->GetInputName(0)].Info().Shape()[0] *
+         prefill_input_map_[prefill_model->GetInputName(0)].Info().Shape()[1]) /
+        n_prefill_batch_;
+    xh1_ = !(
+        prefill_input_map_[prefill_model->GetInputName(0)].Info().DataType() ==
+        tcim::DataType::FLOAT16);
 }
 
 void HouMoLLModel::Impl::prefill_output_init(
@@ -199,30 +136,47 @@ void HouMoLLModel::Impl::decode_input_init(
     for (size_t idx = 0; idx < input_num_decode; idx++) {
         auto input_name = decode_model->GetInputName(idx);
         LLAMA_LOG_DEBUG("%s: decode_model input_name: %s\n", __func__,
-                       input_name.c_str());
+                        input_name.c_str());
     }
-    for (size_t idx = 0; idx < 3; idx++) {
+    // only for text model
+    input_num_decode = 3;
+    // for image model
+    if (model_type_ == 1) {
+        input_num_decode = 6;
+    }
+    for (size_t idx = 0; idx < input_num_decode; idx++) {
         auto input_name = decode_model->GetInputName(idx);
         LLAMA_LOG_INFO("%s: decode input_name: %s\n", __func__,
                        input_name.c_str());
         auto input_info = decode_model->GetInputInfo(input_name).AsContiguous();
+        auto shape = input_info.Shape();
+        for (int i = 0; i < shape.size(); i++) {
+            LLAMA_LOG_INFO("%s: decode input_shape: %d\n", __func__, shape[i]);
+        }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
         decode_input_map.insert(
             std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
     }
-    // 填充n_decode_batch_
-    n_decode_batch_ = decode_input_map[decode_model->GetInputName(1)].Info().Shape()[0];
 
     // set current_length of decode input
-    auto decode_current_length = decode_input_map.at(decode_model->GetInputName(2));
+    int32_t current_length_index = 2;
+    if (model_type_ == 1) {
+        current_length_index = 5;
+    }
+    n_decode_batch_ = decode_input_map_[decode_model->GetInputName(1)]
+                               .Info()
+                               .Shape()[0];
+
+    auto decode_current_length =
+        decode_input_map.at(decode_model->GetInputName(current_length_index));
     if (decode_current_length.Info().DataType() == tcim::DataType::INT16) {
         SetInputData<int16_t>(decode_current_length, n_decode_batch_, 1);
     } else if (decode_current_length.Info().DataType() ==
                tcim::DataType::INT32) {
         SetInputData<int32_t>(decode_current_length, n_decode_batch_, 1);
     }
-    decode_model->SetInput(decode_model->GetInputName(2),
-                            decode_current_length);
+    decode_model->SetInput(decode_model->GetInputName(current_length_index),
+                           decode_current_length);
 }
 
 void HouMoLLModel::Impl::decode_output_init(
@@ -270,8 +224,9 @@ void HouMoLLModel::Impl::fill_parameters(struct gguf_context *ctx) {
     n_embd_ = gguf_get_val_u32(ctx, key_id);
 }
 
-void static read_tensor_to_buffer(const std::string &file_name, size_t offset,
-                                 size_t size, std::vector<char> &buffer) {
+void HouMoLLModel::Impl::read_tensor_to_buffer(const std::string &file_name,
+                                               size_t offset, size_t size,
+                                               std::vector<char> &buffer) {
     // 打开输入文件
     std::ifstream input_file(file_name, std::ios::binary);
     if (!input_file.is_open()) {
@@ -337,7 +292,8 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
         const char *name = gguf_get_tensor_name(ctx, i);
         LLAMA_LOG_INFO("tensor[%d]: name = %s\n", i, name);
         const size_t size = gguf_get_tensor_size(ctx, i);
-        size_t offset = gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
+        size_t offset =
+            gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         // auto *tensor = ggml_get_tensor(ctx_data, name);
         std::vector<char> buffer(size);
         read_tensor_to_buffer(file_name, offset, size, buffer);
@@ -421,18 +377,6 @@ void HouMoSingleCardModel::houmo_init(int seq_max) {
             std::string k_cache_history_sum_name =
                 "model_layers_" + std::to_string(idx) +
                 "_self_attn_kcache_history_sum";
-            // FIXME: FOR XH2 temporary, will removed later.
-            if (!xh1_ && prefill_model_->GetInputName(4).find(
-                             "past_key_cache") != std::string::npos) {
-                k_cache_name =
-                    "past_key_cache_" + std::to_string(idx) + ".hmcc.format";
-                v_cache_name =
-                    "past_value_cache_" + std::to_string(idx) + ".hmcc.format";
-            } else if (!xh1_ &&
-                       prefill_model_->GetInputName(4).find(".hmcc.format") != std::string::npos) {
-                k_cache_name += ".hmcc.format";
-                v_cache_name += ".hmcc.format";
-            }
             item.names.push_back(k_cache_name);
             item.names.push_back(v_cache_name);
             if (has_history_sum) {
@@ -539,26 +483,41 @@ int HouMoSingleCardModel::houmo_prefill(std::vector<llama_token> &tokens,
             {(int64_t)(prefill_length_ - effective_length), n_embd_},
             inputs_embeds.dtype());
         auto padded_embeds = torch::cat({inputs_embeds, pad_embeds});
-        auto input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
-        padded_embeds =
-            padded_embeds.view(input_data.Info().Shape());
-        input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<at::Half>(),
-                                         input_data.MemSize());
+        auto input_data =
+            prefill_input_map_.at(prefill_model_->GetInputName(0));
+        padded_embeds = padded_embeds.view(input_data.Info().Shape());
+        // 区分一下更健壮的写法
+        if (xh1_) {
+            padded_embeds = padded_embeds.to(torch::kInt16);
+            input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<int16_t>(),
+                                            input_data.MemSize());
+        } else {
+            input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<at::Half>(),
+                                            input_data.MemSize());
+        }
 
-        auto prefill_valid_length = prefill_input_map_.at(prefill_model_->GetInputName(1));
-        auto prefill_current_length = prefill_input_map_.at(prefill_model_->GetInputName(2));
-
+        auto prefill_valid_length =
+            prefill_input_map_.at(prefill_model_->GetInputName(1));
+        auto prefill_current_length =
+            prefill_input_map_.at(prefill_model_->GetInputName(2));
         if (prefill_valid_length.Info().DataType() == tcim::DataType::INT16) {
-            SetInputData<int16_t>(prefill_valid_length, n_prefill_batch_, valid_length);
-            SetInputData<int16_t>(prefill_current_length, n_prefill_batch_, current_length);
-        } else if (prefill_valid_length.Info().DataType() == tcim::DataType::INT32) {
-            SetInputData<int32_t>(prefill_valid_length, n_prefill_batch_, valid_length);
-            SetInputData<int32_t>(prefill_current_length, n_prefill_batch_, current_length);
+            SetInputData<int16_t>(prefill_valid_length, n_prefill_batch_,
+                                  valid_length);
+            SetInputData<int16_t>(prefill_current_length, n_prefill_batch_,
+                                  current_length);
+        } else if (prefill_valid_length.Info().DataType() ==
+                   tcim::DataType::INT32) {
+            SetInputData<int32_t>(prefill_valid_length, n_prefill_batch_,
+                                  valid_length);
+            SetInputData<int32_t>(prefill_current_length, n_prefill_batch_,
+                                  current_length);
         }
 
         prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
-        prefill_model_->SetInput(prefill_model_->GetInputName(1), prefill_valid_length);
-        prefill_model_->SetInput(prefill_model_->GetInputName(2), prefill_current_length);
+        prefill_model_->SetInput(prefill_model_->GetInputName(1),
+                                 prefill_valid_length);
+        prefill_model_->SetInput(prefill_model_->GetInputName(2),
+                                 prefill_current_length);
         auto &item = kv_cache_[seq_id];
         assert(item.seq_id == seq_id);
         for (size_t idx = 0; idx < item.tensors.size(); idx++) {
@@ -625,8 +584,15 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
         }
         int16_t *input_data_ptr =
             decode_input_data.data() + batch_id * embedding_dim;
-        memcpy(input_data_ptr, input_emd[i][0].data_ptr<at::Half>(),
-            embedding_dim * sizeof(at::Half));
+        // 根据目标类型拷贝更健壮
+        if (xh1_) {
+            input_emd = input_emd.to(torch::kInt16);
+            memcpy(input_data_ptr, input_emd[i][0].data_ptr<int16_t>(),
+                embedding_dim * sizeof(int16_t));
+        } else {
+            memcpy(input_data_ptr, input_emd[i][0].data_ptr<at::Half>(),
+                embedding_dim * sizeof(at::Half));
+        }
     }
 
     input_data.Buffer().CopyFromHost(decode_input_data.data(),
@@ -640,7 +606,8 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
             batch_id = 0;
         valid_length_vec[batch_id] = decode_valid_length_[seq_ids[k]];
     }
-    auto decode_valid_length = decode_input_map_.at(decode_model_->GetInputName(1));
+    auto decode_valid_length =
+        decode_input_map_.at(decode_model_->GetInputName(1));
     if (decode_valid_length.Info().DataType() == tcim::DataType::INT16) {
         SetInputData<int16_t>(decode_valid_length, valid_length_vec);
     } else if (decode_valid_length.Info().DataType() == tcim::DataType::INT32) {
@@ -648,7 +615,8 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
     }
 
     decode_model_->SetInput(decode_model_->GetInputName(0), input_data);
-    decode_model_->SetInput(decode_model_->GetInputName(1), decode_valid_length);
+    decode_model_->SetInput(decode_model_->GetInputName(1),
+                            decode_valid_length);
     if (need_set_kv_cache_ != 0) {
         for (auto seq_id : seq_ids) {
             auto &item = kv_cache_[seq_id];
@@ -687,7 +655,7 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
 }
 static std::vector<int> parse_deviceids() {
     std::vector<int> deviceIds;
-    const char* device_id_str = std::getenv("HOUMO_DEVICE_ID");
+    const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
 
     if (device_id_str == nullptr) {
         deviceIds.push_back(0);
@@ -703,9 +671,9 @@ static std::vector<int> parse_deviceids() {
         try {
             // 转换为整数并添加到列表
             deviceIds.push_back(std::stoi(token));
-        } catch (const std::invalid_argument&) {
+        } catch (const std::invalid_argument &) {
             std::cerr << "Invalid device ID: " << token << std::endl;
-        } catch (const std::out_of_range&) {
+        } catch (const std::out_of_range &) {
             std::cerr << "Device ID out of range: " << token << std::endl;
         }
     }
@@ -724,7 +692,8 @@ bool HouMoDualCardModel::houmo_load(const std::string &file_name) {
     // 从gguf文件中加载hmmodels
     auto device_ids = parse_deviceids();
     if (device_ids.size() != 2) {
-        LLAMA_LOG_ERROR("HOUMO_DEVICE_ID should contain exactly two device IDs.\n");
+        LLAMA_LOG_ERROR(
+            "HOUMO_DEVICE_ID should contain exactly two device IDs.\n");
         return false;
     }
     auto wm0 = tcim::Module::WeightManager::CreateWeightManager(device_ids[0]);
@@ -999,10 +968,6 @@ int HouMoDualCardModel::houmo_prefill(std::vector<llama_token> &tokens,
         auto input_data = prefill_input_map_.at("input_1");
         padded_embeds =
             padded_embeds.view(input_data.Info().Shape()).to(torch::kInt16);
-        // for (int kk = 0; kk < input_data.Info().Shape().size(); kk++) {
-        //     LLAMA_LOG_INFO("input_data shape[%d] = %ld\n", kk,
-        //                    input_data.Info().Shape()[kk]);
-        // }
         input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<int16_t>(),
                                          padded_embeds.numel() *
                                              sizeof(int16_t));
@@ -1026,8 +991,6 @@ int HouMoDualCardModel::houmo_prefill(std::vector<llama_token> &tokens,
         assert(item.seq_id == seq_id);
         for (size_t idx = 0; idx < split_size_; idx++) {
             std::string name = item.names[idx];
-            // std::cout <<" prefill_model_card0_ set input name = " << name <<
-            // std::endl;
             auto tensor = item.tensors[idx];
             prefill_model_card0_->SetInput(name, tensor);
         }
@@ -1044,8 +1007,6 @@ int HouMoDualCardModel::houmo_prefill(std::vector<llama_token> &tokens,
         for (size_t idx = split_size_; idx < item.names.size(); idx++) {
             std::string name = item.names[idx];
             auto tensor = item.tensors[idx];
-            // std::cout <<" prefill_model_card1_ set input name = " << name <<
-            // std::endl;
             prefill_model_card1_->SetInput(name, tensor);
         }
         prefill_model_card1_->Run();
@@ -1205,9 +1166,19 @@ bool HouMoLLModel::houmo_load(const std::string &file_name) {
     };
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
     const int n_tensors = gguf_get_n_tensors(ctx);
+    auto key_id = gguf_find_key(ctx, "general.architecture");
+    if (key_id < 0) {
+        return false;
+    }
+    std::string arch = gguf_get_val_str(ctx, key_id);
+
     if (impl_ == nullptr) {
         if (n_tensors == 3) {
-            impl_ = new HouMoSingleCardModel();
+            if (arch.find("vl") != std::string::npos) {
+                impl_ = new HouMoVLLModel();
+            } else {
+                impl_ = new HouMoSingleCardModel();
+            }
         } else {
             impl_ = new HouMoDualCardModel();
         }
@@ -1234,3 +1205,8 @@ int HouMoLLModel::n_decode_batch() { return impl_->n_decode_batch(); }
 int HouMoLLModel::n_prefill_batch() { return impl_->n_prefill_batch(); }
 
 uint32_t HouMoLLModel::n_context_length() { return impl_->n_context_length(); }
+int HouMoLLModel::houmo_prefill(const float *embeddings, int n_tokens,
+                                int seq_id, float *logits) {
+
+    return impl_->houmo_prefill(embeddings, n_tokens, seq_id, logits);
+}

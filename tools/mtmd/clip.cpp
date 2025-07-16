@@ -171,7 +171,7 @@ struct clip_hparams {
     int32_t n_head;
     int32_t n_layer;
     int32_t proj_scale_factor = 0; // idefics3
-
+    bool is_hmm = false;
     float image_mean[3];
     float image_std[3];
 
@@ -2094,6 +2094,8 @@ struct clip_model_loader {
 
         const bool is_vision = model.modality == CLIP_MODALITY_VISION;
         const bool is_audio  = model.modality == CLIP_MODALITY_AUDIO;
+        // 获取is_hmm 表示
+        get_bool("is_hmm", hparams.is_hmm, false);
 
         // other hparams
         {
@@ -2708,8 +2710,10 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
         if (loader.has_vision) {
             ctx_vision = new clip_ctx(ctx_params);
             loader.load_hparams(ctx_vision->model, CLIP_MODALITY_VISION);
-            loader.load_tensors(*ctx_vision);
-            loader.alloc_compute_meta(*ctx_vision);
+            if (!clip_is_hmm(ctx_vision)) {
+                loader.load_tensors(*ctx_vision);
+                loader.alloc_compute_meta(*ctx_vision);
+            }
         }
 
         if (loader.has_audio) {
@@ -3343,7 +3347,6 @@ bool clip_image_preprocess(struct clip_ctx * ctx, const clip_image_u8 * img, str
         auto patch_size = params.patch_size * 2;
         auto new_size = image_manipulation::calc_size_preserved_ratio(original_size, patch_size, params.image_size);
         image_manipulation::bicubic_resize(*img, resized, new_size.width, new_size.height);
-
         clip_image_f32_ptr img_f32(clip_image_f32_init());
         // clip_image_f32_ptr res(clip_image_f32_init());
         normalize_image_u8_to_f32(resized, *img_f32, params.image_mean, params.image_std);
@@ -3678,6 +3681,9 @@ bool clip_image_encode(struct clip_ctx * ctx, const int n_threads, clip_image_f3
 bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_image_f32_batch * imgs_c_ptr, float * vec) {
     const clip_image_f32_batch & imgs = *imgs_c_ptr;
     int batch_size = imgs.entries.size();
+    LOG_DBG ("===batch_size = %d\n", batch_size);
+    LOG_DBG ("===%d, %d\n", imgs.entries[0]->nx, imgs.entries[0]->ny);
+    LOG_DBG ("===%d, %d\n", imgs.grid_x, imgs.grid_y);
 
     // TODO @ngxson : implement batch size > 1 as a loop
     //                we don't need true batching support because the cgraph will gonna be big anyway
@@ -4071,6 +4077,8 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
             return ctx->model.mm_model_mlp_3_w->ne[1];
         case PROJECTOR_TYPE_QWEN2VL:
         case PROJECTOR_TYPE_QWEN25VL:
+            if (clip_is_hmm(ctx))
+                return ctx->model.hparams.projection_dim;
             return ctx->model.mm_1_b->ne[0];
         case PROJECTOR_TYPE_GEMMA3:
             return ctx->model.mm_input_proj_w->ne[0];
@@ -4137,6 +4145,9 @@ bool clip_encode_float_image (struct clip_ctx * ctx, int n_threads, float * img,
     clip_img.ny = h;
     clip_image_encode(ctx, n_threads, &clip_img, vec);
     return true;
+}
+bool clip_is_hmm(const struct clip_ctx * ctx) {
+    return ctx->model.hparams.is_hmm;
 }
 
 //

@@ -12,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <iostream>
 
 void llama_context::houmo_init(int32_t seq_max) {
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
@@ -923,7 +924,25 @@ int llama_context::houmo_decode(const llama_batch &batch) {
     LLAMA_LOG_DEBUG("****batch.n_tokens: %d\n", batch.n_tokens);
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
     const int32_t n_vocab = model.vocab.n_tokens();
-
+    // 计算batch 是否要输出logits
+    bool output_logits_flag = false;
+    if (batch.logits == nullptr) {
+        output_logits_flag = true;
+    } else {
+        for (int i = 0; i < batch.n_tokens; i++) {
+            if (batch.logits && batch.logits[i] != 0) {
+                output_logits_flag = true;
+                break;
+            }
+        }
+    }
+    // 输入的是数据，当前只支持prefill阶段是embdding
+    if (batch.embd != nullptr) {
+        int seq_id = 0;
+        if (batch.seq_id != nullptr)
+            seq_id = batch.seq_id[0][0];
+        return hm_llmodel->houmo_prefill(batch.embd, batch.n_tokens, seq_id, nullptr);
+    }
     // 记录每个序列
     int n_parallel = 1;
     std::map<int, std::vector<llama_token>> seqid_token_map;
@@ -951,7 +970,6 @@ int llama_context::houmo_decode(const llama_batch &batch) {
                 seqid_token_map[seq_id].push_back(batch.token[j]);
                 // 记录不同序列的logits位置
                 if (batch.logits && batch.logits[j] == 1) {
-                    // std::cout << "set output_ids[" << j << "] = " << pos << std::endl;
                     output_ids[j] = pos;
                     seqid_pos_map[seq_id] = pos;
                     pos++;
@@ -987,26 +1005,34 @@ int llama_context::houmo_decode(const llama_batch &batch) {
             logits_ptrs.push_back(logits + seqid_pos_map[seq] * n_vocab);
         }
         hm_llmodel->houmo_decode(decode_batch, seq_id, logits_ptrs);
-        // for debug...
-        // auto prefill_output_opts =
-        // torch::TensorOptions().dtype(torch::kFloat); auto
-        // prefill_output_tensor = torch::from_blob(logits_ptrs[0], {n_vocab},
-        // prefill_output_opts).clone(); auto selected_output =
-        // torch::argmax(prefill_output_tensor).to(torch::kInt32); auto
-        // generate_token = *(int32_t *)selected_output.data_ptr<int32_t>();
-        // std::cout << "generate_token: " << generate_token << ","
-        //           << common_token_to_piece(
-        //                 & model.vocab, generate_token, true)
-        //           << std::endl;
     }
 
     // 再计算需要prefill的seq
     for (auto &[k, v] : seqid_token_map) {
         // prefill阶段
         if (v.size() > 1) {
-            // std::cout <<k <<"prefill seq_id pos " << seqid_pos_map[k] << std::endl;
-            auto logits_out = logits + seqid_pos_map[k] * n_vocab;
+            float * logits_out = nullptr;
+            if (output_logits_flag == true)
+                logits_out = logits + seqid_pos_map[k] * n_vocab;            
             hm_llmodel->houmo_prefill(v, k, logits_out);
+
+
+            // for debug...
+            // if (logits_out != nullptr) {
+            //     auto prefill_output_opts =
+            //     torch::TensorOptions().dtype(torch::kFloat); 
+            //     auto
+            //     prefill_output_tensor = torch::from_blob(logits_out, {n_vocab},
+            //     prefill_output_opts).clone(); 
+            //     auto selected_output =
+            //     torch::argmax(prefill_output_tensor).to(torch::kInt32); 
+            //     auto
+            //     generate_token = *(int32_t *)selected_output.data_ptr<int32_t>();
+            //     std::cout << "generate_token: " << generate_token << ","
+            //             << common_token_to_piece(
+            //                     & model.vocab, generate_token, true)
+            //             << std::endl;
+            // }
         }
     }
     n_outputs = n_outputs_all;

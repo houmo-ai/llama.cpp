@@ -2,7 +2,7 @@
 #include "clip-impl.h"
 #include "mtmd.h"
 #include "mtmd-audio.h"
-
+#include "houmo_vision.h"
 #include "llama.h"
 
 #include <algorithm>
@@ -95,6 +95,7 @@ mtmd_context_params mtmd_context_params_default() {
 }
 
 struct mtmd_context {
+    HoumoVision * hm_vision = nullptr; // for HMM-based vision models
     struct clip_ctx * ctx_v; // vision
     struct clip_ctx * ctx_a; // audio
     const struct llama_model * text_model;
@@ -157,6 +158,12 @@ struct mtmd_context {
         ctx_a = res.ctx_a;
         if (!ctx_v && !ctx_a) {
             throw std::runtime_error(string_format("Failed to load CLIP model from %s\n", mmproj_fname));
+        }
+        if (clip_is_hmm(ctx_v)) {
+            hm_vision = new HoumoVision();
+            if (!hm_vision->init(mmproj_fname))
+                throw std::runtime_error(string_format(
+                    "Failed to load HMM model from %s\n", mmproj_fname));
         }
 
         // if both vision and audio mmproj are present, we need to validate their n_embd
@@ -487,6 +494,43 @@ struct mtmd_tokenizer {
             img_u8->buf.resize(bitmap->data.size());
             std::memcpy(img_u8->buf.data(), bitmap->data.data(), img_u8->nx * img_u8->ny * 3);
 
+            // TODO: @guoxing.xu 修改成后摩逻辑,后摩的图片预处理在模型中做。
+            if (clip_is_hmm(ctx->ctx_v)) {
+                // just resize.
+                clip_image_f32_ptr img_f32(clip_image_f32_init());
+                ctx->hm_vision->image_resize(img_u8, img_f32);
+
+                mtmd_image_tokens_ptr image_tokens(new mtmd_image_tokens);
+                if (ctx->use_mrope) {
+                    // for Qwen2VL, we need this information for M-RoPE decoding positions
+                    image_tokens->nx = clip_n_output_tokens_x(ctx->ctx_v, img_f32.get());
+                    image_tokens->ny = clip_n_output_tokens_y(ctx->ctx_v, img_f32.get());
+                    image_tokens->use_mrope_pos = true;
+                } else {
+                  // FIXME: other models not support yet.
+                    LOG_ERR("HMM model not support yet.\n");
+                    return 2;
+                }
+                image_tokens->batch_f32.entries.push_back(std::move(img_f32));
+                image_tokens->id = bitmap->id; // optional
+
+                LOG_DBG("image_tokens->nx = %d\n", image_tokens->nx);
+                LOG_DBG("image_tokens->ny = %d\n", image_tokens->ny);
+                LOG_DBG("batch_f32 size = %d\n", (int)image_tokens->batch_f32.entries.size());
+
+                mtmd_input_chunk chunk{
+                    MTMD_INPUT_CHUNK_TYPE_IMAGE,
+                    {}, // text tokens
+                    std::move(image_tokens),
+                    nullptr, // audio tokens
+                };
+                cur.entries.emplace_back(std::move(chunk));
+
+                if (!ctx->img_end.empty()) {
+                    add_text(ctx->img_end, true); // add image end token
+                }
+                return 0;
+            }
             // preprocess image
             clip_image_f32_batch batch_f32;
             bool ok = clip_image_preprocess(ctx->ctx_v, img_u8.get(), &batch_f32);
@@ -775,7 +819,6 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
     int n_mmproj_embd = clip_n_mmproj_embd(ctx_clip);
     ctx->image_embd_v.resize(image_tokens->n_tokens() * n_mmproj_embd);
     bool ok = false;
-
     if (clip_is_llava(ctx_clip) || clip_is_minicpmv(ctx_clip) || clip_is_glm(ctx_clip)) {
         // TODO @ngxson : llava does not support batched encoding ; this should be fixed inside clip_image_batch_encode()
         const auto & entries = image_tokens->batch_f32.entries;
@@ -788,6 +831,12 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
                 ctx->image_embd_v.data() + i*n_mmproj_embd*n_tokens_per_image);
         }
     } else {
+        if (clip_is_hmm(ctx->ctx_v)) {
+            // FIXME: 只处理第一张图片
+            const clip_image_f32_ptr & imgs = image_tokens->batch_f32.entries[0];
+            return ctx->hm_vision->encoding(imgs->buf, ctx->image_embd_v) ? 0
+                                                                          : 1;
+        }
         ok = clip_image_batch_encode(
             ctx_clip,
             ctx->n_threads,

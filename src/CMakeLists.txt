@@ -36,6 +36,7 @@ add_library(llama
             unicode.cpp
             unicode.h
             houmo-llmodel.cpp
+            houmo-vllmodel.cpp
             )
 target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include ../common ${HOUMO_TCIM_RUNTIME_PATH}/include)

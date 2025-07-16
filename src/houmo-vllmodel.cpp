@@ -1,0 +1,504 @@
+#include "houmo-vllmodel.h"
+#include "ggml.h"
+#include "gguf.h"
+#include "llama-impl.h"
+#include <regex>
+HouMoVLLModel::HouMoVLLModel() : HouMoLLModel::Impl() {
+    model_type_ = 1; // 1: image
+    offset_embedding_id_ = 0;
+}
+bool HouMoVLLModel::houmo_load(const std::string &file_name) {
+
+    struct ggml_context *ctx_data = NULL;
+    struct gguf_init_params params = {
+        /*.no_alloc = */ true,
+        /*.ctx      = */ &ctx_data,
+    };
+    struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
+    fill_parameters(ctx);
+    LLAMA_LOG_INFO("after gguf_init_from_file\n");
+    // 从gguf文件中加载hmmodels
+    const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
+    int device_id = 0;
+    if (device_id_str != nullptr) {
+        device_id = std::stoi(device_id_str);
+    }
+    auto wm = tcim::Module::WeightManager::CreateWeightManager(device_id);
+    auto option_decoder = tcim::Module::Option(wm);
+
+    std::vector<std::string> dummy_tensor_names;
+    // 防止更高效使用内存，这个将prefill 设置为dummy_tensor_names
+    for (int idx = 0; idx < n_blocks_; idx++) {
+        std::string k_cache_name =
+            "model_layers_" + std::to_string(idx) + "_self_attn_kcache_input";
+        std::string v_cache_name =
+            "model_layers_" + std::to_string(idx) + "_self_attn_vcache_input";
+        dummy_tensor_names.push_back(k_cache_name);
+        dummy_tensor_names.push_back(v_cache_name);
+    }
+    auto option_prefill = tcim::Module::Option(wm);
+    option_prefill.SetDummyTensors(dummy_tensor_names);
+    const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
+    const std::regex kDecodePattern("^decoder(_\\d+)?\\.hmm$");
+    // 1. 加载 embedding
+    const int n_tensors = gguf_get_n_tensors(ctx);
+    for (int i = 0; i < n_tensors; ++i) {
+        const char *name = gguf_get_tensor_name(ctx, i);
+        LLAMA_LOG_INFO("tensor[%d]: name = %s\n", i, name);
+        const size_t size = gguf_get_tensor_size(ctx, i);
+        size_t offset =
+            gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
+        // auto *tensor = ggml_get_tensor(ctx_data, name);
+        std::vector<char> buffer(size);
+        read_tensor_to_buffer(file_name, offset, size, buffer);
+        if (strncmp(name, "quant_embedding.pt", strlen("quant_embedding.pt")) ==
+            0) {
+            torch::Tensor input;
+            try {
+                std::istringstream stream(
+                    std::string((char *)buffer.data(), size));
+                torch::load(input, stream);
+                input = input.view({-1, n_embd_});
+                embedding_ = torch::nn::Embedding::from_pretrained(input);
+            } catch (const c10::Error &e) {
+                LLAMA_LOG_ERROR("%s: failed to load quant_embedding.pt %s\n",
+                                __func__, e.what());
+                return false;
+            }
+
+        } else if (std::regex_match(name, kPrefillPattern)) {
+            // load prefill
+            prefill_model_ = std::make_shared<tcim::Module>();
+            auto status =
+                prefill_model_->LoadModel(buffer.data(), size, option_prefill);
+            if (status != tcim::Status::OK) {
+                LLAMA_LOG_ERROR("%s: failed to load prefill.hmm\n", __func__);
+                return false;
+            }
+            LLAMA_LOG_INFO("%s: succeed to load prefill.hmm\n", __func__);
+        } else if (std::regex_match(name, kDecodePattern)) {
+            // load decode
+            decode_model_ = std::make_shared<tcim::Module>();
+            auto status =
+                decode_model_->LoadModel(buffer.data(), size, option_decoder);
+            if (status != tcim::Status::OK) {
+                LLAMA_LOG_ERROR("%s: failed to load decode.hmm\n", __func__);
+                return false;
+            }
+            LLAMA_LOG_INFO("%s: succeed to load decode.hmm\n", __func__);
+        } else {
+            LLAMA_LOG_INFO("tensor[%d]: name = %s, size = %zu\n", i, name,
+                           size);
+            return false;
+        }
+    }
+    ggml_free(ctx_data);
+    gguf_free(ctx);
+    return true;
+}
+
+void HouMoVLLModel::houmo_init(int seq_max) {
+    // init prefill
+    prefill_input_init(prefill_model_, prefill_input_map_);
+    // 填充prefill 的output
+    prefill_output_init(prefill_model_, prefill_output_map_,
+                        prefill_output_names_);
+    // init decode
+    decode_input_init(decode_model_, decode_input_map_);
+    // 填充decode 的output
+    decode_output_init(decode_model_, decode_output_map_, decode_output_names_);
+    if (seq_max > 1) {
+        LLAMA_LOG_ERROR("%s: seq_max > 1 not supported, set seq_max to 1\n",
+                        __func__);
+        seq_max = 1;
+    }
+    int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
+    size = std::max(size, n_decode_batch_);
+    auto input_num_decode = decode_model_->GetInputNum();
+
+    for (int i = 0; i < size; i++) {
+        kv_cache_item item;
+        item.seq_id = i;
+        for (int idx = 0; idx < n_blocks_; idx++) {
+            std::string k_cache_name = "model_layers_" + std::to_string(idx) +
+                                       "_self_attn_kcache_input";
+            std::string v_cache_name = "model_layers_" + std::to_string(idx) +
+                                       "_self_attn_vcache_input";
+            item.names.push_back(k_cache_name);
+            item.names.push_back(v_cache_name);
+
+            if (n_decode_batch_ > 1) {
+                k_cache_name = k_cache_name + "_batch" + std::to_string(i);
+                v_cache_name = v_cache_name + "_batch" + std::to_string(i);
+            }
+            auto kcache = decode_model_->GetInput(k_cache_name);
+            auto vcache = decode_model_->GetInput(v_cache_name);
+            if (n_decode_batch_ > 1 || seq_max == 1) {
+                item.tensors.push_back(kcache);
+                item.tensors.push_back(vcache);
+            } else {
+                item.tensors.push_back(kcache.Clone());
+                item.tensors.push_back(vcache.Clone());
+                need_set_kv_cache_ = 1;
+            }
+            context_length_ = std::max(
+                kcache.Info().Shape()[kcache.Info().Shape().size() - 1],
+                kcache.Info().Shape()[kcache.Info().Shape().size() - 2]);
+        }
+        kv_cache_[i] = item;
+    }
+    input_embedding_ids_.resize(context_length_ * n_embd_, 0);
+    LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
+    LLAMA_LOG_INFO("prefill_length_ = %d\n context_length_ = %d\n "
+                   "n_blocks_ = %d\n n_embd_ = %ld\n n_prefill_batch_ = %d\n "
+                   "n_decode_batch_ = "
+                   "%d\n   kv_cache_size = %zu\n need_set_kv_cache_ = "
+                   "%d\n",
+                   prefill_length_, context_length_, n_blocks_, n_embd_,
+                   n_prefill_batch_, n_decode_batch_, kv_cache_.size(),
+                   need_set_kv_cache_);
+}
+
+int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
+                                 float *logits) {
+
+    LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
+                    seq_id, tokens.size());
+    size_t input_echo_len = tokens.size();
+    int16_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
+                                      static_cast<float>(prefill_length_));
+    int32_t current_length = 0;
+    // 先计算embedding.
+    torch::Tensor inputs_embeds;
+    auto opts = torch::TensorOptions().dtype(torch::kInt);
+    auto inp = torch::from_blob(tokens.data(),
+                                {int64_t(tokens.size())}, opts)
+                    .clone();
+    try {
+        inputs_embeds = embedding_->forward(inp);
+    } catch (const c10::Error &e) {
+        std::cerr << "error loading the model\n"
+                    << e.what_without_backtrace();
+        return -1;
+    }
+
+    // 1. 将半精度浮点转换为int16_t
+    auto inputs_embeds_int16 = inputs_embeds.to(torch::kInt16);
+    inputs_embeds_int16 = inputs_embeds_int16.view({-1, n_embd_});
+ 
+    // 缓存输入
+    memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
+           inputs_embeds_int16.data_ptr<int16_t>(),
+           tokens.size() * n_embd_ * sizeof(int16_t));
+    // for (int aa =0; aa < 200; aa++) {
+    //     std::cout << input_embedding_ids_[aa] << " ";
+    // }
+    offset_embedding_id_ += tokens.size();
+    update_position_ids(seq_id, tokens.size(), false);
+
+    // 计算所有embeddings
+    if (logits == nullptr) {
+        // 只缓存输入
+        LLAMA_LOG_INFO("%s: logits is nullptr, only cache input\n", __func__);
+        return 0;
+    }
+ 
+    input_echo_len = offset_embedding_id_;
+    prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
+    static_cast<float>(prefill_length_));
+
+    time_position_ids_.resize(prefill_loop_round * prefill_length_);
+    hight_position_ids_.resize(prefill_loop_round * prefill_length_);
+    width_position_ids_.resize(prefill_loop_round * prefill_length_);
+    int valid_length = 0;
+    // 计算prefill输出
+    for (int round = 0; round < prefill_loop_round; round++) {
+        valid_length = round * prefill_length_;
+        if (round == prefill_loop_round - 1) {
+            current_length = input_echo_len - round * prefill_length_;
+        } else {
+            current_length = prefill_length_;
+        }
+        auto input_data =
+            prefill_input_map_.at(prefill_model_->GetInputName(0));
+        input_data.Buffer().CopyFromHost(input_embedding_ids_.data() + round * prefill_length_ * n_embd_,
+                                         input_data.MemSize());
+        auto time_position_id =
+            prefill_input_map_.at(prefill_model_->GetInputName(1));
+        auto hight_position_id =
+            prefill_input_map_.at(prefill_model_->GetInputName(2));
+        auto width_position_id =
+            prefill_input_map_.at(prefill_model_->GetInputName(3));
+        auto prefill_valid_length =
+            prefill_input_map_.at(prefill_model_->GetInputName(4));
+        auto prefill_current_length =
+            prefill_input_map_.at(prefill_model_->GetInputName(5));
+        if (time_position_id.Info().DataType() == tcim::DataType::INT16) {
+            time_position_id.Buffer().CopyFromHost(time_position_ids_.data() +
+                                                       valid_length,
+                                                   time_position_id.MemSize());
+            hight_position_id.Buffer().CopyFromHost(
+                hight_position_ids_.data() + valid_length,
+                hight_position_id.MemSize());
+            width_position_id.Buffer().CopyFromHost(
+                width_position_ids_.data() + valid_length,
+                width_position_id.MemSize());
+            // std::cout << "round = " << round
+            //           << " valid_length = " << valid_length
+            //           << " current_length = " << current_length << std::endl;
+            // for (int xx = 0; xx < current_length; xx++) {
+            //     std::cout << time_position_ids_[valid_length + xx] << " ";
+            //     if (xx % 16 == 15)
+            //     std::cout << std::endl;
+            // }
+            // for (int xx =0; xx < current_length; xx++) {
+            //     std::cout << hight_position_ids_[valid_length + xx] << " ";
+            //     if (xx % 16 == 15)
+            //     std::cout << std::endl;
+            // }
+            // for (int xx =0; xx < current_length; xx++) {
+            //     std::cout << width_position_ids_[valid_length + xx] << " ";
+            //     if (xx % 16 == 15)
+            //     std::cout << std::endl;
+            // }
+        } else {
+            LLAMA_LOG_ERROR("Error: Invalid data type for position ids\n");
+            exit(0);
+        }
+        if (prefill_valid_length.Info().DataType() == tcim::DataType::INT16) {
+            SetInputData<int16_t>(prefill_valid_length, n_prefill_batch_,
+                                  valid_length);
+            SetInputData<int16_t>(prefill_current_length, n_prefill_batch_,
+                                  current_length);
+        } else if (prefill_valid_length.Info().DataType() ==
+                   tcim::DataType::INT32) {
+            SetInputData<int32_t>(prefill_valid_length, n_prefill_batch_,
+                                  valid_length);
+            SetInputData<int32_t>(prefill_current_length, n_prefill_batch_,
+                                  current_length);
+        }
+
+        prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
+        prefill_model_->SetInput(prefill_model_->GetInputName(1),
+                                 time_position_id);
+        prefill_model_->SetInput(prefill_model_->GetInputName(2),
+                                 hight_position_id);
+        prefill_model_->SetInput(prefill_model_->GetInputName(3),
+                                 width_position_id);
+        prefill_model_->SetInput(prefill_model_->GetInputName(4),
+                                 prefill_valid_length);
+        prefill_model_->SetInput(prefill_model_->GetInputName(5),
+                                 prefill_current_length);
+        auto &item = kv_cache_[seq_id];
+        assert(item.seq_id == seq_id);
+        for (size_t idx = 0; idx < item.tensors.size(); idx++) {
+            std::string name = item.names[idx];
+            auto tensor = item.tensors[idx];
+            prefill_model_->SetInput(name, tensor);
+        }
+        prefill_model_->Run();
+        prefill_model_->Sync();
+    }
+    decode_valid_length_[seq_id] = input_echo_len;
+    tcim::Tensor prefill_output_data =
+        prefill_model_->GetOutput(prefill_output_names_[0]);
+    // 转浮点
+    auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
+    prefill_output_data.CastTo(prefill_output_float);
+    memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+
+    // reset input_embedding_ids_
+    memset(input_embedding_ids_.data(), 0, input_embedding_ids_.size() * sizeof(int16_t));
+    time_position_ids_.clear();
+    time_position_ids_.resize(0);
+    hight_position_ids_.clear();
+    hight_position_ids_.resize(0);
+    width_position_ids_.clear();
+    width_position_ids_.resize(0);
+    offset_embedding_id_ = 0;
+    return 0;
+}
+
+int HouMoVLLModel::houmo_prefill(const float *embeddings, int n_tokens,
+                                 int seq_id, float *logits) {
+
+    if (logits == nullptr) {
+        // 只缓存输入
+        int16_t *input_data_ptr = (int16_t *)embeddings;
+
+        memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
+            input_data_ptr,
+               n_tokens * n_embd_ * sizeof(int16_t));
+        // std::cout << "2cache input_embedding_ids_ * n_embd_" << n_tokens << std::endl;
+        // std::cout << "offset_embedding_id_ = " << offset_embedding_id_ << std::endl;
+        // std::cout << "n_embd_ = " << n_embd_ << std::endl;
+
+        offset_embedding_id_ += n_tokens;
+        update_position_ids(seq_id, n_tokens, true);
+        return 0;
+    } else {
+        // FIXME:
+        LLAMA_LOG_ERROR("%s: logits is not null, not supported\n", __func__);
+        return -1;
+    }
+}
+
+int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
+                                std::vector<int> &seq_ids,
+                                std::vector<float *> logits) {
+    LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
+                   seq_ids.size(), batches.size());
+    if (seq_ids.size() > (size_t)n_decode_batch_) {
+        std::cerr << "seq_ids.size() > n_decode_batch_ not supported\n";
+        return -1;
+    }
+    torch::Tensor input_emd;
+    auto decode_opts = torch::TensorOptions().dtype(torch::kInt);
+    auto decode_inp =
+        torch::from_blob(batches.data(), {int64_t(batches.size())}, decode_opts)
+            .clone();
+    try {
+        input_emd = embedding_->forward(decode_inp);
+    } catch (const c10::Error &e) {
+        std::cerr << "error loading the model\n" << e.what_without_backtrace();
+        return -1;
+    }
+    // set input_1, xh2 是float16
+    input_emd = input_emd.view({int64_t(batches.size()), 1, -1});
+    auto input_data = decode_input_map_.at(decode_model_->GetInputName(0));
+
+    // 计算每个序列的大小（以int16_t为单位）
+    int64_t embedding_dim = input_emd.size(2);
+    assert(input_data.MemSize() >=
+           embedding_dim * seq_ids.size() * sizeof(int16_t));
+
+    std::vector<int16_t> decode_input_data(
+        input_data.MemSize() / sizeof(int16_t), 1);
+    // 填充数据
+    for (size_t i = 0; i < seq_ids.size(); i++) {
+        auto batch_id = seq_ids[i];
+        // 单batch模式下所有序列共用batch 0
+        if (n_decode_batch_ == 1)
+            batch_id = 0;
+        // 验证seq_id有效性
+        if (batch_id >= n_decode_batch_) {
+            std::cerr << "Error: Invalid seq_id " << batch_id << " (max "
+                      << n_decode_batch_ - 1 << ")" << std::endl;
+            return -1;
+        }
+        int16_t *input_data_ptr =
+            decode_input_data.data() + batch_id * embedding_dim;
+        input_emd = input_emd.to(torch::kInt16);
+
+        memcpy(input_data_ptr, input_emd[i][0].data_ptr<int16_t>(),
+               embedding_dim * sizeof(int16_t));
+    }
+
+    input_data.Buffer().CopyFromHost(decode_input_data.data(),
+                                     input_data.MemSize());
+    // set valid_length
+    std::vector<int32_t> valid_length_vec(n_decode_batch_, 1);
+    std::vector<int32_t> current_length_vec(n_decode_batch_, 1);
+    std::vector<int16_t> position_vec(n_decode_batch_, start_pos_);
+    for (size_t k = 0; k < seq_ids.size(); k++) {
+        int batch_id = seq_ids[k];
+        // 单batch模式下所有序列共用batch 0
+        if (n_decode_batch_ == 1)
+            batch_id = 0;
+        valid_length_vec[batch_id] = decode_valid_length_[seq_ids[k]];
+    }
+    auto time_position_id =
+        decode_input_map_.at(decode_model_->GetInputName(1));
+    time_position_id.Buffer().CopyFromHost(position_vec.data(),
+                                           time_position_id.MemSize());
+    auto hight_position_id =
+        decode_input_map_.at(decode_model_->GetInputName(2));
+    hight_position_id.Buffer().CopyFromHost(position_vec.data(),
+                                            hight_position_id.MemSize());
+    auto width_position_id =
+        decode_input_map_.at(decode_model_->GetInputName(3));
+    width_position_id.Buffer().CopyFromHost(position_vec.data(),
+                                            width_position_id.MemSize());
+
+    auto decode_valid_length =
+        decode_input_map_.at(decode_model_->GetInputName(4));
+    auto decode_current_length =
+        decode_input_map_.at(decode_model_->GetInputName(5));
+    if (decode_valid_length.Info().DataType() == tcim::DataType::INT16) {
+        SetInputData<int16_t>(decode_valid_length, valid_length_vec);
+        SetInputData<int16_t>(decode_current_length, current_length_vec);
+    } else if (decode_valid_length.Info().DataType() == tcim::DataType::INT32) {
+        SetInputData<int32_t>(decode_valid_length, valid_length_vec);
+        SetInputData<int32_t>(decode_current_length, current_length_vec);
+    }
+
+    decode_model_->SetInput(decode_model_->GetInputName(0), input_data);
+    decode_model_->SetInput(decode_model_->GetInputName(1), time_position_id);
+    decode_model_->SetInput(decode_model_->GetInputName(2), hight_position_id);
+    decode_model_->SetInput(decode_model_->GetInputName(3), width_position_id);
+    decode_model_->SetInput(decode_model_->GetInputName(4),
+                            decode_valid_length);
+    decode_model_->SetInput(decode_model_->GetInputName(5),
+                            decode_current_length);
+    if (need_set_kv_cache_ != 0) {
+        for (auto seq_id : seq_ids) {
+            auto &item = kv_cache_[seq_id];
+            for (size_t idx = 0; idx < item.tensors.size(); idx++) {
+                std::string name = item.names[idx];
+                if (n_decode_batch_ > 1)
+                    name = name + "_batch" + std::to_string(item.seq_id);
+                auto tensor = item.tensors[idx];
+                decode_model_->SetInput(name, tensor);
+            }
+        }
+    }
+
+    decode_model_->Run();
+    decode_model_->Sync();
+    tcim::Tensor decode_data =
+        decode_model_->GetOutput(decode_output_names_[0]);
+    assert(decode_data.Info().DataType() == tcim::DataType::INT16);
+    // 转浮点
+    auto &decode_output_float = decode_output_map_[decode_output_names_[0]];
+    decode_data.CastTo(decode_output_float);
+    auto n_vocab =
+        decode_output_float.MemSize() / (n_decode_batch_ * sizeof(float));
+    for (size_t i = 0; i < seq_ids.size(); i++) {
+        auto batch_id = seq_ids[i];
+        decode_valid_length_[batch_id]++;
+        // 单batch模式下所有序列共用batch 0
+        if (n_decode_batch_ == 1)
+            batch_id = 0;
+        float *logits_out = logits[i];
+        float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
+                            batch_id * n_vocab;
+        memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+    }
+    start_pos_++;
+    return 0;
+}
+
+void HouMoVLLModel::update_position_ids(int seq_id, int n_tokens,
+                                        bool is_embedding) {
+    if (time_position_ids_.size() == 0) {
+        start_pos_ = 0;
+    }
+    if (is_embedding) {
+        for (int y = 0; y < ny; y++) {
+            for (int x = 0; x < nx; x++) {
+                time_position_ids_.push_back(start_pos_);
+                hight_position_ids_.push_back(start_pos_ + y);
+                width_position_ids_.push_back(start_pos_ + x);
+            }
+        }
+
+        start_pos_ += nx;
+    } else {
+        for (int i = 0; i < n_tokens; i++) {
+            time_position_ids_.push_back(start_pos_ + i);
+            hight_position_ids_.push_back(start_pos_ + i);
+            width_position_ids_.push_back(start_pos_ + i);
+        }
+        start_pos_ += n_tokens;
+    }
+}

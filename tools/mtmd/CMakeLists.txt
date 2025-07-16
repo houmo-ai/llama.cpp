@@ -11,6 +11,8 @@ add_library(mtmd
             clip-impl.h
             mtmd-helper.cpp
             mtmd-helper.h
+            houmo_vision.cpp
+            houmo_vision.h
             )
 
 target_link_libraries     (mtmd PUBLIC ggml llama)
