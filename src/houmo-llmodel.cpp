@@ -377,6 +377,18 @@ void HouMoSingleCardModel::houmo_init(int seq_max) {
             std::string k_cache_history_sum_name =
                 "model_layers_" + std::to_string(idx) +
                 "_self_attn_kcache_history_sum";
+            // FIXME: FOR XH2 temporary, will removed later. restore...
+            if (!xh1_ && prefill_model_->GetInputName(4).find(
+                             "past_key_cache") != std::string::npos) {
+                k_cache_name =
+                    "past_key_cache_" + std::to_string(idx) + ".hmcc.format";
+                v_cache_name =
+                    "past_value_cache_" + std::to_string(idx) + ".hmcc.format";
+            } else if (!xh1_ && prefill_model_->GetInputName(4).find(
+                                    ".hmcc.format") != std::string::npos) {
+                k_cache_name += ".hmcc.format";
+                v_cache_name += ".hmcc.format";
+            }
             item.names.push_back(k_cache_name);
             item.names.push_back(v_cache_name);
             if (has_history_sum) {
