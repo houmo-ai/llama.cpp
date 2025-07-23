@@ -82,7 +82,7 @@ void common_log_set_timestamps(struct common_log * log,       bool   timestamps)
 
 #define LOG_TMPL(level, verbosity, ...) \
     do { \
-        if ((verbosity) <= common_log_verbosity_thold) { \
+        if ((verbosity) <= common_log_verbosity_thold || common_log_verbosity_thold < 0) { \
             common_log_add(common_log_main(), (level), __VA_ARGS__); \
         } \
     } while (0)

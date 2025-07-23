@@ -1,4 +1,7 @@
 #include "log.h"
+#include "spdlog/spdlog.h"
+#include "spdlog/sinks/daily_file_sink.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -369,15 +372,64 @@ void common_log_free(struct common_log * log) {
     delete log;
 }
 
+void log_with_spd(const ggml_log_level level, const char * text) {
+    switch (level) {
+        case GGML_LOG_LEVEL_NONE:
+        case GGML_LOG_LEVEL_CONT:
+        case GGML_LOG_LEVEL_DEBUG:
+            spdlog::default_logger()->debug(text);
+            break;
+        case GGML_LOG_LEVEL_INFO:
+            spdlog::default_logger()->info(text);
+            break;
+        case GGML_LOG_LEVEL_WARN:
+            spdlog::default_logger()->warn(text);
+            break;
+        case GGML_LOG_LEVEL_ERROR:
+            spdlog::default_logger()->error(text);
+            break;
+    }
+}
+
 void common_log_add(struct common_log * log, enum ggml_log_level level, const char * fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    log->add(level, fmt, args);
+
+    if (common_log_verbosity_thold >= 0) {
+        log->add(level, fmt, args);
+    } else {
+        va_list args_copy;
+        va_copy(args_copy, args);
+        char buffer[128];
+        if (const int len = vsnprintf(buffer, 128, fmt, args); len < 128) {
+            log_with_spd(level, buffer);
+        } else {
+            const auto buffer2 = new char[len + 1];
+            vsnprintf(buffer2, len + 1, fmt, args_copy);
+            buffer2[len] = 0;
+            log_with_spd(level, buffer2);
+            delete[] buffer2;
+        }
+        va_end(args_copy);
+    }
+
     va_end(args);
 }
 
 void common_log_set_file(struct common_log * log, const char * file) {
-    log->set_file(file);
+    if (common_log_verbosity_thold < 0) {
+        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        console_sink->set_level(spdlog::level::debug);
+
+        auto file_sink = std::make_shared<spdlog::sinks::daily_file_sink_mt>(file, 0, 0, false);
+        file_sink->set_level(spdlog::level::debug);
+        const auto logger = new spdlog::logger("LLAMA.CPP", {console_sink, file_sink});
+        logger->set_level(spdlog::level::debug);
+        spdlog::set_default_logger(std::shared_ptr<spdlog::logger>(logger));
+        spdlog::flush_every(std::chrono::seconds(10));
+    } else {
+        log->set_file(file);
+    }
 }
 
 void common_log_set_colors(struct common_log * log, bool colors) {

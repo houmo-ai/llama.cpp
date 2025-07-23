@@ -71,6 +71,7 @@ autogen-*.md
 
 /main
 /server
+/third_party/houmo
 
 # CI
 
