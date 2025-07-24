@@ -18,15 +18,10 @@ find_library(HOUMO_RUNTIME_LIBRARIES NAMES tcim_runtime_lite PATHS ${HOUMO_TCIM_
 message("LLAMA HOUMO_TCIM_LIBRARY=${HOUMO_RUNTIME_LIBRARIES}")
 set(HOUMO_RUNTIME_LIBRARIES ${HOUMO_RUNTIME_LIBRARIES})
 
-# 需要根据个人路径进行修改
-if (MSVC)
-    set(CMAKE_PREFIX_PATH D:/programs/libtorch-win-shared-with-deps-2.5.1+cpu/libtorch)
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+    set(CMAKE_PREFIX_PATH /opt/libtorch/aarch64/libtorch/ third_party/libtorch)
 else ()
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-        set(CMAKE_PREFIX_PATH /opt/libtorch/aarch64/libtorch/ third_party/libtorch)
-    else ()
-        set(CMAKE_PREFIX_PATH /opt/libtorch/x86_64/libtorch/ third_party/libtorch)
-    endif ()
+    set(CMAKE_PREFIX_PATH /opt/libtorch/x86_64/libtorch/ third_party/libtorch)
 endif ()
 find_package(Torch REQUIRED)
 
