@@ -2,7 +2,7 @@
 /**
  * @brief HouMoVLLModel is a vision language model for HouMoLLModel.
  * @ 暂时分开实现，后续考虑合并到houmo-llmmode.h
- * @todo 合并实现
+ * @TODO: 多用户的支持..
  */
 class HouMoVLLModel : public HouMoLLModel::Impl {
   public:
@@ -21,6 +21,7 @@ class HouMoVLLModel : public HouMoLLModel::Impl {
 
   private:
     void update_position_ids(int seq_id, int n_tokens, bool is_embedding);
+    void reset_position_ids();
   private:
     int kSeqMax = 4; // maximum sequence number for single-card model
     std::shared_ptr<tcim::Module> prefill_model_;

@@ -17,6 +17,9 @@ class houmo_memory_i : public llama_memory_i {
     virtual llama_memory_context_ptr init_batch(llama_batch_allocr &balloc,
                                                 uint32_t n_ubatch,
                                                 bool embd_all) override {
+        (void) balloc;
+        (void) n_ubatch;
+        (void) embd_all;
         return nullptr;
     }
 
@@ -27,11 +30,13 @@ class houmo_memory_i : public llama_memory_i {
     // status == LLAMA_MEMORY_STATUS_NO_UPDATE if there is nothing to update
     virtual llama_memory_context_ptr init_update(llama_context *lctx,
                                                  bool optimize) override {
+        (void) lctx;
+        (void) optimize;
         return nullptr;
     }
 
     // getters
-    virtual bool get_can_shift() const override { return false; }
+    virtual bool get_can_shift() const override { return true; }
 
     //
     // ops
@@ -40,31 +45,52 @@ class houmo_memory_i : public llama_memory_i {
     // if data == true, the data buffers will also be cleared together with the
     // metadata
     virtual void clear(bool data) override {
+        (void) data;
         return;
-    };
+    }
 
     virtual bool seq_rm(llama_seq_id seq_id, llama_pos p0,
                         llama_pos p1) override {
+        (void) seq_id;
+        (void) p0;
+        (void) p1;
         return true;
     }
     virtual void seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst,
                         llama_pos p0, llama_pos p1) override {
+        (void) seq_id_src;
+        (void) seq_id_dst;
+        (void) p0;
+        (void) p1;
         return;
     }
-    virtual void seq_keep(llama_seq_id seq_id) override { return; }
+    virtual void seq_keep(llama_seq_id seq_id) override {
+        (void) seq_id;
+        return;
+    }
     virtual void seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1,
                          llama_pos shift) override {
+        (void) seq_id;
+        (void) p0;
+        (void) p1;
+        (void) shift;
         return;
     }
     virtual void seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1,
                          int d) override {
+        (void) seq_id;
+        (void) p0;
+        (void) p1;
+        (void) d;
         return;
     }
 
     virtual llama_pos seq_pos_min(llama_seq_id seq_id) const override {
+        (void) seq_id;
         return 0;
     }
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const override {
+        (void) seq_id;
         return -1;
     }
 
@@ -74,10 +100,14 @@ class houmo_memory_i : public llama_memory_i {
 
     virtual void state_write(llama_io_write_i &io,
                              llama_seq_id seq_id = -1) const override {
+        (void) io;
+        (void) seq_id;
         return;
     }
     virtual void state_read(llama_io_read_i &io,
                             llama_seq_id seq_id = -1) override {
+        (void) io;
+        (void) seq_id;
         return;
     }
 };

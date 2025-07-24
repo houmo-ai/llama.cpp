@@ -20,6 +20,8 @@ class HoumoVision {
 
   private:
     bool houmo_load(const std::string &file_name);
+    void rgb_to_yuv444(const std::vector<float> &bgr_data, int width,
+                       int height, std::vector<uint8_t> &yuv444sp_data);
     void read_tensor_to_buffer(const std::string &file_name, size_t offset,
                                size_t size, std::vector<char> &buffer);
     /**

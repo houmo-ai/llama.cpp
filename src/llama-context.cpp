@@ -21,7 +21,7 @@ void llama_context::houmo_init(int32_t seq_max) {
     // graph outputs buffer
     {
         // resized during inference when a batch uses more outputs
-        if (output_reserve(seq_max) < seq_max) {
+        if (output_reserve(seq_max) < (uint32_t )seq_max) {
             throw std::runtime_error("failed to reserve initial output buffer");
         }
 
@@ -30,7 +30,9 @@ void llama_context::houmo_init(int32_t seq_max) {
                 ggml_backend_buffer_get_size(buf_output.get()) / 1024.0 / 1024.0);
     }
     // 修正n_ctx
-    cparams.n_ctx = std::max(cparams.n_ctx, hm_llmodel->n_context_length());
+    cparams.n_ctx = cparams.n_ctx < hm_llmodel->n_context_length()
+                        ? cparams.n_ctx
+                        : hm_llmodel->n_context_length();
 }
 
 llama_context::llama_context(
@@ -426,6 +428,8 @@ uint32_t llama_context::n_ctx() const {
 }
 
 uint32_t llama_context::n_ctx_per_seq() const {
+    if (model.hparams.is_hmm)
+        return cparams.n_ctx;
     return cparams.n_ctx / cparams.n_seq_max;
 }
 
@@ -921,6 +925,7 @@ static std::string common_token_to_piece(const struct llama_vocab * vocab, llama
 }
 
 int llama_context::houmo_decode(const llama_batch &batch) {
+    int ret = 0;
     LLAMA_LOG_DEBUG("****batch.n_tokens: %d\n", batch.n_tokens);
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
     const int32_t n_vocab = model.vocab.n_tokens();
@@ -1004,7 +1009,10 @@ int llama_context::houmo_decode(const llama_batch &batch) {
         for (auto seq : seq_id) {
             logits_ptrs.push_back(logits + seqid_pos_map[seq] * n_vocab);
         }
-        hm_llmodel->houmo_decode(decode_batch, seq_id, logits_ptrs);
+        ret = hm_llmodel->houmo_decode(decode_batch, seq_id, logits_ptrs);
+        if (ret != 0) {
+            return ret;
+        }
     }
 
     // 再计算需要prefill的seq
@@ -1013,19 +1021,21 @@ int llama_context::houmo_decode(const llama_batch &batch) {
         if (v.size() > 1) {
             float * logits_out = nullptr;
             if (output_logits_flag == true)
-                logits_out = logits + seqid_pos_map[k] * n_vocab;            
-            hm_llmodel->houmo_prefill(v, k, logits_out);
-
+                logits_out = logits + seqid_pos_map[k] * n_vocab;
+            ret = hm_llmodel->houmo_prefill(v, k, logits_out);
+            if (ret != 0) {
+                return ret;
+            }
 
             // for debug...
             // if (logits_out != nullptr) {
             //     auto prefill_output_opts =
-            //     torch::TensorOptions().dtype(torch::kFloat); 
+            //     torch::TensorOptions().dtype(torch::kFloat);
             //     auto
             //     prefill_output_tensor = torch::from_blob(logits_out, {n_vocab},
-            //     prefill_output_opts).clone(); 
+            //     prefill_output_opts).clone();
             //     auto selected_output =
-            //     torch::argmax(prefill_output_tensor).to(torch::kInt32); 
+            //     torch::argmax(prefill_output_tensor).to(torch::kInt32);
             //     auto
             //     generate_token = *(int32_t *)selected_output.data_ptr<int32_t>();
             //     std::cout << "generate_token: " << generate_token << ","

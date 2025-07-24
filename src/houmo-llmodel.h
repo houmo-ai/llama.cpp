@@ -59,6 +59,10 @@ Impl() = default;
                             float *logits) = 0;
   virtual int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
                             float *logits) {
+      (void ) embeddings; // unused parameter
+      (void ) n_tokens; // unused parameter
+      (void ) seq_id; // unused parameter
+      (void ) logits; // unused parameter
       return 0;
   }
 

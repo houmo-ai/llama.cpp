@@ -105,10 +105,10 @@ bool HoumoVision::init(const std::string &model_path) {
             image_channels_ = input_info.Shape()[1];
             input_name_ = input_name;
         }
-        for (int kk = 0; kk < input_info.Shape().size(); kk++) {
-            LOG_INF("%s: input_info.Shape()[%d]: %d, type= %d\n", __func__, kk,
-                    input_info.Shape()[kk], input_info.DataType());
-        }
+        // for (size_t kk = 0; kk < input_info.Shape().size(); kk++) {
+        //     LOG_INF("%s: input_info.Shape()[%d]: %d, type= %d\n", __func__, kk,
+        //             input_info.Shape()[kk], input_info.DataType());
+        // }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
         input_tensors_.insert(
             std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
@@ -127,8 +127,9 @@ bool HoumoVision::init(const std::string &model_path) {
     return true;
 }
 
-void rgb_to_yuv444(const std::vector<float> &bgr_data, int width, int height,
-                   std::vector<uint8_t> &yuv444sp_data) {
+void HoumoVision::rgb_to_yuv444(const std::vector<float> &bgr_data, int width,
+                                int height,
+                                std::vector<uint8_t> &yuv444sp_data) {
     int pixel_count = width * height;
     // YUV444SP总大小：Y(1*H*W) + UV(2*H*W)
     yuv444sp_data.resize(pixel_count * 3);
@@ -194,8 +195,8 @@ bool HoumoVision::image_resize(clip_image_u8_ptr &src,
     float x_ratio = static_cast<float>(src->nx - 1) / image_width_;
     float y_ratio = static_cast<float>(src->ny - 1) / image_height_;
 
-    for (int y = 0; y < image_height_; y++) {
-        for (int x = 0; x < image_width_; x++) {
+    for (size_t y = 0; y < image_height_; y++) {
+        for (size_t x = 0; x < image_width_; x++) {
             float px = x_ratio * x;
             float py = y_ratio * y;
             int x_floor = static_cast<int>(px);

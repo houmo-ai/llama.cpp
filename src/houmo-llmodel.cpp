@@ -32,6 +32,7 @@ class HouMoSingleCardModel : public HouMoLLModel::Impl {
     int kSeqMax = 4; // maximum sequence number for single-card model
     std::shared_ptr<tcim::Module> prefill_model_;
     std::shared_ptr<tcim::Module> decode_model_;
+    std::vector<llama_token> prefill_tokens_;
 };
 
 /**
@@ -83,9 +84,9 @@ void HouMoLLModel::Impl::prefill_input_init(
         auto input_info =
             prefill_model->GetInputInfo(input_name).AsContiguous();
         auto shape = input_info.Shape();
-        for (int i = 0; i < shape.size(); i++) {
-            LLAMA_LOG_INFO("%s: prefill input_shape: %d, type = %d\n", __func__,
-                           shape[i], input_info.DataType());
+        for (size_t i = 0; i < shape.size(); i++) {
+            LLAMA_LOG_DEBUG("%s: prefill input_shape: %ld, type = %d\n", __func__,
+                           shape[i], (int)input_info.DataType());
         }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
         prefill_input_map.insert(
@@ -150,8 +151,8 @@ void HouMoLLModel::Impl::decode_input_init(
                        input_name.c_str());
         auto input_info = decode_model->GetInputInfo(input_name).AsContiguous();
         auto shape = input_info.Shape();
-        for (int i = 0; i < shape.size(); i++) {
-            LLAMA_LOG_INFO("%s: decode input_shape: %d\n", __func__, shape[i]);
+        for (size_t i = 0; i < shape.size(); i++) {
+            LLAMA_LOG_INFO("%s: decode input_shape: %ld\n", __func__, shape[i]);
         }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
         decode_input_map.insert(
@@ -427,7 +428,6 @@ void HouMoSingleCardModel::houmo_init(int seq_max) {
         }
         kv_cache_[i] = item;
     }
-
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
     LLAMA_LOG_INFO("prefill_length_ = %d\n context_length_ = %d\n "
                    "n_blocks_ = %d\n n_embd_ = %ld\n n_prefill_batch_ = %d\n "
@@ -442,9 +442,23 @@ void HouMoSingleCardModel::houmo_init(int seq_max) {
 int HouMoSingleCardModel::houmo_prefill(std::vector<llama_token> &tokens,
                                         int seq_id, float *logits) {
 
-    LLAMA_LOG_DEBUG("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
+    LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                     seq_id, tokens.size());
-    size_t input_echo_len = tokens.size();
+    prefill_tokens_.insert(prefill_tokens_.end(), tokens.begin(), tokens.end());
+    if (prefill_tokens_.size() >= (uint32_t)context_length_) {
+        LLAMA_LOG_ERROR("%s: prefill_tokens_ size %zu > context_length_%d, "
+                        "reset to 0\n",
+                        __func__, prefill_tokens_.size(), context_length_);
+        prefill_tokens_.resize(0);
+        return 1;
+    }
+    if (logits == nullptr) {
+        LLAMA_LOG_INFO(
+            "%s: logits is null, just cache return, total size = %zu\n",
+            __func__, prefill_tokens_.size());
+        return 0;
+    }
+    size_t input_echo_len = prefill_tokens_.size();
     int16_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
                                       static_cast<float>(prefill_length_));
     int32_t current_length = 0;
@@ -467,14 +481,14 @@ int HouMoSingleCardModel::houmo_prefill(std::vector<llama_token> &tokens,
         valid_length = round * prefill_length_;
         if (round == prefill_loop_round - 1) {
             current_length = input_echo_len - round * prefill_length_;
-            auto first = tokens.begin() + round * prefill_length_;
-            auto last = tokens.begin() + input_echo_len;
+            auto first = prefill_tokens_.begin() + round * prefill_length_;
+            auto last = prefill_tokens_.begin() + input_echo_len;
             std::vector<llama_token> round_tokens(first, last);
             input_ids = round_tokens;
         } else {
             current_length = prefill_length_;
-            auto first = tokens.begin() + round * prefill_length_;
-            auto last = tokens.begin() + (round + 1) * prefill_length_;
+            auto first = prefill_tokens_.begin() + round * prefill_length_;
+            auto last = prefill_tokens_.begin() + (round + 1) * prefill_length_;
             std::vector<llama_token> round_tokens(first, last);
             input_ids = round_tokens;
         }
@@ -488,6 +502,7 @@ int HouMoSingleCardModel::houmo_prefill(std::vector<llama_token> &tokens,
         } catch (const c10::Error &e) {
             std::cerr << "error loading the model\n"
                       << e.what_without_backtrace();
+            prefill_tokens_.resize(0);
             return -1;
         }
         auto effective_length = input_ids.size();
@@ -548,6 +563,7 @@ int HouMoSingleCardModel::houmo_prefill(std::vector<llama_token> &tokens,
     auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
     prefill_output_data.CastTo(prefill_output_float);
     memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+    prefill_tokens_.resize(0);
     return 0;
 }
 
