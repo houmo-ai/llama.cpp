@@ -36,10 +36,10 @@ esac
 
 # SDK URLs
 xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_${ARCH}-2.4.1.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/06/30/1110/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-2.4.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/07/18/0200/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.2.0.tar.gz"
 xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/ubuntu2004/houmo_drv_xh1_v2.4.1_ubuntu2004_${ARCH}.run"
 #FIXME:
-xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/06/30/1110/ubuntu2004/houmo_drv_xh2_v0.0.0_ubuntu2004_${ARCH}.run"
+xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/07/18/0200/ubuntu2004/houmo_drv_xh2_v0.2.0_ubuntu2004_${ARCH}.run"
 xh2_sw_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/libxh2a_hal_box.so"
 # 下载文件并检查是否成功
 download_file() {
@@ -148,15 +148,15 @@ package_llama() {
     if [[ -f /usr/aarch64-linux-gnu/lib/libstdc++.so.6 && "$ARCH" == "aarch64" ]]; then
         cp /usr/aarch64-linux-gnu/lib/libstdc++.so.6 "$release_dir/lib/"
     fi
-    # 复制可执行文件
+
+    # 仅复制llama-server可执行文件供测试使用
     cp build/bin/llama-server "$release_dir/bin/" || true
-    cp build/bin/llama-simple* "$release_dir/bin/" || true
-    cp build/bin/llama*-batched "$release_dir/bin/" || true
-    cp build/bin/llama-gguf "$release_dir/bin/" || true
-    cp build/bin/llama-cli "$release_dir/bin/" || true
     cp build/bin/llama-bench* "$release_dir/bin/" || true
-    cp build/bin/llama-mtmd-cli "$release_dir/bin/" || true
+    cp build/bin/llama-gguf "$release_dir/bin/" || true
+    cp tools/server/qwen3_nonthinking.jinja "$release_dir/bin/" || true
     cp ci/run_llama_server.sh "$release_dir/" || true
+    # 设置run_llama_server.sh中xh_type参数
+    sed -i "s/xh_type=.*/xh_type=$PLATFORM/" "$release_dir/run_llama_server.sh"
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
 

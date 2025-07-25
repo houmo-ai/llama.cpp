@@ -3,106 +3,239 @@
 set -e  # 遇到错误立即退出
 set -u  # 使用未定义变量时退出
 set -o pipefail  # 管道命令中任何一个失败都算失败
+show_help() {
+    echo "usage: run_llama_server.sh [env] [--list|--download model_name] run model_name [extra_args...]"
+    echo ""
+    echo "usage 示例0: <多卡环境绑卡操作>：export HOUMO_DEVICE_ID=0"
+    echo ""
+    echo "usage 示例1: <指定端口号>: run_llama_server.sh run model_name --port 18080"
+    echo ""
+    echo "usage 示例2: <关闭Qwen3的Think机制>: run_llama_server.sh run model_name --jinja --chat-template-file bin/qwen3_nonthinking.jinja"
+    echo ""
+    echo "usage 示例3: <非多batch模型性能会下降，且受限显存大小，最大4>: run_llama_server.sh run model_name -np 2"
+    echo ""
+    echo "更多参数，参考llama-server的帮助文档"
+}
+# 初始化额外参数数组（避免未定义错误）
+extra_args=()
+default_port_args=("--port" "18080")  # 默认端口号
+# xh1 模型列表
+declare -A models_xh1=(
+    ["Qwen2.5-14b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-14B-F16-8k-4core-xh1-v0.0.1.gguf"
+    ["Qwen2.5-7b-4batch"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-7B-4batch-F16-2k-4core-xh1-v0.0.1.gguf"
+    ["Qwen3-8b-1batch"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-8B-F16-8K-4core-xh1-v0.0.1.gguf"
+    ["Qwenvl2.5-3b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-F16-2k-4core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-mmproj-F16-2k-4core-xh1-v0.0.1.gguf"
+    ["Qwenvl2.5-7b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-F16-2k-4core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-mmproj-F16-2k-4core-xh1-v0.0.1.gguf"
+    ["Qwenvl2.5-3b-2core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-F16-2k-2core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-mmproj-F16-2k-2core-xh1-v0.0.1.gguf"
+    ["Qwenvl2.5-7b-2core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-F16-2k-2core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-mmproj-F16-2k-2core-xh1-v0.0.1.gguf"
+)
+
+# xh2 模型列表
+declare -A models_xh2=(
+    ["Qwen2.5-7b-2k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-7B-F16-2k-2core-xh2-v0.0.1.gguf"
+    ["Qwen2.5-7b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-7B-F16-8k-2core-xh2-v0.0.1.gguf"
+    ["Qwen3-8b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-8B-F16-8k-2core-xh2-v0.0.1.gguf"
+    ["Qwen3-8b-2k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-8B-F16-2k-2core-xh2-v0.0.1.gguf"
+    ["Qwen3-14b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-14B-F16-8k-2core-xh2-v0.0.1.gguf"
+    ["Qwen3-14b-2k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-14B-F16-2k-2core-xh2-v0.0.1.gguf"
+)
 
 # 设置默认值
-default_port=31808
-default_device_id=0
-default_model_path="/data/xh1/model/HiModel-Qwen3-8B-F16-2k-4core-xh1-v0.0.1.gguf"
-if [ $1 == "xh2" ]; then
-    default_model_path="/data/xh2/model/HiModel-Qwen3-8B-F16-2k-2core-xh2-v0.0.1.gguf"
-fi
-# 参数处理
-case $# in
-    1)
-        xh_type="$1"
-        port="$default_port"
-        device_id="$default_device_id"
-        model_path="$default_model_path"
-        ;;
-    2)
-        xh_type="$1"
-        model_path="$2"
-        port="$default_port"
-        device_id="$default_device_id"
-        ;;
-    3)
-        xh_type="$1"
-        model_path="$2"
-        port="$3"
-        device_id="$default_device_id"
-        ;;
-    4)
-        xh_type="$1"
-        model_path="$2"
-        port="$3"
-        device_id="$4"
-        ;;
-    *)
-        echo "Usage: $0 <xh1|xh2> [model_path] [port] [device_id]"
-        echo "  port:        默认 $default_port"
-        echo "  device_id:   默认 $default_device_id"
-        echo "  model_path:  默认 $default_model_path"
-        exit 1
-        ;;
-esac
-
-# 验证xh_type参数
-if [ "$xh_type" != "xh1" ] && [ "$xh_type" != "xh2" ]; then
-    echo "错误: xh_type必须是xh1或xh2"
-    exit 1
-fi
-
-NP=1
-export HOUMO_DEVICE_ID=${device_id}
+xh_type="xh1"  # 可通过参数--xh-type修改（如需要）
 export LD_LIBRARY_PATH=$(pwd)/lib
 
-# 设置模型路径和环境变量
-if [ "${xh_type}" = "xh2" ]; then
+# 设置xh2特定环境变量
+if [ "$xh_type" == "xh2" ]; then
     export TCIM_BACKEND=Xh2HalBackend
     export TCIM_RUNTIME_PATH=$(pwd)
-    # NP=4
 fi
 
-# 验证模型文件是否存在
-if [ ! -f "${model_path}" ]; then
-    echo "错误: 模型文件不存在: ${model_path}"
+# 构建模型列表（修复关联数组赋值错误）
+declare -A models=()
+if [ "$xh_type" == "xh1" ]; then
+    for key in "${!models_xh1[@]}"; do
+        models["$key"]="${models_xh1[$key]}"
+    done
+elif [ "$xh_type" == "xh2" ]; then
+    for key in "${!models_xh2[@]}"; do
+        models["$key"]="${models_xh2[$key]}"
+    done
+fi
+# 检查是否没有提供任何参数
+if [[ "$#" -eq 0 ]]; then
+    show_help
+    exit 1
+fi
+# 解析命令行参数
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --list) 
+            echo "支持的模型列表（设备类型：$xh_type）："
+            # 遍历模型列表，检查本地文件是否存在
+            for model in "${!models[@]}"; do
+                # 获取模型所有关联文件的URL
+                urls=(${models[$model]})
+                all_exist=true  # 标记是否所有文件都已下载
+
+                # 检查每个文件是否存在
+                for url in "${urls[@]}"; do
+                    filename=$(basename "$url")
+                    filepath="models/$filename"
+                    if [ ! -f "$filepath" ]; then
+                        all_exist=false
+                        break  # 只要有一个文件不存在，就标记为未下载
+                    fi
+                done
+
+                # 输出模型名称及状态
+                if [ "$all_exist" = true ]; then
+                    echo "  - $model [已下载]"
+                else
+                    echo "  - $model [未下载]"
+                fi
+            done
+            exit 0
+            ;;
+        --download)
+            if [ -z "$2" ]; then
+                echo "错误: 请指定要下载的模型名称"
+                exit 1
+            fi
+            model_name=$2
+            if [ -z "${models[$model_name]}" ]; then
+                echo "错误: 模型 $model_name 不存在"
+                exit 1
+            fi
+            # 确保models目录存在
+            mkdir -p models
+            model_urls=(${models[$model_name]})
+            echo "正在下载模型 $model_name ..."
+            for url in "${model_urls[@]}"; do
+                wget -O "models/$(basename "$url")" "$url"
+            done
+            echo "模型 $model_name 下载完成"
+            exit 0
+            ;;
+        env)
+            echo "设置运行时环境变量..."
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+            if [ "$xh_type" == "xh2" ]; then
+                echo "TCIM_BACKEND=$TCIM_BACKEND"
+                echo "TCIM_RUNTIME_PATH=$TCIM_RUNTIME_PATH"
+            fi
+            exit 0
+            ;;
+        run)
+            if [ -z "$2" ]; then
+                echo "错误: 请指定要运行的模型名称"
+                exit 1
+            fi
+            model_name=$2
+            if [ -f $model_name ]; then
+                model_path=$model_name
+            else
+                if [ -z "${models[$model_name]}" ]; then
+                    echo "错误: 模型 $model_name 不存在"
+                    exit 1
+                fi
+                model_urls=(${models[$model_name]})
+                model_path="models/$(basename "${model_urls[0]}")"
+                mmproj_model_path=""
+                if [ ${#model_urls[@]} -gt 1 ]; then
+                    mmproj_model_path="models/$(basename "${model_urls[1]}")"
+                    echo "检测到VL模型，mmproj路径: $mmproj_model_path"
+                fi
+
+                # 检查所有模型文件是否存在
+                for url in "${model_urls[@]}"; do
+                    filepath="models/$(basename "$url")"
+                    if [ ! -f "$filepath" ]; then
+                        echo "错误: 模型文件 $filepath 不存在，请先使用 --download $model_name 下载"
+                        exit 1
+                    fi
+                done
+            fi
+
+            # 收集剩余参数作为透传参数
+            shift 2
+            extra_args=("$@")
+            break
+            ;;
+        *)
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# 检查模型文件是否存在
+if [ ! -f "$model_path" ]; then
+    echo "错误: 模型文件 $model_path 不存在，请先使用 --download $model_name 下载"
     exit 1
 fi
 
 # 停止可能正在运行的llama-server实例
 echo "检查是否存在正在运行的llama-server进程..."
-if pgrep -f "llama-server -m ${model_path}" > /dev/null; then
+if pgrep -f "llama-server -m" > /dev/null; then
     echo "找到正在运行的llama-server进程，正在停止..."
-    pkill -f "llama-server -m ${model_path}"
+    pkill -9 -f "llama-server -m"
+    sleep 3
     # 等待进程停止
-    timeout 10 sh -c "while pgrep -f 'llama-server -m ${model_path}' > /dev/null; do sleep 1; done" || {
-        echo "警告: 无法停止现有llama-server进程，尝试强制终止..."
-        pkill -9 -f "llama-server -m ${model_path}"
-        sleep 2
-        if pgrep -f "llama-server -m ${model_path}" > /dev/null; then
-            echo "错误: 无法终止现有llama-server进程，请手动终止。"
-            exit 1
-        fi
-    }
+    while pgrep -f "llama-server -m" > /dev/null; do
+        echo "等待llama-server进程停止..."
+        sleep 1
+    done
     echo "现有llama-server进程已停止。"
 else
     echo "未找到正在运行的llama-server进程。"
 fi
 
-# 启动服务
-echo "正在端口${port}上启动llama-server..."
-echo "使用模型: ${model_path}"
-echo "使用NP: ${NP}"
-echo "使用device_id: ${device_id}"
+if [ $model_name == "Qwen2.5-14b" ]; then
+    if [ -z "${HOUMO_DEVICE_ID:-}" ]; then
+        echo "错误: 环境变量HOUMO_DEVICE_ID未设置. M30需要设置双卡运行14B模型，请设置HOUMO_DEVICE_ID=0,1"
+        exit 1
+    fi
+    # 检查是否包含多个ID（通常用逗号分隔）
+    if [[ "$HOUMO_DEVICE_ID" != *","* ]]; then
+        echo "错误: HOUMO_DEVICE_ID是单个ID，不允许使用单卡配置"
+        exit 1
+    fi
+fi
 
-nohup ./bin/llama-server -m ${model_path} --port ${port} --host 0.0.0.0 -np ${NP} > /dev/null 2>&1 &
+# 构建启动命令
+launch_cmd=(
+    ./bin/llama-server
+    -m "$model_path"
+    --host 0.0.0.0
+)
+
+# 如果是VL模型，添加mmproj参数
+if [ -n "${mmproj_model_path:-}" ]; then
+    launch_cmd+=(--mmproj "$mmproj_model_path")
+fi
+
+# 添加透传参数
+launch_cmd+=("${extra_args[@]}")
+
+# 启动服务
+if [ ${#extra_args[@]} -gt 0 ]; then
+    echo "透传参数: ${extra_args[*]}"
+    if (echo "${extra_args[@]}" | grep -q -- "--port"); then
+        default_port=""  # 透传参数中包含端口参数，则不使用默认端口,否则使用默认端口
+    else
+        launch_cmd+=("${default_port_args[@]}")
+    fi
+fi
+
+echo "启动命令: ${launch_cmd[*]}"
+nohup "${launch_cmd[@]}" > /dev/null 2>&1 &
 server_pid=$!
 echo "llama-server已在后台启动，PID: ${server_pid}"
 
 # 等待服务启动
 echo "等待llama-server启动..."
 start_time=$(date +%s)
-timeout=30  # 设置更长的超时时间为30秒
+timeout=30  # 超时时间30秒
 
 while true; do
     current_time=$(date +%s)
@@ -122,7 +255,7 @@ while true; do
     sleep 1
 done
 
-# 健康检查 - 确保服务在一段时间内保持运行状态
+# 健康检查
 echo "执行llama-server健康检查..."
 check_count=5
 check_interval=10
@@ -142,7 +275,6 @@ done
 
 echo "llama-server已成功启动并通过健康检查！"
 echo "服务信息:"
-echo "- 模型: ${model_path}"
-echo "- 端口: ${port}"
-echo "- 设备ID: ${device_id}"
-echo "- NP: ${NP}"
+if [ ${#extra_args[@]} -gt 0 ]; then
+    echo "- 透传参数: ${extra_args[*]}"
+fi

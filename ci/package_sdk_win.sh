@@ -10,9 +10,9 @@ ARCH=x86_64
 
 # SDK URLs
 xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/windows11/houmo_tcim_runtime_xh1_windows11_x86_64-2.4.1.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/06/30/1110/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-2.4.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/07/18/0200/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-0.2.0.tar.gz"
 xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/windows11/houmo_drv_xh1_v2.4.1_windows11_x86_64.zip"
-xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/06/30/1110/windows11/houmo_drv_xh2_v0.0.0_windows11_x86_64.zip"
+xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.2.0/2025/07/18/0200/windows11/houmo_drv_xh2_v0.2.0_windows11_x86_64.zip"
 
 # libtorch 下载地址
 libtorch_url="http://10.10.1.53:8082/artifactory/thirdparty_local/libtorch/torch.zip"
@@ -132,12 +132,13 @@ package_llama() {
 
     # 复制可执行文件
     cp build/bin/Release/llama-server* "$release_dir/bin/" || true
-    cp build/bin/Release/llama-simple* "$release_dir/bin/" || true
-    cp build/bin/Release/llama*-batched* "$release_dir/bin/" || true
+    cp tools/server/qwen3_nonthinking.jinja "$release_dir/bin/" || true
+    # cp build/bin/Release/llama-simple* "$release_dir/bin/" || true
+    # cp build/bin/Release/llama*-batched* "$release_dir/bin/" || true
     cp build/bin/Release/llama-gguf* "$release_dir/bin/" || true
-    cp build/bin/Release/llama-cli* "$release_dir/bin/" || true
+    # cp build/bin/Release/llama-cli* "$release_dir/bin/" || true
     cp build/bin/Release/llama-bench* "$release_dir/bin/" || true
-    cp build/bin/Release/llama-mtmd-cli* "$release_dir/bin/" || true
+    # cp build/bin/Release/llama-mtmd-cli* "$release_dir/bin/" || true
     cp ci/run_llama_server_win.* "$release_dir/bin/" || true
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
