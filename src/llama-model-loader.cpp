@@ -1,12 +1,11 @@
 #include "llama-model-loader.h"
 
 #include "ggml.h"
-
+#include "ggml-hmutils.h"
 #include <array>
 #include <cinttypes>
 #include <cstring>
 #include <future>
-
 static const size_t kiB = 1024;
 static const size_t MiB = 1024*kiB;
 static const size_t GiB = 1024*MiB;
@@ -500,6 +499,12 @@ llama_model_loader::llama_model_loader(
 
     get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
     llm_kv = LLM_KV(llm_arch_from_string(arch_name));
+    if(endsWithMem(fname)){
+      this->use_mmap = use_mmap;
+      this->check_tensors = check_tensors;
+      LLAMA_LOG_INFO("%s: just return for membuffer \n", __func__);
+      return;
+    }
 
     files.emplace_back(new llama_file(fname.c_str(), "rb"));
     contexts.emplace_back(ctx);

@@ -1,6 +1,7 @@
 #include "houmo-llmodel.h"
 #include "houmo-vllmodel.h"
 #include "ggml.h"
+#include "ggml-hmutils.h"
 #include "gguf.h"
 #include "llama-batch.h"
 #include "llama-impl.h"
@@ -228,10 +229,29 @@ void HouMoLLModel::Impl::fill_parameters(struct gguf_context *ctx) {
 void HouMoLLModel::Impl::read_tensor_to_buffer(const std::string &file_name,
                                                size_t offset, size_t size,
                                                std::vector<char> &buffer) {
-    // 打开输入文件
+    if(endsWithMem(file_name)){
+      void**buffers;
+      void* bufferSize;
+      int buffers_count = 0;
+      if (parseMemoryString(file_name.c_str(), &buffers, &bufferSize, &buffers_count)) {
+        printf("##解析成功:\n");
+        LLAMA_LOG_INFO("buffers (void**): 0x%p\n", buffers);
+        LLAMA_LOG_INFO("bufferSize (void*): 0x%p\n", bufferSize);
+        LLAMA_LOG_INFO("buffers_count (int): %d\n", buffers_count);
+    }
+    size_t model_size= *(size_t*)bufferSize;
+    LLAMA_LOG_INFO("buffers[0]: %p\n", buffers[0]);
+    LLAMA_LOG_INFO("model_size: %lld\n", model_size);
+    memcpy(buffer.data(),(char*)buffers[0]+offset, size);
+    LLAMA_LOG_INFO("read membuffer offset:%zu  size:%zu to buffer\r\n",offset,size);
+    return;
+    }
+
+    LLAMA_LOG_INFO("fread mem offset:%zu  size:%zu to buffer\r\n",offset,size);
+
     std::ifstream input_file(file_name, std::ios::binary);
     if (!input_file.is_open()) {
-        std::cerr << "Failed to open file: " << file_name << std::endl;
+        std::cerr << "##Failed to open file: " << file_name << std::endl;
         return;
     }
 
@@ -263,7 +283,7 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
     };
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
     fill_parameters(ctx);
-    LLAMA_LOG_INFO("after gguf_init_from_file\n");
+    LLAMA_LOG_INFO("HouMoSingleCardModel after gguf_init_from_file\n");
     // 从gguf文件中加载hmmodels
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
     int device_id = 0;
@@ -287,6 +307,7 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
     option_prefill.SetDummyTensors(dummy_tensor_names);
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
     const std::regex kDecodePattern("^decoder(_\\d+)?\\.hmm$");
+
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
@@ -297,6 +318,7 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         // auto *tensor = ggml_get_tensor(ctx_data, name);
         std::vector<char> buffer(size);
+
         read_tensor_to_buffer(file_name, offset, size, buffer);
         if (strncmp(name, "quant_embedding.pt", strlen("quant_embedding.pt")) ==
             0) {
@@ -715,7 +737,7 @@ bool HouMoDualCardModel::houmo_load(const std::string &file_name) {
         /*.ctx      = */ &ctx_data,
     };
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
-    LLAMA_LOG_INFO("after gguf_init_from_file\n");
+    LLAMA_LOG_INFO("HouMoDualCardModel after gguf_init_from_file\n");
     fill_parameters(ctx);
     // 从gguf文件中加载hmmodels
     auto device_ids = parse_deviceids();

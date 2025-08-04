@@ -5,7 +5,9 @@
 #include "ggml-impl.h"
 #include "ggml-threading.h"
 #include "ggml-cpu.h"
+#include "ggml-hmutils.h"
 #include "ggml.h"
+
 
 // FIXME: required here for quantization functions
 #include "ggml-quants.h"
@@ -556,6 +558,28 @@ static wchar_t * ggml_mbstowcs(const char * mbs) {
 #endif
 
 FILE * ggml_fopen(const char * fname, const char * mode) {
+
+if(hasSuffix(fname,"mem")){
+    GGML_LOG_INFO("++call open from membuffer\r\n");
+    void**buffers;
+    void* bufferSize;
+    int buffers_count = 0;
+
+    if (parseMemoryString(fname, &buffers, &bufferSize, &buffers_count)) {
+        printf("解析成功:\n");
+        GGML_LOG_INFO("buffers (void**): 0x%p\n", buffers);
+        GGML_LOG_INFO("bufferSize (void*): 0x%p\n", bufferSize);
+        GGML_LOG_INFO("buffers_count (int): %d\n", buffers_count);
+    }
+    size_t model_size= *(size_t*)bufferSize;
+    GGML_LOG_INFO("buffers[0]: %p\n", buffers[0]);
+    GGML_LOG_INFO("model_size: %lld\n", model_size);
+    char magic_string[5]={0};
+    memcpy(magic_string,buffers[0],4);
+    GGML_LOG_INFO("magic_string is:%s\r\n",magic_string);
+    return fmemopen(buffers[0],model_size, mode);
+
+} else {
 #ifdef _WIN32
     FILE * file = NULL;
 
@@ -580,7 +604,7 @@ FILE * ggml_fopen(const char * fname, const char * mode) {
 #else
     return fopen(fname, mode);
 #endif
-
+}
 }
 static void ggml_vec_dot_f32(int n, float * GGML_RESTRICT s, size_t bs, const float * GGML_RESTRICT x, size_t bx, const float * GGML_RESTRICT y, size_t by, int nrc);
 static void ggml_vec_dot_f16(int n, float * GGML_RESTRICT s, size_t bs, ggml_fp16_t * GGML_RESTRICT x, size_t bx, ggml_fp16_t * GGML_RESTRICT y, size_t by, int nrc);
@@ -6641,7 +6665,6 @@ static void ggml_graph_dump_dot_leaf_edge(FILE * fp, struct ggml_tensor * node, 
 
 void ggml_graph_dump_dot(const struct ggml_cgraph * gb, const struct ggml_cgraph * gf, const char * filename) {
     char color[16];
-
     FILE * fp = ggml_fopen(filename, "w");
     GGML_ASSERT(fp);
 

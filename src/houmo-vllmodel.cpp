@@ -16,7 +16,7 @@ bool HouMoVLLModel::houmo_load(const std::string &file_name) {
     };
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
     fill_parameters(ctx);
-    LLAMA_LOG_INFO("after gguf_init_from_file\n");
+    LLAMA_LOG_INFO("HouMoVLLModel after gguf_init_from_file\n");
     // 从gguf文件中加载hmmodels
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
     int device_id = 0;
@@ -186,7 +186,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     // 1. 将半精度浮点转换为int16_t
     auto inputs_embeds_int16 = inputs_embeds.to(torch::kInt16);
     inputs_embeds_int16 = inputs_embeds_int16.view({-1, n_embd_});
- 
+
     // 缓存输入
     memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
            inputs_embeds_int16.data_ptr<int16_t>(),
@@ -200,7 +200,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         LLAMA_LOG_INFO("%s: logits is nullptr, only cache input\n", __func__);
         return 0;
     }
- 
+
     size_t input_echo_len = offset_embedding_id_;
     size_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
     static_cast<float>(prefill_length_));

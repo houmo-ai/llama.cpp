@@ -1,4 +1,5 @@
 #include "ggml.h"
+#include "ggml-hmutils.h"
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 #include "gguf.h"
@@ -723,24 +724,53 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
     return ctx;
 }
 
+std::map<const char*, gguf_context*, CStringCompare> ggufMap;
+
 struct gguf_context * gguf_init_from_file(const char * fname, struct gguf_init_params params) {
-    FILE * file = ggml_fopen(fname, "rb");
+    if(endsWithMem(fname)){
+        auto it = ggufMap.find(fname);
+        if (it != ggufMap.end()) {
+            // 存在：提取对应的gguf_context*
+            gguf_context* existingContext = it->second;
+            GGML_LOG_DEBUG("已存在于map中，地址: %p\r\n" , existingContext);
+            return existingContext;
+        } else {
+        // 不存在：创建新的gguf_context
+        FILE * file = ggml_fopen(fname, "rb");
 
-    if (!file) {
-        GGML_LOG_ERROR("%s: failed to open GGUF file '%s'\n", __func__, fname);
-        return nullptr;
+        if (!file) {
+            GGML_LOG_ERROR("%s: failed to open GGUF file '%s'\n", __func__, fname);
+            return nullptr;
+        }
+
+        struct gguf_context * result = gguf_init_from_file_impl(file, params);
+        ggufMap[fname] = result;
+        fclose(file);
+        GGML_LOG_DEBUG("不存在，创建新对象，地址: %p\r\n" , result);
+        return result;
+        }
+    } else {
+        FILE * file = ggml_fopen(fname, "rb");
+
+        if (!file) {
+            GGML_LOG_ERROR("%s: failed to open GGUF file '%s'\n", __func__, fname);
+            return nullptr;
+        }
+
+        struct gguf_context * result = gguf_init_from_file_impl(file, params);
+        fclose(file);
+        return result;
     }
-
-    struct gguf_context * result = gguf_init_from_file_impl(file, params);
-    fclose(file);
-    return result;
 }
 
 void gguf_free(struct gguf_context * ctx) {
     if (ctx == nullptr) {
         return;
     }
-    delete ctx;
+    if(0==ggufMap.size())
+      delete ctx;
+    else
+      GGML_LOG_DEBUG("load from membuffer dont delete for acceleration");
 }
 
 const char * gguf_type_name(enum gguf_type type) {
