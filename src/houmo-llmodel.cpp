@@ -12,6 +12,33 @@
 #include <regex>
 #include <string>
 #include <vector>
+static std::vector<int> parse_deviceids() {
+    std::vector<int> deviceIds;
+    const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
+
+    if (device_id_str == nullptr) {
+        deviceIds.push_back(0);
+        deviceIds.push_back(1);
+        return deviceIds;
+    }
+
+    std::string deviceList(device_id_str);
+    std::istringstream iss(deviceList);
+    std::string token;
+
+    while (std::getline(iss, token, ',')) {
+        try {
+            // 转换为整数并添加到列表
+            deviceIds.push_back(std::stoi(token));
+        } catch (const std::invalid_argument &) {
+            std::cerr << "Invalid device ID: " << token << std::endl;
+        } catch (const std::out_of_range &) {
+            std::cerr << "Device ID out of range: " << token << std::endl;
+        }
+    }
+
+    return deviceIds;
+}
 /**
  * @brief HouMoSingleCardModel is the derived class for single-card HouMo model.
  * @details 试用一张卡可以加载整个模型，不需要拆分模型。
@@ -229,22 +256,23 @@ void HouMoLLModel::Impl::fill_parameters(struct gguf_context *ctx) {
 void HouMoLLModel::Impl::read_tensor_to_buffer(const std::string &file_name,
                                                size_t offset, size_t size,
                                                std::vector<char> &buffer) {
-    if(endsWithMem(file_name)){
-      void**buffers;
-      void* bufferSize;
-      int buffers_count = 0;
-      if (parseMemoryString(file_name.c_str(), &buffers, &bufferSize, &buffers_count)) {
-        printf("##解析成功:\n");
-        LLAMA_LOG_INFO("buffers (void**): 0x%p\n", buffers);
-        LLAMA_LOG_INFO("bufferSize (void*): 0x%p\n", bufferSize);
-        LLAMA_LOG_INFO("buffers_count (int): %d\n", buffers_count);
-    }
-    size_t model_size= *(size_t*)bufferSize;
-    LLAMA_LOG_INFO("buffers[0]: %p\n", buffers[0]);
-    LLAMA_LOG_INFO("model_size: %lld\n", model_size);
-    memcpy(buffer.data(),(char*)buffers[0]+offset, size);
-    LLAMA_LOG_INFO("read membuffer offset:%zu  size:%zu to buffer\r\n",offset,size);
-    return;
+    if (endsWithMem(file_name)) {
+        void **buffers;
+        void *bufferSize;
+        int buffers_count = 0;
+        if (parseMemoryString(file_name.c_str(), &buffers, &bufferSize,
+                              &buffers_count)) {
+            LLAMA_LOG_INFO("buffers (void**): 0x%p\n", (void *)buffers);
+            LLAMA_LOG_INFO("bufferSize (void*): 0x%p\n", bufferSize);
+            LLAMA_LOG_INFO("buffers_count (int): %d\n", buffers_count);
+        }
+        size_t model_size = *(size_t *)bufferSize;
+        LLAMA_LOG_INFO("buffers[0]: %p\n", buffers[0]);
+        LLAMA_LOG_INFO("model_size: %zu\n", model_size);
+        memcpy(buffer.data(), (char *)buffers[0] + offset, size);
+        LLAMA_LOG_INFO("read membuffer offset:%zu  size:%zu to buffer\r\n",
+                       offset, size);
+        return;
     }
 
     LLAMA_LOG_INFO("fread mem offset:%zu  size:%zu to buffer\r\n",offset,size);
@@ -285,12 +313,14 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
     fill_parameters(ctx);
     LLAMA_LOG_INFO("HouMoSingleCardModel after gguf_init_from_file\n");
     // 从gguf文件中加载hmmodels
-    const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
-    int device_id = 0;
-    if (device_id_str != nullptr) {
-        device_id = std::stoi(device_id_str);
+    auto device_ids = parse_deviceids();
+    if (device_ids.empty()) {
+        LLAMA_LOG_ERROR("%s: no device id found, please set HOUMO_DEVICE_ID\n",
+                        __func__);
+        device_ids.push_back(0);
     }
-    auto wm = tcim::Module::WeightManager::CreateWeightManager(device_id);
+    tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids, "");
+    auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
     auto option_decoder = tcim::Module::Option(wm);
 
     std::vector<std::string> dummy_tensor_names;
@@ -703,33 +733,7 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
     }
     return 0;
 }
-static std::vector<int> parse_deviceids() {
-    std::vector<int> deviceIds;
-    const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
 
-    if (device_id_str == nullptr) {
-        deviceIds.push_back(0);
-        deviceIds.push_back(1);
-        return deviceIds;
-    }
-
-    std::string deviceList(device_id_str);
-    std::istringstream iss(deviceList);
-    std::string token;
-
-    while (std::getline(iss, token, ',')) {
-        try {
-            // 转换为整数并添加到列表
-            deviceIds.push_back(std::stoi(token));
-        } catch (const std::invalid_argument &) {
-            std::cerr << "Invalid device ID: " << token << std::endl;
-        } catch (const std::out_of_range &) {
-            std::cerr << "Device ID out of range: " << token << std::endl;
-        }
-    }
-
-    return deviceIds;
-}
 bool HouMoDualCardModel::houmo_load(const std::string &file_name) {
     struct ggml_context *ctx_data = NULL;
     struct gguf_init_params params = {
