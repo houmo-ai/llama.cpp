@@ -110,7 +110,7 @@ static bool server_task_type_need_logits(server_task_type task_type) {
 
 struct slot_params {
     bool stream        = true;
-    bool cache_prompt  = true; // remember the prompt to avoid reprocessing all prompt
+    bool cache_prompt  = false; // remember the prompt to avoid reprocessing all prompt
     bool return_tokens = false;
 
     int32_t n_keep    =  0; // number of tokens to keep from initial prompt
@@ -260,7 +260,7 @@ struct server_task {
         params.timings_per_token = json_value(data, "timings_per_token", false);
 
         params.stream           = json_value(data, "stream",             false);
-        params.cache_prompt     = json_value(data, "cache_prompt",       true);
+        params.cache_prompt     = json_value(data, "cache_prompt",       false);
         params.return_tokens    = json_value(data, "return_tokens",      false);
         params.n_predict        = json_value(data, "n_predict",          json_value(data, "max_tokens", defaults.n_predict));
         params.n_indent         = json_value(data, "n_indent",           defaults.n_indent);
