@@ -100,7 +100,11 @@ build_llama() {
 
     # 创建或清理构建目录
     rm -rf build/*
-    cmake -B build  -DLLAMA_CURL=OFF
+    if [ $PLATFORM == "xh2" ]; then
+        cmake -B build  -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON
+    else
+        cmake -B build -DLLAMA_CURL=ON
+    fi
     cmake  --build build --config Release -j 8
     echo "Build completed."
 }

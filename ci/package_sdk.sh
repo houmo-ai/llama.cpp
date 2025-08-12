@@ -112,9 +112,18 @@ build_llama() {
 
     cd build
     if [ "$ARCH" == "aarch64" ]; then
-        cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF
+        if [ "$PLATFORM" == "xh2" ]; then
+            cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON
+        else
+            cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF
+        fi
     else
-        cmake .. -DLLAMA_CURL=OFF
+        if [ "$PLATFORM" == "xh2" ]; then
+            cmake .. -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON
+        else
+            # 默认使用x86_64架构
+            cmake .. -DLLAMA_CURL=OFF
+        fi
     fi
     make -j$(nproc)
     cd ..

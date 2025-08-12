@@ -186,44 +186,23 @@ bool HoumoVision::encoding(const std::vector<float> &input_data,
 int32_t HoumoVision::image_width() const { return image_width_; }
 int32_t HoumoVision::image_height() const { return image_height_; }
 int32_t HoumoVision::image_channels() const { return image_channels_; }
-static inline float lerp(float s, float e, float t) { return s + (e - s) * t; }
+static inline int clip(int x, int lower, int upper) {
+    return std::max(lower, std::min(x, upper));
+}
 bool HoumoVision::image_resize(clip_image_u8_ptr &src,
                                clip_image_f32_ptr &dst) {
+    // 先resize到合适的尺寸
+    clip_image_u8 resized_img;
+    bicubic_resize(*src, resized_img, image_width_, image_height_);
+    // 再转换成f32
     dst->nx = image_width_;
     dst->ny = image_height_;
-    dst->buf.resize(3 * image_width_ * image_height_);
-    float x_ratio = static_cast<float>(src->nx - 1) / image_width_;
-    float y_ratio = static_cast<float>(src->ny - 1) / image_height_;
-
-    for (size_t y = 0; y < image_height_; y++) {
-        for (size_t x = 0; x < image_width_; x++) {
-            float px = x_ratio * x;
-            float py = y_ratio * y;
-            int x_floor = static_cast<int>(px);
-            int y_floor = static_cast<int>(py);
-            float x_lerp = px - x_floor;
-            float y_lerp = py - y_floor;
-
-            for (int c = 0; c < 3; c++) {
-                float top = lerp(
-                    static_cast<float>(
-                        src->buf[3 * (y_floor * src->nx + x_floor) + c]),
-                    static_cast<float>(
-                        src->buf[3 * (y_floor * src->nx + (x_floor + 1)) + c]),
-                    x_lerp);
-                float bottom = lerp(
-                    static_cast<float>(
-                        src->buf[3 * ((y_floor + 1) * src->nx + x_floor) + c]),
-                    static_cast<float>(
-                        src->buf[3 * ((y_floor + 1) * src->nx + (x_floor + 1)) +
-                                 c]),
-                    x_lerp);
-                dst->buf[3 * (y * image_width_ + x) + c] =
-                    static_cast<float>(lerp(top, bottom, y_lerp));
-            }
-        }
+    dst->buf.resize(resized_img.buf.size());
+    for (size_t i = 0; i < resized_img.buf.size(); ++i) {
+        // 将uint8_t转换为float
+        dst->buf[i] = static_cast<float>(resized_img.buf[i]);
     }
-    return 0;
+    return true;
 }
 
 void HoumoVision::set_windows_attention() {
@@ -283,4 +262,94 @@ void HoumoVision::set_windows_attention() {
     auto &mask_tensor = input_tensors_["window_mask"];
     mask_tensor.Buffer().CopyFromHost(mask.data(), mask_tensor.MemSize());
     module_->SetInput("window_mask", mask_tensor);
+}
+
+bool HoumoVision::bicubic_resize(const clip_image_u8 &img, clip_image_u8 &dst,
+                                 int target_width, int target_height) {
+    const int nx = img.nx;
+    const int ny = img.ny;
+
+    dst.nx = target_width;
+    dst.ny = target_height;
+    dst.buf.resize(3 * target_width * target_height);
+
+    float Cc;
+    float C[5];
+    float d0, d2, d3, a0, a1, a2, a3;
+    int i, j, k, jj;
+    int x, y;
+    float dx, dy;
+    float tx, ty;
+
+    tx = (float)nx / (float)target_width;
+    ty = (float)ny / (float)target_height;
+
+    // Bicubic interpolation; adapted from ViT.cpp, inspired from :
+    //    ->
+    //    https://github.com/yglukhov/bicubic-interpolation-image-processing/blob/master/libimage.c#L36
+    //    -> https://en.wikipedia.org/wiki/Bicubic_interpolation
+
+    for (i = 0; i < target_height; i++) {
+        for (j = 0; j < target_width; j++) {
+            x = (int)(tx * j);
+            y = (int)(ty * i);
+
+            dx = tx * j - x;
+            dy = ty * i - y;
+
+            for (k = 0; k < 3; k++) {
+                for (jj = 0; jj <= 3; jj++) {
+                    d0 = img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
+                                  clip(x - 1, 0, nx - 1)) *
+                                     3 +
+                                 k] -
+                         img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
+                                  clip(x, 0, nx - 1)) *
+                                     3 +
+                                 k];
+                    d2 = img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
+                                  clip(x + 1, 0, nx - 1)) *
+                                     3 +
+                                 k] -
+                         img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
+                                  clip(x, 0, nx - 1)) *
+                                     3 +
+                                 k];
+                    d3 = img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
+                                  clip(x + 2, 0, nx - 1)) *
+                                     3 +
+                                 k] -
+                         img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
+                                  clip(x, 0, nx - 1)) *
+                                     3 +
+                                 k];
+                    a0 = img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
+                                  clip(x, 0, nx - 1)) *
+                                     3 +
+                                 k];
+
+                    a1 = -1.0 / 3 * d0 + d2 - 1.0 / 6 * d3;
+                    a2 = 1.0 / 2 * d0 + 1.0 / 2 * d2;
+                    a3 = -1.0 / 6 * d0 - 1.0 / 2 * d2 + 1.0 / 6 * d3;
+
+                    C[jj] = a0 + a1 * dx + a2 * dx * dx + a3 * dx * dx * dx;
+
+                    d0 = C[0] - C[1];
+                    d2 = C[2] - C[1];
+                    d3 = C[3] - C[1];
+                    a0 = C[1];
+                    a1 = -1.0 / 3 * d0 + d2 - 1.0 / 6 * d3;
+                    a2 = 1.0 / 2 * d0 + 1.0 / 2 * d2;
+                    a3 = -1.0 / 6 * d0 - 1.0 / 2 * d2 + 1.0 / 6 * d3;
+                    Cc = a0 + a1 * dy + a2 * dy * dy + a3 * dy * dy * dy;
+
+                    const uint8_t Cc2 =
+                        std::min(std::max(std::round(Cc), 0.0f), 255.0f);
+                    dst.buf[(i * target_width + j) * 3 + k] = float(Cc2);
+                }
+            }
+        }
+    }
+
+    return true;
 }

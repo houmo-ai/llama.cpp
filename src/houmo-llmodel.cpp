@@ -319,8 +319,13 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
                         __func__);
         device_ids.push_back(0);
     }
-    tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids, "");
+#ifdef XH2_ENABLED
+    tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids, "Xh2HalBackend");
     auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
+#else
+    //FIXME: xh1 还未发布v2.5.0, 还不支持DevManager
+    auto wm = tcim::Module::WeightManager::CreateWeightManager(device_ids[0]);
+#endif
     auto option_decoder = tcim::Module::Option(wm);
 
     std::vector<std::string> dummy_tensor_names;

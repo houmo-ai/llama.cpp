@@ -31,6 +31,10 @@ class HoumoVision {
      */
     void set_windows_attention();
 
+    bool bicubic_resize(const clip_image_u8 &img,
+                                     clip_image_u8 &dst, int target_width,
+                                     int target_height);
+
   private:
     std::shared_ptr<tcim::Module> module_;
     std::map<std::string, tcim::Tensor> input_tensors_;

@@ -6,7 +6,7 @@ set -o pipefail  # 管道命令中任何一个失败都算失败
 show_help() {
     echo "usage: run_llama_server.sh [env] [--list|--download model_name] run model_name [extra_args...]"
     echo ""
-    echo "usage 示例0: <多卡环境绑卡操作>：export HOUMO_DEVICE_ID=0"
+    echo "usage 示例0: <多卡环境绑卡操作>：export HOUMO_DEVICE_ID=0 或者双卡export HOUMO_DEVICE_ID=0,1"
     echo ""
     echo "usage 示例1: <指定端口号>: run_llama_server.sh run model_name --port 18080"
     echo ""
@@ -18,7 +18,7 @@ show_help() {
 }
 # 初始化额外参数数组（避免未定义错误）
 extra_args=()
-default_port_args=("--port" "18080")  # 默认端口号
+default_port_args=("--port" "17701")  # 默认端口号
 # xh1 模型列表
 declare -A models_xh1=(
     ["Qwen2.5-14b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-14B-F16-8k-4core-xh1-v0.0.1.gguf"
@@ -38,6 +38,7 @@ declare -A models_xh2=(
     ["Qwen3-8b-2k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-8B-F16-2k-2core-xh2-v0.0.1.gguf"
     ["Qwen3-14b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-14B-F16-8k-2core-xh2-v0.0.1.gguf"
     ["Qwen3-14b-2k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-14B-F16-2k-2core-xh2-v0.0.1.gguf"
+    ["Qwen2.5-Coder-7b-2k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-QwenCoder2.5-7B-F16-2k-2core-xh2-v0.0.1.gguf"
 )
 
 # 设置默认值
@@ -218,13 +219,15 @@ fi
 launch_cmd+=("${extra_args[@]}")
 
 # 启动服务
+# 检查所有参数中是否已包含--port
+if ! (printf "%s\n" "${launch_cmd[@]}" | grep -q -- "--port"); then
+    # 不存在--port参数，添加默认端口
+    launch_cmd+=("${default_port_args[@]}")
+fi
+
+# 显示透传参数（如果有）
 if [ ${#extra_args[@]} -gt 0 ]; then
     echo "透传参数: ${extra_args[*]}"
-    if (echo "${extra_args[@]}" | grep -q -- "--port"); then
-        default_port=""  # 透传参数中包含端口参数，则不使用默认端口,否则使用默认端口
-    else
-        launch_cmd+=("${default_port_args[@]}")
-    fi
 fi
 
 echo "启动命令: ${launch_cmd[*]}"
