@@ -40,7 +40,6 @@ xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/2025/08/14/
 xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/ubuntu2004/houmo_drv_xh1_v2.4.1_ubuntu2004_${ARCH}.run"
 #FIXME:
 xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.3.0/2025/08/07/1612/ubuntu2004/houmo_drv_xh2_v0.3.0_ubuntu2004_${ARCH}.run"
-xh2_sw_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/libxh2a_hal_box.so"
 # 下载文件并检查是否成功
 download_file() {
     local url=$1
@@ -66,15 +65,11 @@ deploy_dadao_sdk() {
 
 
     # 提取SDK
-    if [[ $PLATFORM == "xh2"  && "$ARCH" == "aarch64" ]]; then
-        download_file "$xh2_sw_sdk_url_aarch64" third_party/houmo/lib/libxh2a_hal.so
-    else
-        # 下载并解压 SystemWare SDK
-        download_file "$sw_url" "third_party/sw_sdk.run"
-        bash third_party/sw_sdk.run extract --path third_party/
-    fi
+    download_file "$sw_url" "third_party/sw_sdk.run"
+    bash third_party/sw_sdk.run extract --path third_party/
 
-    if [[ $PLATFORM == "xh2" && "$ARCH" == "x86_64" ]]; then
+
+    if [[ $PLATFORM == "xh2" ]]; then
         cp third_party/houmo-sdk/hal/lib/*.so third_party/houmo/lib/
         rm -rf third_party/houmo-sdk third_party/sw_sdk.run third_party/houmo_drv*
     fi
@@ -169,6 +164,7 @@ package_llama() {
     sed -i "s/xh_type=.*/xh_type=$PLATFORM/" "$release_dir/run_llama_server.sh"
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
+    cp requirements/requirements-convert_hm_to_gguf.txt "$release_dir/scripts/" || true
 
     echo "Release files have been organized under: $release_dir"
     # 显示打包内容摘要

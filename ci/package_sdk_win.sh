@@ -147,6 +147,7 @@ package_llama() {
     cp ci/run_llama_server_win.* "$release_dir/bin/" || true
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
+    cp requirements/requirements-convert_hm_to_gguf.txt "$release_dir/scripts/" || true
 
     echo "Release files have been organized under: $release_dir"
     # 显示打包内容摘要

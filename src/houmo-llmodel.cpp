@@ -12,13 +12,14 @@
 #include <regex>
 #include <string>
 #include <vector>
-static std::vector<int> parse_deviceids() {
+static std::vector<int> parse_deviceids(bool single_card = true) {
     std::vector<int> deviceIds;
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
 
     if (device_id_str == nullptr) {
         deviceIds.push_back(0);
-        deviceIds.push_back(1);
+        if (!single_card)
+            deviceIds.push_back(1);
         return deviceIds;
     }
 
@@ -314,11 +315,6 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
     LLAMA_LOG_INFO("HouMoSingleCardModel after gguf_init_from_file\n");
     // 从gguf文件中加载hmmodels
     auto device_ids = parse_deviceids();
-    if (device_ids.empty()) {
-        LLAMA_LOG_ERROR("%s: no device id found, please set HOUMO_DEVICE_ID\n",
-                        __func__);
-        device_ids.push_back(0);
-    }
 #ifdef XH2_ENABLED
     tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids, "Xh2HalBackend");
     auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
@@ -763,7 +759,7 @@ bool HouMoDualCardModel::houmo_load(const std::string &file_name) {
     LLAMA_LOG_INFO("HouMoDualCardModel after gguf_init_from_file\n");
     fill_parameters(ctx);
     // 从gguf文件中加载hmmodels
-    auto device_ids = parse_deviceids();
+    auto device_ids = parse_deviceids(false);
     if (device_ids.size() != 2) {
         LLAMA_LOG_ERROR(
             "HOUMO_DEVICE_ID should contain exactly two device IDs.\n");
