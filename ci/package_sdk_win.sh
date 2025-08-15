@@ -10,7 +10,7 @@ ARCH=x86_64
 
 # SDK URLs
 xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/windows11/houmo_tcim_runtime_xh1_windows11_x86_64-2.4.1.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/2025/08/10/2330/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-2.5.0.dev20250810.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/2025/08/14/2330/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-2.5.0.dev20250814.tar.gz"
 xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/windows11/houmo_drv_xh1_v2.4.1_windows11_x86_64.zip"
 xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.3.0/2025/08/07/1612/windows11/houmo_drv_xh2_v0.3.0_windows11_x86_64.zip"
 

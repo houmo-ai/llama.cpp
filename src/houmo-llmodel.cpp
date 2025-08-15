@@ -453,14 +453,28 @@ void HouMoSingleCardModel::houmo_init(int seq_max) {
                 item.names.push_back(k_cache_history_sum_name);
             }
 
-            if (n_decode_batch_ > 1) {
+            if (n_decode_batch_ > 1 &&  xh1_) {
                 k_cache_name = k_cache_name + "_batch" + std::to_string(i);
                 v_cache_name = v_cache_name + "_batch" + std::to_string(i);
                 k_cache_history_sum_name =
                     k_cache_history_sum_name + "_batch" + std::to_string(i);
             }
-            auto kcache = decode_model_->GetInput(k_cache_name);
-            auto vcache = decode_model_->GetInput(v_cache_name);
+            tcim::Tensor kcache, vcache;
+            if (!xh1_ && n_decode_batch_ > 1) {
+                kcache =
+                    decode_model_->GetInput(k_cache_name)
+                        .SelectROI(
+                            {i, 0, 0, 0},
+                            prefill_model_->GetInputInfo(k_cache_name).Shape());
+                vcache =
+                    decode_model_->GetInput(v_cache_name)
+                        .SelectROI(
+                            {i, 0, 0, 0},
+                            prefill_model_->GetInputInfo(v_cache_name).Shape());
+            } else {
+                kcache = decode_model_->GetInput(k_cache_name);
+                vcache = decode_model_->GetInput(v_cache_name);
+            }
             if (n_decode_batch_ > 1 || seq_max == 1) {
                 item.tensors.push_back(kcache);
                 item.tensors.push_back(vcache);
@@ -707,7 +721,7 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
             auto &item = kv_cache_[seq_id];
             for (size_t idx = 0; idx < item.tensors.size(); idx++) {
                 std::string name = item.names[idx];
-                if (n_decode_batch_ > 1)
+                if (n_decode_batch_ > 1 && xh1_)
                     name = name + "_batch" + std::to_string(item.seq_id);
                 auto tensor = item.tensors[idx];
                 decode_model_->SetInput(name, tensor);
