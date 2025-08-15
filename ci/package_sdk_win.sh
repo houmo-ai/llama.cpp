@@ -103,7 +103,7 @@ build_llama() {
     if [ $PLATFORM == "xh2" ]; then
         cmake -B build  -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON
     else
-        cmake -B build -DLLAMA_CURL=ON
+        cmake -B build -DLLAMA_CURL=OFF
     fi
     cmake  --build build --config Release -j 8
     echo "Build completed."
@@ -127,7 +127,8 @@ package_llama() {
     # 复制库文件
     cp build/src/Release/*.lib "$release_dir/lib/" || true
     cp build/common/Release/*.lib "$release_dir/lib/" || true
-
+    cp build/tools/mtmd/Release/*.lib "$release_dir/lib/" || true
+    cp build/ggml/src/Release/*.lib "$release_dir/lib/" || true
     cp build/bin/Release/*.dll "$release_dir/bin/" || true
 
     cp third_party/houmo/lib/*.dll "$release_dir/bin/" || true
