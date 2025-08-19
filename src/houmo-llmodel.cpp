@@ -610,7 +610,7 @@ int HouMoSingleCardModel::houmo_prefill(std::vector<llama_token> &tokens,
         prefill_model_->Run();
         prefill_model_->Sync();
     }
-    decode_valid_length_[seq_id] = input_echo_len;
+    decode_valid_length_[seq_id] = input_echo_len - 1;
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
     assert(prefill_output_data.Info().DataType() == tcim::DataType::INT16);
@@ -1070,7 +1070,7 @@ int HouMoDualCardModel::houmo_prefill(std::vector<llama_token> &tokens,
         prefill_model_card1_->Sync();
         LLAMA_LOG_DEBUG("%s: prefill_model_card1_ run success\n", __func__);
     }
-    decode_valid_length_[seq_id] = input_echo_len;
+    decode_valid_length_[seq_id] = input_echo_len - 1;
     tcim::Tensor prefill_output_data =
         prefill_model_card1_->GetOutput(prefill_output_names_[0]);
     assert(prefill_output_data.Info().DataType() == tcim::DataType::INT16);

@@ -279,7 +279,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         prefill_model_->Run();
         prefill_model_->Sync();
     }
-    decode_valid_length_[seq_id] = input_echo_len;
+    decode_valid_length_[seq_id] = input_echo_len - 1;
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
     // 转浮点
