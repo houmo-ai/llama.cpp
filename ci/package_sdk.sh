@@ -35,9 +35,9 @@ case "$PLATFORM" in
 esac
 
 # SDK URLs
-xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_${ARCH}-2.4.1.tar.gz"
+xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/08/14/0200/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_${ARCH}-2.4.2.tar.gz"
 xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.3.0/2025/08/18/1047/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.3.0.tar.gz"
-xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/06/25/0200/ubuntu2004/houmo_drv_xh1_v2.4.1_ubuntu2004_${ARCH}.run"
+xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/08/14/0200/ubuntu2004/houmo_drv_xh1_v2.4.2_ubuntu2004_${ARCH}.run"
 #FIXME:
 xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.3.0/2025/08/18/1047/ubuntu2004/houmo_drv_xh2_v0.3.0_ubuntu2004_${ARCH}.run"
 # 下载文件并检查是否成功
@@ -143,6 +143,7 @@ package_llama() {
 
     # 复制库文件
     cp build/bin/*.so "$release_dir/lib/" || true
+    cp build/common/libcommon.a "$release_dir/lib/"
     cp third_party/houmo/lib/*.so* "$release_dir/lib/" || true
     cp /opt/libtorch/$ARCH/libtorch/lib/*.so* "$release_dir/lib/" || true
 
