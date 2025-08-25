@@ -1613,11 +1613,21 @@ class Qwen2Model(TextModel):
         )
         if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
             embedding_weight = embedding_weight["weight"]
-        embedding_weight = embedding_weight.to(torch.float16)  # 转换为float16
+        print(f"embedding_weight.dtype: {embedding_weight.dtype}")
+        if embedding_weight.dtype == torch.int16:
+            print(
+                "keep weight to int16 for minimal memory usage. convert to float32 when using in C++"
+            )
+            embedding_weight = embedding_weight.to(torch.int16)
+        elif embedding_weight.dtype == torch.float16:
+            print("keep embedding weight as float16")
+        else:
+            print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
+            embedding_weight = embedding_weight.to(torch.float32)
         # 创建空模块并手动注册参数
         m = nn.Module()
-        par = nn.Parameter(embedding_weight)  # 注册为可训练参数
-        m.register_parameter("0", par)  # 参数名称为"0"
+        # par = nn.Parameter(embedding_weight)  # 注册为可训练参数
+        m.register_buffer("0", embedding_weight)  # 参数名称为"0"
         scripted_model = torch.jit.script(m)
         out_path = self.dir_model / "cpp_quant_embedding.pt"
         scripted_model.save(out_path)
@@ -1648,8 +1658,8 @@ class Qwen2Model(TextModel):
                 binary_data = np.frombuffer(file.read(), dtype=np.uint8)
                 logger.info(f".....Tensor size: {binary_data.shape}")
                 data = torch.from_numpy(binary_data.copy())
-                # if name == "quant_embedding.pt":
-                #     os.remove(file_path)
+                if name == "quant_embedding.pt":
+                    os.remove(file_path)
                 yield name, data
 
     def prepare_tensors(self):
@@ -1699,11 +1709,20 @@ class Qwen2VLModel(TextModel):
         )
         if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
             embedding_weight = embedding_weight["weight"]
-        embedding_weight = embedding_weight.to(torch.float16)  # 转换为float16
+        print(f"embedding_weight.dtype: {embedding_weight.dtype}")
+        if embedding_weight.dtype == torch.int16:
+            print(
+                "keep weight to int16 for minimal memory usage. convert to float32 when using in C++"
+            )
+            embedding_weight = embedding_weight.to(torch.int16)
+        elif embedding_weight.dtype == torch.float16:
+            print("keep embedding weight as float16")
+        else:
+            print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
+            embedding_weight = embedding_weight.to(torch.float32)
         # 创建空模块并手动注册参数
         m = nn.Module()
-        par = nn.Parameter(embedding_weight)  # 注册为可训练参数
-        m.register_parameter("0", par)  # 参数名称为"0"
+        m.register_buffer("0", embedding_weight)  # 参数名称为"0""
         scripted_model = torch.jit.script(m)
         out_path = self.dir_model / "cpp_quant_embedding.pt"
         scripted_model.save(out_path)
@@ -1734,8 +1753,8 @@ class Qwen2VLModel(TextModel):
                 binary_data = np.frombuffer(file.read(), dtype=np.uint8)
                 logger.info(f".....Tensor size: {binary_data.shape}")
                 data = torch.from_numpy(binary_data.copy())
-                # if name == "quant_embedding.pt":
-                #     os.remove(file_path)
+                if name == "quant_embedding.pt":
+                    os.remove(file_path)
                 yield name, data
 
     def prepare_tensors(self):

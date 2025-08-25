@@ -55,9 +55,11 @@ bool HouMoVLLModel::houmo_load(const std::string &file_name) {
             0) {
             torch::Tensor input;
             try {
-                std::istringstream stream(
-                    std::string((char *)buffer.data(), size));
-                torch::load(input, stream);
+                torch::load(input, buffer.data(), size);
+                if (!input.is_floating_point()) {
+                    input = input.to(torch::kFloat32);
+                }
+                input = input.detach();
                 input = input.view({-1, n_embd_});
                 embedding_ = torch::nn::Embedding::from_pretrained(input);
             } catch (const c10::Error &e) {
