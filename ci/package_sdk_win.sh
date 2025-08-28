@@ -123,6 +123,7 @@ package_llama() {
     cp -r ggml/include/* "$release_dir/include/" || true
     cp -r common/*.h* "$release_dir/include/" || true
     cp -r tools/mtmd/mtmd*.h "$release_dir/include/" || true
+    cp -r src/llama*.h* "$release_dir/include/" || true
 
     # 复制库文件
     cp build/src/Release/*.lib "$release_dir/lib/" || true

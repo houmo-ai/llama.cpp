@@ -10,6 +10,7 @@
 #include "llama-kv-cache-unified-iswa.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
+#include "houmo-llmodel.h"
 
 #include "ggml-cpp.h"
 
@@ -1568,7 +1569,11 @@ void llama_model::load_vocab(llama_model_loader & ml) {
 
     vocab.load(ml, kv);
 }
+
 bool llama_model::load_hmmodels(llama_model_loader & ml) {
+    if (hm_llmodel == nullptr) {
+        hm_llmodel = std::make_shared<HouMoLLModel>();
+    }
     return hm_llmodel->houmo_load(ml.fname_);
 }
 

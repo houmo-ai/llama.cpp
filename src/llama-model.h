@@ -7,7 +7,6 @@
 #include "llama-memory.h"
 #include "llama-vocab.h"
 
-#include "houmo-llmodel.h"
 
 #include <memory>
 #include <string>
@@ -17,7 +16,7 @@
 struct llama_cparams;
 struct llama_ubatch;
 struct llama_model_loader;
-
+class  HouMoLLModel;
 // available models
 enum llm_type {
     LLM_TYPE_UNKNOWN,
@@ -349,7 +348,7 @@ struct llama_model {
     llama_hparams hparams = {};
     llama_vocab   vocab;
 
-    std::shared_ptr<HouMoLLModel> hm_llmodel = std::make_shared<HouMoLLModel>();
+    std::shared_ptr<HouMoLLModel> hm_llmodel = nullptr;
     // for classifier models
     std::vector<std::string> classifier_labels;
 

@@ -14,6 +14,7 @@ show_help() {
     echo ""
     echo "usage 示例3: <非多batch模型性能会下降，且受限显存大小，最大4>: run_llama_server.sh run model_name -np 2"
     echo ""
+    echo "usage 示例4: <后台运行>: run_llama_server.sh rund  model_name --port 18080"
     echo "更多参数，参考llama-server的帮助文档"
 }
 # 初始化额外参数数组（避免未定义错误）
@@ -23,7 +24,7 @@ default_port_args=("--port" "17701")  # 默认端口号
 declare -A models_xh1=(
     ["Qwen2.5-14b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-14B-F16-8k-4core-xh1-v0.0.1.gguf"
     ["Qwen2.5-7b-4batch"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-7B-4batch-F16-2k-4core-xh1-v0.0.1.gguf"
-    ["Qwen3-8b-1batch"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-8B-F16-8K-4core-xh1-v0.0.1.gguf"
+    ["Qwen3-8b-1batch"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-8B-F16-8K-4core-xh1-v0.0.2.gguf"
     ["Qwenvl2.5-3b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-F16-2k-4core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-mmproj-F16-2k-4core-xh1-v0.0.1.gguf"
     ["Qwenvl2.5-7b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-F16-2k-4core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-mmproj-F16-2k-4core-xh1-v0.0.1.gguf"
     ["Qwenvl2.5-3b-2core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-F16-2k-2core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-mmproj-F16-2k-2core-xh1-v0.0.1.gguf"
@@ -44,7 +45,7 @@ declare -A models_xh2=(
 # 设置默认值
 xh_type="xh1"  # 可通过参数--xh-type修改（如需要）
 export LD_LIBRARY_PATH=$(pwd)/lib
-
+rund=false  # 是否后台运行
 # 设置xh2特定环境变量
 if [ "$xh_type" == "xh2" ]; then
     export TCIM_BACKEND=Xh2HalBackend
@@ -126,7 +127,10 @@ while [[ "$#" -gt 0 ]]; do
             fi
             exit 0
             ;;
-        run)
+        run | rund)
+            if [ "$1" == "rund" ]; then
+                rund=true
+            fi
             if [ -z "$2" ]; then
                 echo "错误: 请指定要运行的模型名称"
                 exit 1
@@ -231,53 +235,59 @@ if [ ${#extra_args[@]} -gt 0 ]; then
 fi
 
 echo "启动命令: ${launch_cmd[*]}"
-nohup "${launch_cmd[@]}" > /dev/null 2>&1 &
-server_pid=$!
-echo "llama-server已在后台启动，PID: ${server_pid}"
+if [ "$rund" = false ]; then
+    echo "选择后台运行模式..."
+    "${launch_cmd[@]}"
+else
 
-# 等待服务启动
-echo "等待llama-server启动..."
-start_time=$(date +%s)
-timeout=30  # 超时时间30秒
+    nohup "${launch_cmd[@]}" > /dev/null 2>&1 &
+    server_pid=$!
+    echo "llama-server已在后台启动，PID: ${server_pid}"
 
-while true; do
-    current_time=$(date +%s)
-    elapsed_time=$((current_time - start_time))
+    # 等待服务启动
+    echo "等待llama-server启动..."
+    start_time=$(date +%s)
+    timeout=30  # 超时时间30秒
 
-    if [ $elapsed_time -ge $timeout ]; then
-        echo "错误: llama-server在${timeout}秒内未能启动"
-        exit 1
+    while true; do
+        current_time=$(date +%s)
+        elapsed_time=$((current_time - start_time))
+
+        if [ $elapsed_time -ge $timeout ]; then
+            echo "错误: llama-server在${timeout}秒内未能启动"
+            exit 1
+        fi
+
+        if pgrep -f "llama-server -m ${model_path}" > /dev/null; then
+            echo "llama-server已成功启动！"
+            break
+        fi
+
+        echo "等待中...(${elapsed_time}/${timeout}秒)"
+        sleep 1
+    done
+
+    # 健康检查
+    echo "执行llama-server健康检查..."
+    check_count=5
+    check_interval=10
+
+    for ((i=1; i<=check_count; i++)); do
+        echo "健康检查 ${i}/${check_count}..."
+        if ! pgrep -f "llama-server -m ${model_path}" > /dev/null; then
+            echo "错误: llama-server已停止运行"
+            exit 1
+        fi
+        remaining=$((check_count - i))
+        if [ $remaining -gt 0 ]; then
+            echo "llama-server运行正常，${check_interval}秒后进行下一次检查..."
+            sleep $check_interval
+        fi
+    done
+
+    echo "llama-server已成功启动并通过健康检查！"
+    echo "服务信息:"
+    if [ ${#extra_args[@]} -gt 0 ]; then
+        echo "- 透传参数: ${extra_args[*]}"
     fi
-
-    if pgrep -f "llama-server -m ${model_path}" > /dev/null; then
-        echo "llama-server已成功启动！"
-        break
-    fi
-
-    echo "等待中...(${elapsed_time}/${timeout}秒)"
-    sleep 1
-done
-
-# 健康检查
-echo "执行llama-server健康检查..."
-check_count=5
-check_interval=10
-
-for ((i=1; i<=check_count; i++)); do
-    echo "健康检查 ${i}/${check_count}..."
-    if ! pgrep -f "llama-server -m ${model_path}" > /dev/null; then
-        echo "错误: llama-server已停止运行"
-        exit 1
-    fi
-    remaining=$((check_count - i))
-    if [ $remaining -gt 0 ]; then
-        echo "llama-server运行正常，${check_interval}秒后进行下一次检查..."
-        sleep $check_interval
-    fi
-done
-
-echo "llama-server已成功启动并通过健康检查！"
-echo "服务信息:"
-if [ ${#extra_args[@]} -gt 0 ]; then
-    echo "- 透传参数: ${extra_args[*]}"
 fi

@@ -137,6 +137,7 @@ package_llama() {
 
     # 复制头文件
     cp -r include/* "$release_dir/include/" || true
+    cp -r src/llama*.h* "$release_dir/include/" || true
     cp -r ggml/include/* "$release_dir/include/" || true
     cp -r common/*.h* "$release_dir/include/" || true
     cp -r tools/mtmd/mtmd*.h "$release_dir/include/" || true

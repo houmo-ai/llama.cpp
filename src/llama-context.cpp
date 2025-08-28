@@ -7,6 +7,7 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "houmo-memory.h"
+#include "houmo-llmodel.h"
 #include <cinttypes>
 #include <fstream>
 #include <cstring>
