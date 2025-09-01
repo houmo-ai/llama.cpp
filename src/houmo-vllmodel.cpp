@@ -388,6 +388,12 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
         if (n_decode_batch_ == 1)
             batch_id = 0;
         valid_length_vec[batch_id] = decode_valid_length_[seq_ids[k]];
+        if (valid_length_vec[batch_id] >= context_length_) {
+            LLAMA_LOG_WARN("%s: valid_length_vec[%d] = %d >= context_length_ , "
+                           "end of decoding\n",
+                           __func__, batch_id, valid_length_vec[batch_id]);
+            return 1;
+        }
     }
     auto time_position_id =
         decode_input_map_.at(decode_model_->GetInputName(1));
