@@ -141,6 +141,7 @@ package_llama() {
     cp -r ggml/include/* "$release_dir/include/" || true
     cp -r common/*.h* "$release_dir/include/" || true
     cp -r tools/mtmd/mtmd*.h "$release_dir/include/" || true
+    cp -r vendor/nlohmann "$release_dir/include/" || true
 
     # 复制库文件
     cp build/bin/*.so "$release_dir/lib/" || true
