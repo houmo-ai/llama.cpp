@@ -1434,13 +1434,104 @@ struct server_slot {
         return timings;
     }
 
+    /**
+     * 完整 UTF-8 sanitize，非法字符替换为 U+FFFD（�）, 保证输出合法 UTF-8
+     *
+     * @param s the input str
+     * @return 返回 true 表示原始字符串完全合法 UTF-8，否则 false
+     */
+    bool utf8_sanitize_safe(std::string& s) {
+        const char* src = s.data();
+        const char* end = src + s.size();
+        std::string out;
+        out.reserve(s.size());
+
+        bool valid = true;
+
+        while (src < end) {
+            auto c = static_cast<unsigned char>(*src);
+
+            if (c <= 0x7F) {
+                // ASCII
+                out.push_back(*src++);
+            } else if ((c >> 5) == 0x6) {
+                // 2-byte sequence: C2-DF 80-BF
+                if (src + 1 < end && c >= 0xC2 && c <= 0xDF && (src[1] & 0xC0) == 0x80) {
+                    out.push_back(*src++);
+                    out.push_back(*src++);
+                } else {
+                    valid = false;
+                    out.push_back(char(0xEF));
+                    out.push_back(char(0xBF));
+                    out.push_back(char(0xBD));
+                    ++src;
+                }
+            } else if ((c >> 4) == 0xE) {
+                // 3-byte sequence: E0 A0-BF 80-BF | E1-EC 80-BF 80-BF | ED 80-9F 80-BF | EE-EF 80-BF 80-BF
+                if (src + 2 < end &&
+                    ((c == 0xE0 && (unsigned char)src[1] >= 0xA0 && (unsigned char)src[1] <= 0xBF) ||
+                     ((c >= 0xE1 && c <= 0xEC) && (src[1] & 0xC0) == 0x80) ||
+                     (c == 0xED && (unsigned char)src[1] >= 0x80 && (unsigned char)src[1] <= 0x9F) ||
+                     ((c >= 0xEE && c <= 0xEF) && (src[1] & 0xC0) == 0x80)) &&
+                    (src[2] & 0xC0) == 0x80) {
+                    out.push_back(*src++);
+                    out.push_back(*src++);
+                    out.push_back(*src++);
+                } else {
+                    valid = false;
+                    out.push_back(char(0xEF));
+                    out.push_back(char(0xBF));
+                    out.push_back(char(0xBD));
+                    ++src;
+                }
+            } else if ((c >> 3) == 0x1E) {
+                // 4-byte sequence: F0 90-BF 80-BF 80-BF | F1-F3 80-BF 80-BF 80-BF | F4 80-8F 80-BF 80-BF
+                if (src + 3 < end &&
+                    ((c == 0xF0 && (unsigned char)src[1] >= 0x90 && (unsigned char)src[1] <= 0xBF) ||
+                     ((c >= 0xF1 && c <= 0xF3) && (src[1] & 0xC0) == 0x80) ||
+                     (c == 0xF4 && (unsigned char)src[1] >= 0x80 && (unsigned char)src[1] <= 0x8F)) &&
+                    (src[2] & 0xC0) == 0x80 && (src[3] & 0xC0) == 0x80) {
+                    out.push_back(*src++);
+                    out.push_back(*src++);
+                    out.push_back(*src++);
+                    out.push_back(*src++);
+                } else {
+                    valid = false;
+                    out.push_back(char(0xEF));
+                    out.push_back(char(0xBF));
+                    out.push_back(char(0xBD));
+                    ++src;
+                }
+            } else {
+                // 非法首字节
+                valid = false;
+                out.push_back(char(0xEF));
+                out.push_back(char(0xBF));
+                out.push_back(char(0xBD));
+                ++src;
+            }
+        }
+
+        s.swap(out);
+        return valid;
+    }
+
     const common_chat_msg & update_chat_msg(std::vector<common_chat_msg_diff> & diffs) {
         auto previous_msg = chat_msg;
         SRV_DBG("Parsing chat message: %s\n", generated_text.c_str());
-        auto new_msg = common_chat_parse(
-            generated_text,
-            /* is_partial= */ stop != STOP_TYPE_EOS,
-            params.oaicompat_chat_syntax);
+        common_chat_msg new_msg;
+        try {
+            new_msg = common_chat_parse(generated_text, /* is_partial= */ stop != STOP_TYPE_EOS, params.oaicompat_chat_syntax);
+        } catch( const nlohmann::json::type_error& ex) {
+            auto valid = utf8_sanitize_safe(generated_text);
+            new_msg = common_chat_parse(generated_text, /* is_partial= */ stop != STOP_TYPE_EOS, params.oaicompat_chat_syntax);
+            LOG_ERR("failed to common_chat_parse, valid[%d], exception: %s\n", valid, ex.what());
+        } catch (const std::exception& ex) {
+            LOG_ERR("failed to common_chat_parse, exception: %s\n", ex.what());
+        } catch (...) {
+            LOG_ERR("failed to common_chat_parse, unexpected exception");
+        }
+
         if (!new_msg.empty()) {
             new_msg.ensure_tool_call_ids_set(generated_tool_call_ids, gen_tool_call_id);
             chat_msg = new_msg;
