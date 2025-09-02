@@ -127,10 +127,13 @@ void SetInputData(tcim::Tensor& tensor, int batch_size, int value) {
         data_vec.data(), tensor.MemSize());
 }
 template <typename T>
-void SetInputData(tcim::Tensor &tensor, std::vector<int32_t> &int32_vec) {
-    std::vector<T> data_vec;
-    for (auto val: int32_vec) {
-        data_vec.push_back(static_cast<T>(val));
+void SetInputData(tcim::Tensor &tensor, std::vector<int32_t> &int32_vec, size_t offset = 0) {
+    if (offset >= int32_vec.size()) {
+        throw std::out_of_range("Offset is out of range");
+    }
+    std::vector<T> data_vec (int32_vec.size() - offset, 0);
+    for (size_t i = offset; i < int32_vec.size(); i++) {
+        data_vec[i - offset] = static_cast<T>(int32_vec[i]);
     }
     tensor.Buffer().CopyFromHost(data_vec.data(), tensor.MemSize());
 }

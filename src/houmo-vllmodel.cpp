@@ -16,6 +16,20 @@ bool HouMoVLLModel::houmo_load(const std::string &file_name) {
     };
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
     fill_parameters(ctx);
+    // 从gguf中读取visual 宽度&高度
+    auto key_id = gguf_find_key(ctx, kVisualHeight.c_str());
+    if (key_id > 0) {
+        auto visual_height_ = gguf_get_val_u32(ctx, key_id);
+        ny = visual_height_ / (14 * 2);
+        LLAMA_LOG_INFO("visual height is %d, ny is %d\n", visual_height_, ny);
+    }
+    key_id = gguf_find_key(ctx, kVisualWidth.c_str());
+    if (key_id > 0) {
+        auto visual_width_ = gguf_get_val_u32(ctx, key_id);
+        nx = visual_width_ / (14 * 2);
+        LLAMA_LOG_INFO("visual width is %d, nx is %d\n", visual_width_, nx);
+    }
+
     LLAMA_LOG_INFO("HouMoVLLModel after gguf_init_from_file\n");
     // 从gguf文件中加载hmmodels
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
@@ -116,7 +130,8 @@ void HouMoVLLModel::houmo_init(int seq_max) {
     }
     int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
     size = std::max(size, n_decode_batch_);
-
+    LLAMA_LOG_INFO("seq_max = %d, n_prefill_batch_ = %d, n_decode_batch_ = %d\n",
+                   seq_max, n_prefill_batch_, n_decode_batch_);
     for (int i = 0; i < size; i++) {
         kv_cache_item item;
         item.seq_id = i;
@@ -186,13 +201,18 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
 
     // 1. 将半精度浮点转换为int16_t
-    auto inputs_embeds_int16 = inputs_embeds.to(torch::kInt16);
-    inputs_embeds_int16 = inputs_embeds_int16.view({-1, n_embd_});
-
-    // 缓存输入
-    memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
-           inputs_embeds_int16.data_ptr<int16_t>(),
-           tokens.size() * n_embd_ * sizeof(int16_t));
+    if (xh1_) {
+        auto inputs_embeds_int16 = inputs_embeds.to(torch::kInt16);
+        inputs_embeds_int16 = inputs_embeds_int16.view({-1, n_embd_});
+        // 缓存输入
+        memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
+            inputs_embeds_int16.data_ptr<int16_t>(),
+            tokens.size() * n_embd_ * sizeof(int16_t));
+    } else {
+        memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
+            inputs_embeds.data_ptr<at::Half>(),
+            tokens.size() * n_embd_ * sizeof(at::Half));
+    }
     offset_embedding_id_ += tokens.size();
     update_position_ids(seq_id, tokens.size(), false);
 
@@ -221,7 +241,8 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         }
         auto input_data =
             prefill_input_map_.at(prefill_model_->GetInputName(0));
-        input_data.Buffer().CopyFromHost(input_embedding_ids_.data() + round * prefill_length_ * n_embd_,
+        input_data.Buffer().CopyFromHost(input_embedding_ids_.data() +
+                                             round * prefill_length_ * n_embd_,
                                          input_data.MemSize());
         auto time_position_id =
             prefill_input_map_.at(prefill_model_->GetInputName(1));
@@ -234,18 +255,13 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         auto prefill_current_length =
             prefill_input_map_.at(prefill_model_->GetInputName(5));
         if (time_position_id.Info().DataType() == tcim::DataType::INT16) {
-            time_position_id.Buffer().CopyFromHost(time_position_ids_.data() +
-                                                       valid_length,
-                                                   time_position_id.MemSize());
-            hight_position_id.Buffer().CopyFromHost(
-                hight_position_ids_.data() + valid_length,
-                hight_position_id.MemSize());
-            width_position_id.Buffer().CopyFromHost(
-                width_position_ids_.data() + valid_length,
-                width_position_id.MemSize());
-        } else {
-            LLAMA_LOG_ERROR("Error: Invalid data type for position ids\n");
-            exit(0);
+            SetInputData<int16_t>(time_position_id, time_position_ids_, valid_length);
+            SetInputData<int16_t>(hight_position_id, hight_position_ids_, valid_length);
+            SetInputData<int16_t>(width_position_id, width_position_ids_, valid_length);
+        } else if (time_position_id.Info().DataType() == tcim::DataType::INT32) {
+            SetInputData<int32_t>(time_position_id, time_position_ids_, valid_length);
+            SetInputData<int32_t>(hight_position_id, hight_position_ids_, valid_length);
+            SetInputData<int32_t>(width_position_id, width_position_ids_, valid_length);
         }
         if (prefill_valid_length.Info().DataType() == tcim::DataType::INT16) {
             SetInputData<int16_t>(prefill_valid_length, n_prefill_batch_,
@@ -297,7 +313,8 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
 int HouMoVLLModel::houmo_prefill(const float *embeddings, int n_tokens,
                                  int seq_id, float *logits) {
-
+    LLAMA_LOG_DEBUG("%s seq_id = %d, n_tokens is = %d\n", "prefill stage", seq_id,
+                   n_tokens);
     if (logits == nullptr) {
         // 只缓存输入
         if ((n_tokens + offset_embedding_id_) >= context_length_) {
@@ -311,9 +328,6 @@ int HouMoVLLModel::houmo_prefill(const float *embeddings, int n_tokens,
         memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
             input_data_ptr,
                n_tokens * n_embd_ * sizeof(int16_t));
-        // std::cout << "2cache input_embedding_ids_ * n_embd_" << n_tokens << std::endl;
-        // std::cout << "offset_embedding_id_ = " << offset_embedding_id_ << std::endl;
-        // std::cout << "n_embd_ = " << n_embd_ << std::endl;
 
         offset_embedding_id_ += n_tokens;
         update_position_ids(seq_id, n_tokens, true);
@@ -370,10 +384,13 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
         }
         int16_t *input_data_ptr =
             decode_input_data.data() + batch_id * embedding_dim;
-        input_emd = input_emd.to(torch::kInt16);
-
-        memcpy(input_data_ptr, input_emd[i][0].data_ptr<int16_t>(),
-               embedding_dim * sizeof(int16_t));
+        if (xh1_) {
+            input_emd = input_emd.to(torch::kInt16);
+            memcpy(input_data_ptr, input_emd[i][0].data_ptr<int16_t>(),
+                embedding_dim * sizeof(int16_t));
+        } else {
+            memcpy(input_data_ptr, input_emd[i][0].data_ptr<at::Half>(), embedding_dim * sizeof(at::Half));
+        }
     }
 
     input_data.Buffer().CopyFromHost(decode_input_data.data(),
@@ -381,7 +398,7 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     // set valid_length
     std::vector<int32_t> valid_length_vec(n_decode_batch_, 1);
     std::vector<int32_t> current_length_vec(n_decode_batch_, 1);
-    std::vector<int16_t> position_vec(n_decode_batch_, start_pos_);
+    std::vector<int32_t> position_vec(n_decode_batch_, start_pos_);
     for (size_t k = 0; k < seq_ids.size(); k++) {
         int batch_id = seq_ids[k];
         // 单batch模式下所有序列共用batch 0
@@ -397,17 +414,10 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     }
     auto time_position_id =
         decode_input_map_.at(decode_model_->GetInputName(1));
-    time_position_id.Buffer().CopyFromHost(position_vec.data(),
-                                           time_position_id.MemSize());
     auto hight_position_id =
         decode_input_map_.at(decode_model_->GetInputName(2));
-    hight_position_id.Buffer().CopyFromHost(position_vec.data(),
-                                            hight_position_id.MemSize());
     auto width_position_id =
         decode_input_map_.at(decode_model_->GetInputName(3));
-    width_position_id.Buffer().CopyFromHost(position_vec.data(),
-                                            width_position_id.MemSize());
-
     auto decode_valid_length =
         decode_input_map_.at(decode_model_->GetInputName(4));
     auto decode_current_length =
@@ -415,9 +425,15 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     if (decode_valid_length.Info().DataType() == tcim::DataType::INT16) {
         SetInputData<int16_t>(decode_valid_length, valid_length_vec);
         SetInputData<int16_t>(decode_current_length, current_length_vec);
+        SetInputData<int16_t>(time_position_id, position_vec);
+        SetInputData<int16_t>(hight_position_id, position_vec);
+        SetInputData<int16_t>(width_position_id, position_vec);
     } else if (decode_valid_length.Info().DataType() == tcim::DataType::INT32) {
         SetInputData<int32_t>(decode_valid_length, valid_length_vec);
         SetInputData<int32_t>(decode_current_length, current_length_vec);
+        SetInputData<int32_t>(time_position_id, position_vec);
+        SetInputData<int32_t>(hight_position_id, position_vec);
+        SetInputData<int32_t>(width_position_id, position_vec);
     }
 
     decode_model_->SetInput(decode_model_->GetInputName(0), input_data);

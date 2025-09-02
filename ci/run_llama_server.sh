@@ -40,6 +40,7 @@ declare -A models_xh2=(
     ["Qwen3-14b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-14B-F16-8k-2core-xh2-v0.0.1.gguf"
     ["Qwen3-14b-2k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-14B-F16-2k-2core-xh2-v0.0.1.gguf"
     ["Qwen2.5-Coder-7b-2k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-QwenCoder2.5-7B-F16-2k-2core-xh2-v0.0.1.gguf"
+    ["Qwenvl2.5-7b-4k"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-4k-2core-xh2-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-mmproj-2core-xh2-v0.0.1.gguf"
 )
 
 # 设置默认值

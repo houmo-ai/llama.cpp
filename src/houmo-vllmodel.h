@@ -30,8 +30,10 @@ class HouMoVLLModel : public HouMoLLModel::Impl {
     int nx = 23; // 644/patch_size_(14)*2 = 23;
     std::vector<int16_t> input_embedding_ids_;
     int32_t offset_embedding_id_ = 0;
-    std::vector<int16_t> time_position_ids_;
-    std::vector<int16_t> hight_position_ids_;
-    std::vector<int16_t> width_position_ids_;
-    int16_t start_pos_ = 0;
+    std::vector<int32_t> time_position_ids_;
+    std::vector<int32_t> hight_position_ids_;
+    std::vector<int32_t> width_position_ids_;
+    int32_t start_pos_ = 0;
+    const std::string kVisualHeight = "hmm.vit.height";
+    const std::string kVisualWidth = "hmm.vit.width";
 };

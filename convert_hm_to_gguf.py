@@ -112,6 +112,8 @@ class ModelBase:
         hparams: dict[str, Any] | None = None,
         remote_hf_model_id: str | None = None,
         model_description: str | None = None,
+        hmm_vit_height: int = 0,
+        hmm_vit_width: int = 0,
     ):
         if (
             type(self) is ModelBase
@@ -171,6 +173,8 @@ class ModelBase:
         self.model_name = model_name
         self.dir_model_card = dir_model  # overridden in convert_lora_to_gguf.py
         self.model_description = model_description
+        self.hmm_vit_height = hmm_vit_height
+        self.hmm_vit_width = hmm_vit_width
 
         # Apply heuristics to figure out typical tensor encoding based on first layer tensor encoding type
         if self.ftype == gguf.LlamaFileType.GUESSED:
@@ -1608,11 +1612,14 @@ class Qwen2Model(TextModel):
 
     def conver_embedding(self, embedding_path: Path):
         # 加载嵌入权重
+        torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
         embedding_weight = torch.load(
             embedding_path, map_location="cpu", weights_only=True
         )
         if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
             embedding_weight = embedding_weight["weight"]
+        if isinstance(embedding_weight, torch.nn.Embedding):
+            embedding_weight = embedding_weight.weight
         print(f"embedding_weight.dtype: {embedding_weight.dtype}")
         if embedding_weight.dtype == torch.int16:
             print(
@@ -1693,6 +1700,8 @@ class Qwen2VLModel(TextModel):
         mrope_section += [0] * max(0, 4 - len(mrope_section))
         self.gguf_writer.add_rope_dimension_sections(mrope_section)
         self.gguf_writer.add_bool("is_hmm", True)
+        self.gguf_writer.add_uint32("hmm.vit.height", self.hmm_vit_height)
+        self.gguf_writer.add_uint32("hmm.vit.width", self.hmm_vit_width)
         if self.model_description:
             self.gguf_writer.add_string("model.description", self.model_description)
 
@@ -1704,11 +1713,15 @@ class Qwen2VLModel(TextModel):
 
     def conver_embedding(self, embedding_path: Path):
         # 加载嵌入权重
+        torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
         embedding_weight = torch.load(
             embedding_path, map_location="cpu", weights_only=True
         )
         if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
             embedding_weight = embedding_weight["weight"]
+        if isinstance(embedding_weight, torch.nn.Embedding):
+            embedding_weight = embedding_weight.weight
+
         print(f"embedding_weight.dtype: {embedding_weight.dtype}")
         if embedding_weight.dtype == torch.int16:
             print(
@@ -2540,6 +2553,18 @@ def parse_args() -> argparse.Namespace:
         help="Specify Description of the HMM model to be used for conversion",
     )
     parser.add_argument(
+        "--hmm-vit-width",
+        type=int,
+        default=644,
+        help="Specify the visual width of the HMM model to be used for qwenvl",
+    )
+    parser.add_argument(
+        "--hmm-vit-height",
+        type=int,
+        default=364,
+        help="Specify the visual height of the HMM model to be used for qwenvl",
+    )
+    parser.add_argument(
         "--print-supported-models",
         action="store_true",
         help="Print the supported models",
@@ -2695,6 +2720,8 @@ def main() -> None:
             small_first_shard=args.no_tensor_first_split,
             remote_hf_model_id=hf_repo_id,
             model_description=args.hmm_info,
+            hmm_vit_height=args.hmm_vit_height,
+            hmm_vit_width=args.hmm_vit_width,
         )
 
         if args.vocab_only:

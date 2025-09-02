@@ -7,6 +7,35 @@
 #include <cstring>
 #include <fstream>
 #include <numeric>
+#include <torch/torch.h>
+
+static torch::Tensor floatArrayToFloat16Tensor(std::vector<float> &float_data) {
+    // 1. 将float数组转换为float32张量
+    torch::Tensor tensor =
+        torch::from_blob(float_data.data(),           // 数据指针
+                         uint64_t{float_data.size()}, // 张量形状
+                         torch::kFloat32              // 原始数据类型
+        );
+
+    // 2. 转换为float16（half）类型
+    torch::Tensor float16_tensor = tensor.to(torch::kHalf);
+    return float16_tensor;
+}
+
+static torch::Tensor
+Int16ArrayToFloat16Tensor(std::vector<int16_t> &int16_data) {
+    // 1. 将float数组转换为float32张量
+    torch::Tensor tensor =
+        torch::from_blob(int16_data.data(),           // 数据指针
+                         uint64_t{int16_data.size()}, // 张量形状
+                         torch::kInt16                // 原始数据类型
+        );
+
+    // 2. 转换为float16（half）类型
+    torch::Tensor float16_tensor = tensor.to(torch::kHalf);
+
+    return float16_tensor;
+}
 HoumoVision::~HoumoVision() {
     // do nothing
 }
@@ -33,8 +62,55 @@ void HoumoVision::read_tensor_to_buffer(const std::string &file_name,
     }
 }
 
+void HoumoVision::rgb_to_nchw(const std::vector<float> &rgb_data, int height,
+                              int width, int channels, int batch_size) {
+    // 检查输入参数有效性
+    if (height <= 0 || width <= 0 || channels <= 0 || batch_size <= 0) {
+        throw std::invalid_argument("Invalid input dimensions: height, width, "
+                                    "channels and batch_size must be positive");
+    }
+
+    // 计算预期的数据大小
+    const size_t expected_size =
+        static_cast<size_t>(height * width * channels * batch_size);
+    nchw_data_.resize(expected_size);
+    // 检查输入数据大小是否匹配
+    if (rgb_data.size() != expected_size) {
+        throw std::invalid_argument(
+            "Input data size does not match the given dimensions");
+    }
+    for (int b = 0; b < batch_size; ++b) {
+        const size_t batch_offset =
+            static_cast<size_t>(b) * height * width * channels;
+
+        for (int c = 0; c < channels; ++c) {
+            const size_t channel_offset =
+                static_cast<size_t>(c) * height * width;
+
+            for (int h = 0; h < height; ++h) {
+                const size_t hwc_h_offset =
+                    static_cast<size_t>(h) * width * channels;
+                const size_t nchw_h_offset = static_cast<size_t>(h) * width;
+
+                for (int w = 0; w < width; ++w) {
+                    // 计算HWC格式中的索引
+                    const size_t hwc_index = batch_offset + hwc_h_offset +
+                                             static_cast<size_t>(w) * channels +
+                                             c;
+
+                    // 计算NCHW格式中的索引
+                    const size_t nchw_index =
+                        static_cast<size_t>(b) * channels * height * width +
+                        channel_offset + nchw_h_offset + w;
+
+                    nchw_data_[nchw_index] = rgb_data[hwc_index];
+                }
+            }
+        }
+    }
+}
+
 bool HoumoVision::houmo_load(const std::string &file_name) {
-#if 1
     struct ggml_context *ctx_data = NULL;
     struct gguf_init_params params = {
         /*.no_alloc = */ true,
@@ -71,20 +147,6 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
     }
     ggml_free(ctx_data);
     gguf_free(ctx);
-#else
-    // for debug...
-    auto wm = tcim::Module::WeightManager::CreateWeightManager(0);
-    auto option_decoder = tcim::Module::Option(wm);
-
-    auto option = tcim::Module::Option(wm);
-    module_ = std::make_shared<tcim::Module>();
-    auto status =
-        module_->LoadModel("/houmo/models/qwenvl7b/visual.hmm", option);
-    if (status != tcim::Status::OK) {
-        LOG_ERR("%s: failed to load prefill.hmm\n", __func__);
-        return false;
-    }
-#endif
     return true;
 }
 
@@ -105,10 +167,6 @@ bool HoumoVision::init(const std::string &model_path) {
             image_channels_ = input_info.Shape()[1];
             input_name_ = input_name;
         }
-        // for (size_t kk = 0; kk < input_info.Shape().size(); kk++) {
-        //     LOG_INF("%s: input_info.Shape()[%d]: %d, type= %d\n", __func__, kk,
-        //             input_info.Shape()[kk], input_info.DataType());
-        // }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
         input_tensors_.insert(
             std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
@@ -127,7 +185,7 @@ bool HoumoVision::init(const std::string &model_path) {
     return true;
 }
 
-void HoumoVision::rgb_to_yuv444(const std::vector<float> &bgr_data, int width,
+void HoumoVision::rgb_to_yuv444(const std::vector<float> &rgb_data, int width,
                                 int height,
                                 std::vector<uint8_t> &yuv444sp_data) {
     int pixel_count = width * height;
@@ -135,16 +193,14 @@ void HoumoVision::rgb_to_yuv444(const std::vector<float> &bgr_data, int width,
     yuv444sp_data.resize(pixel_count * 3);
 
     for (int i = 0; i < pixel_count; ++i) {
-        float r = bgr_data[i * 3];
-        float g = bgr_data[i * 3 + 1];
-        float b = bgr_data[i * 3 + 2];
+        float r = rgb_data[i * 3];
+        float g = rgb_data[i * 3 + 1];
+        float b = rgb_data[i * 3 + 2];
 
         // BT.601转换公式（输入BGR为[0,1]范围）
         float y = 0.299f * r + 0.587f * g + 0.114f * b;
-        float u =
-            -0.14713f * r - 0.28886f * g + 0.436f * b + 128;
-        float v =
-            0.615f * r - 0.51499f * g - 0.10001f * b + 128;
+        float u = -0.14713f * r - 0.28886f * g + 0.436f * b + 128;
+        float v = 0.615f * r - 0.51499f * g - 0.10001f * b + 128;
 
         // 映射到8位范围（BT.601标准）
         uint8_t y_uint8 = static_cast<uint8_t>(std::clamp(y, 0.0f, 255.0f));
@@ -161,25 +217,33 @@ void HoumoVision::rgb_to_yuv444(const std::vector<float> &bgr_data, int width,
 
 bool HoumoVision::encoding(const std::vector<float> &input_data,
                            std::vector<float> &output_data) {
-    // input_data 转成uint8_t, 再转成yuv44sp
     auto input_tensor = input_tensors_[input_name_];
-    std::vector<uint8_t> yuv444_data;
-    rgb_to_yuv444(input_data, image_width_, image_height_, yuv444_data);
-    input_tensor.Buffer().CopyFromHost(yuv444_data.data(),
-                                       input_tensor.MemSize());
-    auto window_index_tensor = input_tensors_["window_index"];
-    auto window_mask_tensor = input_tensors_["window_mask"];
-    module_->SetInput("window_index", window_index_tensor);
+    if (input_tensor.Info().DataType() == tcim::DataType::UINT8 ||
+        input_tensor.Info().DataType() == tcim::DataType::INT8) {
+        // xh1  input_data 转成uint8_t, 再转成yuv44sp
+        std::vector<uint8_t> yuv444_data;
+        rgb_to_yuv444(input_data, image_width_, image_height_, yuv444_data);
+        input_tensor.Buffer().CopyFromHost(yuv444_data.data(),
+                                           input_tensor.MemSize());
+    } else {
+        rgb_to_nchw(input_data, image_height_, image_width_, image_channels_);
+        // xh2  input_data 转成float16
+        auto input_fp16_tensor = floatArrayToFloat16Tensor(nchw_data_);
+        input_tensor.Buffer().CopyFromHost(
+            input_fp16_tensor.data_ptr<at::Half>(), input_tensor.MemSize());
+    }
+    auto window_index_tensor = input_tensors_[module_->GetInputName(1)];
+    auto window_mask_tensor = input_tensors_[module_->GetInputName(2)];
+    module_->SetInput(module_->GetInputName(1), window_index_tensor);
+    module_->SetInput(module_->GetInputName(2), window_mask_tensor);
     module_->SetInput(input_name_, input_tensor);
     module_->Run();
     module_->Sync();
     tcim::Tensor output_tensor = module_->GetOutput(module_->GetOutputName(0));
-    auto output_contiguous = output_tensors_[module_->GetOutputName(0)];
-    output_tensor.CopyTo(output_contiguous);
-    memcpy(output_data.data(), output_contiguous.Buffer().Data(),
-           output_contiguous.MemSize());
-    LOG_ERR("houmo_vision: run model done, output_data size: %d\n",
-            output_contiguous.MemSize());
+    memcpy(output_data.data(), output_tensor.Buffer().Data(),
+           output_tensor.MemSize());
+    LOG_INF("houmo_vision: run model done, output_data size: %d\n",
+            output_tensor.MemSize());
     return true;
 }
 
@@ -256,12 +320,19 @@ void HoumoVision::set_windows_attention() {
             }
         }
     }
-    auto &tensor = input_tensors_["window_index"];
+    auto &tensor = input_tensors_[module_->GetInputName(1)];
     tensor.Buffer().CopyFromHost(inv_idx.data(), tensor.MemSize());
-    module_->SetInput("window_index", tensor);
-    auto &mask_tensor = input_tensors_["window_mask"];
-    mask_tensor.Buffer().CopyFromHost(mask.data(), mask_tensor.MemSize());
-    module_->SetInput("window_mask", mask_tensor);
+    module_->SetInput(module_->GetInputName(1), tensor);
+
+    auto &mask_tensor = input_tensors_[module_->GetInputName(2)];
+    if (mask_tensor.Info().DataType() == tcim::DataType::FLOAT16) {
+        auto mask_fp16 = Int16ArrayToFloat16Tensor(mask);
+        mask_tensor.Buffer().CopyFromHost(mask_fp16.data_ptr<at::Half>(),
+                                          mask_tensor.MemSize());
+    } else {
+        mask_tensor.Buffer().CopyFromHost(mask.data(), mask_tensor.MemSize());
+    }
+    module_->SetInput(module_->GetInputName(2), mask_tensor);
 }
 
 bool HoumoVision::bicubic_resize(const clip_image_u8 &img, clip_image_u8 &dst,
