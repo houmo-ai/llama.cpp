@@ -1,20 +1,20 @@
 @echo off
-REM 设置环境变量
+:: Set environment variables
 set "TCIM_RUNTIME_PATH=."
 set "LD_LIBRARY_PATH=."
 set "TCIM_BACKEND=Xh2HalBackend"
 
-REM 设置默认模型路径
-set "DEFAULT_MODEL=./models/default_model.gguf"
+:: Set default model path
+set "DEFAULT_MODEL=.\qwen2.5-7B-instruct-hf-F16.gguf"
 
-REM 检查是否提供了命令行参数
+:: Check if command line argument is provided
 if "%~1"=="" (
-    echo 未指定模型文件，将使用默认模型: %DEFAULT_MODEL%
+    echo No model file specified, will use default model: %DEFAULT_MODEL%
 
-    REM 检查默认模型是否存在
+    :: Check if default model exists
     if not exist "%DEFAULT_MODEL%" (
-        echo 错误: 默认模型文件不存在!
-        echo 路径: %DEFAULT_MODEL%
+        echo Error: Default model file does not exist!
+        echo Path: %DEFAULT_MODEL%
         exit /b 1
     )
 
@@ -23,21 +23,21 @@ if "%~1"=="" (
     set "MODEL_PATH=%~1"
 )
 
-REM 检查可执行文件是否存在
+:: Check if executable exists
 if not exist "llama-server.exe" (
-    echo 错误: 找不到 llama-server 可执行文件!
-    echo 请确保文件位于当前目录下。
+    echo Error: Cannot find llama-server executable!
+    echo Please ensure the file is in the current directory.
     exit /b 1
 )
 
-REM 检查模型文件是否存在
+:: Check if model file exists
 if not exist "%MODEL_PATH%" (
-    echo 错误: 找不到模型文件!
-    echo 路径: %MODEL_PATH%
+    echo Error: Cannot find model file!
+    echo Path: %MODEL_PATH%
     exit /b 1
 )
 
-REM 后台启动服务并记录日志
+:: Start server in background and log
 echo Starting server in the background...
 start "" /b llama-server.exe ^
     -m "%MODEL_PATH%" ^
