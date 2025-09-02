@@ -211,6 +211,8 @@ fi
 launch_cmd=(
     ./bin/llama-server
     -m "$model_path"
+    -c 32000
+    --no-context-shift
     --host 0.0.0.0
 )
 
