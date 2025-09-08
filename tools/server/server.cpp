@@ -260,7 +260,8 @@ struct server_task {
         params.timings_per_token = json_value(data, "timings_per_token", false);
 
         params.stream           = json_value(data, "stream",             false);
-        params.cache_prompt     = json_value(data, "cache_prompt",       false);
+        //FIXME commented by @guoxing.xu. because not support yet
+        // params.cache_prompt     = json_value(data, "cache_prompt",       false);
         params.return_tokens    = json_value(data, "return_tokens",      false);
         params.n_predict        = json_value(data, "n_predict",          json_value(data, "max_tokens", defaults.n_predict));
         params.n_indent         = json_value(data, "n_indent",           defaults.n_indent);
