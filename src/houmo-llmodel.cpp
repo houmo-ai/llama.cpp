@@ -56,7 +56,8 @@ class HouMoSingleCardModel : public HouMoLLModel::Impl {
     int houmo_decode(std::vector<llama_token> &batches,
                      std::vector<int> &seq_ids,
                      std::vector<float *> logits) override;
-
+ private:
+   void fill_decode_valid_length(std::vector<int32_t> &valid_length_vec);
   private:
     int kSeqMax = 4; // maximum sequence number for single-card model
     std::shared_ptr<tcim::Module> prefill_model_;
@@ -168,14 +169,18 @@ void HouMoLLModel::Impl::decode_input_init(
         LLAMA_LOG_DEBUG("%s: decode_model input_name: %s\n", __func__,
                         input_name.c_str());
     }
-    // only for text model
-    input_num_decode = 3;
     // for image model
     if (model_type_ == 1) {
         input_num_decode = 6;
     }
     for (size_t idx = 0; idx < input_num_decode; idx++) {
         auto input_name = decode_model->GetInputName(idx);
+        if (input_name.find("past_key_cache_") != std::string::npos ||
+            input_name.find("_self_attn_vcache") != std::string::npos ||
+            input_name.find("_self_attn_kcache") != std::string::npos) {
+            continue;
+        }
+
         LLAMA_LOG_INFO("%s: decode input_name: %s\n", __func__,
                        input_name.c_str());
         auto input_info = decode_model->GetInputInfo(input_name).AsContiguous();
@@ -193,7 +198,7 @@ void HouMoLLModel::Impl::decode_input_init(
     if (model_type_ == 1) {
         current_length_index = 5;
     }
-    n_decode_batch_ = decode_input_map_[decode_model->GetInputName(1)]
+    n_decode_batch_ = decode_input_map_[decode_model->GetInputName(0)]
                                .Info()
                                .Shape()[0];
 
@@ -300,6 +305,73 @@ void HouMoLLModel::Impl::read_tensor_to_buffer(const std::string &file_name,
                   << " bytes from file: " << file_name << std::endl;
         input_file.close();
         return;
+    }
+}
+
+void HouMoSingleCardModel::fill_decode_valid_length(
+    std::vector<int32_t> &valid_length_vec) {
+    if (xh1_) {
+        auto decode_valid_length =
+        decode_input_map_.at(decode_model_->GetInputName(1));
+        if (decode_valid_length.Info().DataType() == tcim::DataType::INT16) {
+            SetInputData<int16_t>(decode_valid_length, valid_length_vec);
+        } else if (decode_valid_length.Info().DataType() == tcim::DataType::INT32) {
+            SetInputData<int32_t>(decode_valid_length, valid_length_vec);
+        }
+        decode_model_->SetInput(decode_model_->GetInputName(1),
+                                decode_valid_length);
+        return;
+    }
+
+    // for xh2
+    for (int i = 0; i < valid_length_vec.size(); i++) {
+        // valid_length
+        std::string name = decode_model_->GetInputName(1);
+        if (i > 0 && n_decode_batch_ > 1) {
+            name += "_batch" + std::to_string(i);
+        }
+        LLAMA_LOG_DEBUG("name = %s, valid_length_vec[%d]: %d\n",name.c_str(), i, valid_length_vec[i]);
+        auto decode_valid_length = decode_input_map_.at(name);
+        if (decode_valid_length.Info().DataType() == tcim::DataType::INT16) {
+            SetInputData<int16_t>(decode_valid_length, 1, valid_length_vec[i]);
+        } else if (decode_valid_length.Info().DataType() == tcim::DataType::INT32) {
+            SetInputData<int32_t>(decode_valid_length,  1, valid_length_vec[i]);
+        } else {
+            LLAMA_LOG_ERROR("%s: invalid data type of %s\n", __func__,
+                            decode_valid_length.Info().DataType());
+            return;
+        }
+        auto status = decode_model_->SetInput(name, decode_valid_length);
+        if (status != tcim::Status::OK) {
+            LLAMA_LOG_ERROR("%s: failed to set input %s\n", __func__,
+                            name.c_str());
+            return;
+        }
+        // current_length
+        if (n_decode_batch_ > 1) {
+            std::string name = decode_model_->GetInputName(2);
+            // FIXME: @guoxing.xu 当前XH2模型batch0 没有后缀
+            if (i > 0) {
+                name += "_batch" + std::to_string(i);
+            }
+            auto current_valid_length = decode_input_map_.at(name);
+            if (current_valid_length.Info().DataType() == tcim::DataType::INT16) {
+                SetInputData<int16_t>(current_valid_length, 1, 1);
+            } else if (current_valid_length.Info().DataType() == tcim::DataType::INT32) {
+                SetInputData<int32_t>(current_valid_length, 1, 1);
+            } else {
+                LLAMA_LOG_ERROR("%s: invalid data type of %s\n", __func__,
+                                current_valid_length.Info().DataType());
+                return;
+            }
+            LLAMA_LOG_DEBUG("name = %s, current_valid_length: %d\n",name.c_str(), 1);
+            status = decode_model_->SetInput(name, current_valid_length);
+            if (status != tcim::Status::OK) {
+                LLAMA_LOG_ERROR("%s: failed to set input %s\n", __func__,
+                            name.c_str());
+                return;
+            }
+        }
     }
 }
 
@@ -452,10 +524,18 @@ void HouMoSingleCardModel::houmo_init(int seq_max) {
             }
 
             if (n_decode_batch_ > 1) {
-                k_cache_name = k_cache_name + "_batch" + std::to_string(i);
-                v_cache_name = v_cache_name + "_batch" + std::to_string(i);
-                k_cache_history_sum_name =
-                    k_cache_history_sum_name + "_batch" + std::to_string(i);
+                if (xh1_) {
+                    k_cache_name = k_cache_name + "_batch" + std::to_string(i);
+                    v_cache_name = v_cache_name + "_batch" + std::to_string(i);
+                    k_cache_history_sum_name =
+                        k_cache_history_sum_name + "_batch" + std::to_string(i);
+                } else if (i > 0) {
+                    // FIXME: @guoxing.xu 当前XH2模型 batch0 没有后缀
+                    k_cache_name = k_cache_name + "_batch" + std::to_string(i);
+                    v_cache_name = v_cache_name + "_batch" + std::to_string(i);
+                    k_cache_history_sum_name =
+                        k_cache_history_sum_name + "_batch" + std::to_string(i);
+                }
             }
 
             auto kcache = decode_model_->GetInput(k_cache_name);
@@ -633,10 +713,20 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
         std::cerr << "seq_ids.size() > n_decode_batch_ not supported\n";
         return -1;
     }
+    // 构造input_tokens
+    std::vector<llama_token> input_ids(n_decode_batch_, 0);
+    for (size_t i = 0; i < seq_ids.size(); i++) {
+        int batch_id = seq_ids[i];
+        // 单batch模式下所有序列共用batch 0
+        if (n_decode_batch_ == 1)
+            batch_id = 0;
+        input_ids[batch_id] = batches[i];
+    }
+
     torch::Tensor input_emd;
     auto decode_opts = torch::TensorOptions().dtype(torch::kInt);
     auto decode_inp =
-        torch::from_blob(batches.data(), {int64_t(batches.size())}, decode_opts)
+        torch::from_blob(input_ids.data(), {int64_t(input_ids.size())}, decode_opts)
             .clone();
     try {
         input_emd = embedding_->forward(decode_inp);
@@ -644,44 +734,16 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
         std::cerr << "error loading the model\n" << e.what_without_backtrace();
         return -1;
     }
-    // set input_1, xh2 是float16
-    input_emd = input_emd.view({int64_t(batches.size()), 1, -1});
     auto input_data = decode_input_map_.at(decode_model_->GetInputName(0));
-
-    // 计算每个序列的大小（以int16_t为单位）
-    int64_t embedding_dim = input_emd.size(2);
-    assert(input_data.MemSize() >=
-           embedding_dim * seq_ids.size() * sizeof(int16_t));
-
-    std::vector<int16_t> decode_input_data(
-        input_data.MemSize() / sizeof(int16_t), 1);
     // 填充数据
-    for (size_t i = 0; i < seq_ids.size(); i++) {
-        auto batch_id = seq_ids[i];
-        // 单batch模式下所有序列共用batch 0
-        if (n_decode_batch_ == 1)
-            batch_id = 0;
-        // 验证seq_id有效性
-        if (batch_id >= n_decode_batch_) {
-            std::cerr << "Error: Invalid seq_id " << batch_id << " (max "
-                      << n_decode_batch_ - 1 << ")" << std::endl;
-            return -1;
-        }
-        int16_t *input_data_ptr =
-            decode_input_data.data() + batch_id * embedding_dim;
-        // 根据目标类型拷贝更健壮
-        if (xh1_) {
-            input_emd = input_emd.to(torch::kInt16);
-            memcpy(input_data_ptr, input_emd[i][0].data_ptr<int16_t>(),
-                embedding_dim * sizeof(int16_t));
-        } else {
-            memcpy(input_data_ptr, input_emd[i][0].data_ptr<at::Half>(),
-                embedding_dim * sizeof(at::Half));
-        }
+    if (xh1_) {
+        input_emd = input_emd.to(torch::kInt16);
+        input_data.Buffer().CopyFromHost(input_emd.data_ptr<int16_t>(),
+                                         input_data.MemSize());
+    } else {
+        input_data.Buffer().CopyFromHost(input_emd.data_ptr<at::Half>(),
+                                         input_data.MemSize());
     }
-
-    input_data.Buffer().CopyFromHost(decode_input_data.data(),
-                                     input_data.MemSize());
     // set valid_length
     std::vector<int32_t> valid_length_vec(n_decode_batch_, 1);
     for (size_t k = 0; k < seq_ids.size(); k++) {
@@ -697,17 +759,9 @@ int HouMoSingleCardModel::houmo_decode(std::vector<llama_token> &batches,
             return 1;
         }
     }
-    auto decode_valid_length =
-        decode_input_map_.at(decode_model_->GetInputName(1));
-    if (decode_valid_length.Info().DataType() == tcim::DataType::INT16) {
-        SetInputData<int16_t>(decode_valid_length, valid_length_vec);
-    } else if (decode_valid_length.Info().DataType() == tcim::DataType::INT32) {
-        SetInputData<int32_t>(decode_valid_length, valid_length_vec);
-    }
-
+    fill_decode_valid_length(valid_length_vec);
     decode_model_->SetInput(decode_model_->GetInputName(0), input_data);
-    decode_model_->SetInput(decode_model_->GetInputName(1),
-                            decode_valid_length);
+
     if (need_set_kv_cache_ != 0) {
         for (auto seq_id : seq_ids) {
             auto &item = kv_cache_[seq_id];

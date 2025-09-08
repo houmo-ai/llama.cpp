@@ -15,6 +15,7 @@
 #include <fstream>
 #include <map>
 #include <algorithm>
+#include <cstring>
 #endif
 
 // 确保C++编译器以C语言方式处理函数
