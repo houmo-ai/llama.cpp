@@ -218,8 +218,7 @@ function ConversationItem({
       tabIndex={0}
       aria-label={conv.name}
       className={classNames({
-        'group flex flex-row btn btn-ghost justify-start items-center font-normal px-2 h-9':
-          true,
+        'group flex flex-row btn btn-ghost justify-start items-center font-normal px-2 h-9': true,
         'btn-soft': isCurrConv,
       })}
     >

@@ -53,6 +53,25 @@ const StorageUtils = {
   async getMessages(convId: string): Promise<Message[]> {
     return await db.messages.where({ convId }).toArray();
   },
+  async getMessagesLimited(
+    convId: string,
+    historyMax: number
+  ): Promise<Message[]> {
+    // add by guoxing.xu: limit the number of messages
+    if (historyMax < 0 || historyMax > 10000) {
+      historyMax = 0;
+    }
+    const count = historyMax + 1;
+    return await db.messages
+      .where({ convId })
+      .toArray() // Get all messages into an array
+      .then((messages) => {
+        // Sort the array and slice it in one go
+        return messages
+          .sort((a, b) => b.timestamp - a.timestamp) // Now we can use the custom sort
+          .slice(0, count);
+      });
+  },
   /**
    * use in conjunction with getMessages to filter messages by leafNodeId
    * includeRoot: whether to include the root node in the result

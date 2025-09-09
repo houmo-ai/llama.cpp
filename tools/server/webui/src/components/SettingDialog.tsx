@@ -23,6 +23,7 @@ const BASIC_KEYS: SettKey[] = [
   'top_p',
   'min_p',
   'max_tokens',
+  'historyMax',
 ];
 const SAMPLER_KEYS: SettKey[] = [
   'dynatemp_range',

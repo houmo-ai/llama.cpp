@@ -167,7 +167,7 @@ export const AppContextProvider = ({
     }
 
     const currMessages = StorageUtils.filterByLeafNodeId(
-      await StorageUtils.getMessages(convId),
+      await StorageUtils.getMessagesLimited(convId, config.historyMax),
       leafNodeId,
       false
     );
