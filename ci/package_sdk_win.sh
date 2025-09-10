@@ -70,9 +70,6 @@ deploy_dadao_sdk() {
         cp third_party/houmo_drv_xh2/hal/lib/*_hal.dll third_party/houmo/lib/bin/cygxh2a_hal.dll
 
         rm -rf third_party/sw_sdk.zip third_party/houmo_drv*
-        # FIXME: 临时解决方案，等待SystemWare SDK更新
-        download_file "$xh1_sw_sdk_url" "third_party/sw_sdk.zip"
-        unzip third_party/sw_sdk.zip -d third_party/
     fi
 
     # 移动关键库文件

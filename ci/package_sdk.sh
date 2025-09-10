@@ -74,12 +74,6 @@ deploy_dadao_sdk() {
         rm -rf third_party/houmo-sdk third_party/sw_sdk.run third_party/houmo_drv*
     fi
 
-    if [ $PLATFORM == "xh2" ]; then
-        # FIXME: xh2 还需下载xh1的包，临时解决方案，等待SystemWare SDK更新
-        download_file "$xh1_sw_sdk_url" "third_party/sw_sdk.run"
-        bash third_party/sw_sdk.run extract --path third_party/
-    fi
-
     # 移动关键库文件
     if [ -f third_party/houmo-sdk/hal/lib/libhdplrt_asic.so ]; then
         cp third_party/houmo-sdk/hal/lib/libhdplrt_asic.so third_party/houmo/lib/
