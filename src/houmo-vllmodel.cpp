@@ -147,8 +147,14 @@ void HouMoVLLModel::houmo_init(int seq_max) {
                 k_cache_name = k_cache_name + "_batch" + std::to_string(i);
                 v_cache_name = v_cache_name + "_batch" + std::to_string(i);
             }
+            #ifdef XH2_ENABLED
+            //FIXME: v2.5.0 will support GetDevInput
+            auto kcache = decode_model_->GetDevInput(k_cache_name);
+            auto vcache = decode_model_->GetDevInput(v_cache_name);
+            #else
             auto kcache = decode_model_->GetInput(k_cache_name);
             auto vcache = decode_model_->GetInput(v_cache_name);
+            #endif
             if (n_decode_batch_ > 1 || seq_max == 1) {
                 item.tensors.push_back(kcache);
                 item.tensors.push_back(vcache);

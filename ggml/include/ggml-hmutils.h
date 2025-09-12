@@ -74,8 +74,8 @@ static void substr(const char *src, size_t start, size_t length, char *dest, siz
         actualLength = destSize - 1;
     }
 
-    strncpy(dest, src + start, actualLength);
-    dest[actualLength] = '\0';
+    // 使用 snprintf 替代 strncpy，确保目标缓冲区安全
+    snprintf(dest, destSize, "%.*s", (int)actualLength, src + start);
 }
 
 // 解析字符串为void**、void*和int
@@ -84,7 +84,7 @@ static bool parseMemoryString(const char *str,
                       void **add2,
                       int *add3) {
     if (str == NULL || add1 == NULL || add2 == NULL || add3 == NULL) {
-        fprintf(stderr, "无效的输入参数 str:%s add1:%p add2:%p add3:%p\n",str,add1,add2,add3);
+        fprintf(stderr, "无效的输入参数\n");
         return false;
     }
 
@@ -123,12 +123,17 @@ static bool parseMemoryString(const char *str,
     substr(baseStr, 0, len1, add1Str, sizeof(add1Str));
 
     size_t len2 = pos2 - pos1 - 1;
+    if ((pos1 + 1) == NULL) {
+        return false;
+    }
     substr(pos1 + 1, 0, len2, add2Str, sizeof(add2Str));
-
+    if ((pos2 + 1) == NULL) {
+        return false;
+    }
     substr(pos2 + 1, 0, strlen(pos2 + 1), add3Str, sizeof(add3Str));
 
     // 3. 转换add1 (void**)
-    uint64_t add1Val;
+    unsigned long long add1Val;
     if (sscanf(add1Str, "%llx", &add1Val) != 1) {
         fprintf(stderr, "解析add1失败: %s\n", add1Str);
         free(baseStr);
@@ -137,7 +142,7 @@ static bool parseMemoryString(const char *str,
     *add1 = (void **)add1Val;
 
     // 4. 转换add2 (void*)
-    uint64_t add2Val;
+    unsigned long long add2Val;
     if (sscanf(add2Str, "%llx", &add2Val) != 1) {
         fprintf(stderr, "解析add2失败: %s\n", add2Str);
         free(baseStr);

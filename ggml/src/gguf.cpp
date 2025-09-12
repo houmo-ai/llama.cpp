@@ -732,7 +732,6 @@ struct gguf_context * gguf_init_from_file(const char * fname, struct gguf_init_p
         if (it != ggufMap.end()) {
             // 存在：提取对应的gguf_context*
             gguf_context* existingContext = it->second;
-            GGML_LOG_DEBUG("已存在于map中，地址: %p\r\n" , existingContext);
             return existingContext;
         } else {
         // 不存在：创建新的gguf_context
@@ -746,7 +745,6 @@ struct gguf_context * gguf_init_from_file(const char * fname, struct gguf_init_p
         struct gguf_context * result = gguf_init_from_file_impl(file, params);
         ggufMap[fname] = result;
         fclose(file);
-        GGML_LOG_DEBUG("不存在，创建新对象，地址: %p\r\n" , result);
         return result;
         }
     } else {

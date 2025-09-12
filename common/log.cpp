@@ -372,7 +372,7 @@ void common_log_free(struct common_log * log) {
     delete log;
 }
 
-void log_with_spd(const ggml_log_level level, const char * text) {
+static void log_with_spd(const ggml_log_level level, const char * text) {
     switch (level) {
         case GGML_LOG_LEVEL_NONE:
         case GGML_LOG_LEVEL_CONT:

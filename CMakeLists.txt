@@ -33,6 +33,8 @@ if (ENABLE_HOUMO_XH2)
 else()
     message(STATUS "HOUMO XH2 disabled")
 endif()
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
 # set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g ")
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g ")
 

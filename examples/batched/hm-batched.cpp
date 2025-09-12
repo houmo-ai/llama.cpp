@@ -57,8 +57,9 @@ int main(int argc, char ** argv) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
     // tokenize the prompt
-    if (n_parallel > prompt_list.size()) {
-        LOG_ERR("n_parallel > prompt_list.size(), set n_parallel to %d\n", prompt_list.size());
+    if (n_parallel > static_cast<int>(prompt_list.size())) {
+        LOG_ERR("n_parallel > prompt_list.size(), set n_parallel to %lu\n",
+                prompt_list.size());
         n_parallel = prompt_list.size();
     }
     std::vector<std::vector<llama_token>> tokens_list_array;

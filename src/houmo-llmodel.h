@@ -92,7 +92,9 @@ protected:
   void fill_parameters(struct gguf_context *ctx);
 
   void read_tensor_to_buffer(const std::string &file_name, size_t offset,
-    size_t size, std::vector<char> &buffer);
+                             size_t size, std::vector<char> &buffer);
+  std::vector<int> parse_deviceids(bool single_card = true);
+
 protected:
   int prefill_length_ = 256;
   int context_length_ = 4096;

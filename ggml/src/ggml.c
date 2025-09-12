@@ -559,27 +559,27 @@ static wchar_t * ggml_mbstowcs(const char * mbs) {
 
 FILE * ggml_fopen(const char * fname, const char * mode) {
 
-if(hasSuffix(fname,"mem")){
-    GGML_LOG_INFO("++call open from membuffer\r\n");
-    void**buffers;
-    void* bufferSize;
-    int buffers_count = 0;
+    if(hasSuffix(fname,"mem")){
+        GGML_LOG_INFO("++call open from membuffer\r\n");
+        void**buffers = NULL;
+        void* bufferSize = NULL;
+        int buffers_count = 0;
 
-    if (parseMemoryString(fname, &buffers, &bufferSize, &buffers_count)) {
-        printf("解析成功:\n");
-        GGML_LOG_INFO("buffers (void**): 0x%p\n", buffers);
-        GGML_LOG_INFO("bufferSize (void*): 0x%p\n", bufferSize);
-        GGML_LOG_INFO("buffers_count (int): %d\n", buffers_count);
-    }
-    size_t model_size= *(size_t*)bufferSize;
-    GGML_LOG_INFO("buffers[0]: %p\n", buffers[0]);
-    GGML_LOG_INFO("model_size: %lld\n", model_size);
-    char magic_string[5]={0};
-    memcpy(magic_string,buffers[0],4);
-    GGML_LOG_INFO("magic_string is:%s\r\n",magic_string);
-    return fmemopen(buffers[0],model_size, mode);
+        if (parseMemoryString(fname, &buffers, &bufferSize, &buffers_count)) {
+            GGML_LOG_INFO("buffers (void**): 0x%p\n", (void *)buffers);
+            GGML_LOG_INFO("bufferSize (void*): 0x%p\n", bufferSize);
+            GGML_LOG_INFO("buffers_count (int): %d\n", buffers_count);
+            return NULL;
+        }
+        size_t model_size= *(size_t*)bufferSize;
+        GGML_LOG_INFO("buffers[0]: %p\n", buffers[0]);
+        GGML_LOG_INFO("model_size: %zu\n", model_size);
+        char magic_string[5]={0};
+        memcpy(magic_string,buffers[0],4);
+        GGML_LOG_INFO("magic_string is:%s\r\n",magic_string);
+        return fmemopen(buffers[0],model_size, mode);
 
-} else {
+    } else {
 #ifdef _WIN32
     FILE * file = NULL;
 
