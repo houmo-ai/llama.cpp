@@ -40,6 +40,7 @@ xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2
 xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/08/14/0200/ubuntu2004/houmo_drv_xh1_v2.4.2_ubuntu2004_${ARCH}.run"
 #FIXME:
 xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.3.0/2025/08/18/1047/ubuntu2004/houmo_drv_xh2_v0.3.0_ubuntu2004_${ARCH}.run"
+ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/hlaw_ollama.${ARCH}"
 # 下载文件并检查是否成功
 download_file() {
     local url=$1
@@ -169,6 +170,36 @@ package_llama() {
     find "$release_dir" -type f | wc -l
 }
 
+function package_ollama() {
+    echo "Packaging the HLAWOllama..."
+
+    local llama_release_dir="release/$PLATFORM/$ARCH"
+
+    if [ ! -d "release" ]; then
+        mkdir release
+    fi
+    rm -rf release/${PLATFORM}_${ARCH}
+    mkdir -p release/${PLATFORM}_${ARCH}/HLAWOllama
+    mkdir -p release/${PLATFORM}_${ARCH}/HLAWOllama/bin
+    mkdir -p release/${PLATFORM}_${ARCH}/HLAWOllama/lib
+    mkdir -p release/${PLATFORM}_${ARCH}/HLAWOllama/modelfiles
+    download_file "$ollama_url" "release/${PLATFORM}_${ARCH}/HLAWOllama/bin/hlaw_ollama"
+    cp -r $llama_release_dir/bin/llama-server release/${PLATFORM}_${ARCH}/HLAWOllama/bin/
+    cp -r $llama_release_dir/lib/*.so* release/${PLATFORM}_${ARCH}/HLAWOllama/lib/
+    cp tools/ollama/install_ollama.sh release/${PLATFORM}_${ARCH}/HLAWOllama/
+    cp tools/ollama/uninstall_ollama.sh release/${PLATFORM}_${ARCH}/HLAWOllama/
+    cp tools/ollama/qwen3.modelfile release/${PLATFORM}_${ARCH}/HLAWOllama/modelfiles/
+
+    makeself --gzip --target "/opt/HLAWOllama"\
+            "./release/${PLATFORM}_${ARCH}/HLAWOllama" \
+            "./release/HLAWOllama_${PLATFORM}_${ARCH}.run" \
+            "HLAWOllama Installer" \
+            "./install_ollama.sh"
+    rm -rf release/${PLATFORM}_${ARCH}
+    echo "Package completed!"
+}
+
+
 # 主函数
 main() {
     # 确定使用的SDK URL
@@ -187,6 +218,8 @@ main() {
     build_llama
     package_llama
 
+    download_file "$ollama_url" "release/$PLATFORM/$ARCH/bin/hlaw_ollama"
+    chmod 755 release/$PLATFORM/$ARCH/bin/hlaw_ollama
     echo "LLAMA build and packaging completed for $PLATFORM/$ARCH."
 }
 # 执行主函数
