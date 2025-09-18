@@ -94,7 +94,7 @@ deploy_dadao_sdk() {
 # 编译 LLAMA
 build_llama() {
     echo "Building for ARCH: $ARCH"
-
+    git config --global --add safe.directory `pwd`
     # 创建或清理构建目录
     rm -rf build/*
     if [ $PLATFORM == "xh2" ]; then

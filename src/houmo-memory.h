@@ -36,7 +36,10 @@ class houmo_memory_i : public llama_memory_i {
     }
 
     // getters
-    virtual bool get_can_shift() const override { return true; }
+    virtual bool get_can_shift() const override {
+        //TODO: not supported NOW. may support in the future.
+        return false;
+    }
 
     //
     // ops

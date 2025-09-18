@@ -2143,7 +2143,12 @@ struct server_context {
     }
 
     void init() {
-        const int32_t n_ctx_slot = n_ctx / params_base.n_parallel;
+        int32_t n_ctx_slot = n_ctx / params_base.n_parallel;
+        char buf[128] = {0};
+        if(llama_model_meta_val_str(model, "is_hmm", buf, sizeof(buf)/sizeof(buf[0])) > 0) {
+            SRV_INF("model is HMM: %s\n", buf);
+            n_ctx_slot = n_ctx; // for HMM models we use the full context
+        }
 
         SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
 
