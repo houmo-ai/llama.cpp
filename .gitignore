@@ -83,6 +83,7 @@ models/*
 models-mnt
 !models/.editorconfig
 !models/ggml-vocab-*.gguf*
+!models/templates
 
 # Zig
 zig-out/
@@ -147,3 +148,8 @@ poetry.toml
 # Local scripts
 /run-vim.sh
 /run-chat.sh
+.ccache/
+
+# Code Workspace
+*.code-workspace
+

@@ -45,6 +45,14 @@
 #include "ggml-vulkan.h"
 #endif
 
+#ifdef GGML_USE_WEBGPU
+#include "ggml-webgpu.h"
+#endif
+
+#ifdef GGML_USE_ZDNN
+#include "ggml-zdnn.h"
+#endif
+
 #ifdef GGML_USE_OPENCL
 #include "ggml-opencl.h"
 #endif
@@ -172,6 +180,12 @@ struct ggml_backend_registry {
 #endif
 #ifdef GGML_USE_VULKAN
         register_backend(ggml_backend_vk_reg());
+#endif
+#ifdef GGML_USE_WEBGPU
+        register_backend(ggml_backend_webgpu_reg());
+#endif
+#ifdef GGML_USE_ZDNN
+        register_backend(ggml_backend_zdnn_reg());
 #endif
 #ifdef GGML_USE_OPENCL
         register_backend(ggml_backend_opencl_reg());
@@ -386,9 +400,8 @@ ggml_backend_t ggml_backend_init_by_type(enum ggml_backend_dev_type type, const 
 
 ggml_backend_t ggml_backend_init_best(void) {
     ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
-    if (!dev) {
-        dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
-    }
+    dev = dev ? dev : ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU);
+    dev = dev ? dev : ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
     if (!dev) {
         return nullptr;
     }
@@ -491,6 +504,9 @@ static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent,
 
     std::vector<fs::path> search_paths;
     if (user_search_path == nullptr) {
+#ifdef GGML_BACKEND_DIR
+        search_paths.push_back(fs::u8path(GGML_BACKEND_DIR));
+#endif
         // default search paths: executable directory, current directory
         search_paths.push_back(get_executable_path());
         search_paths.push_back(fs::current_path());

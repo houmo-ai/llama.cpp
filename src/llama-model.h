@@ -29,21 +29,29 @@ enum llm_type {
     LLM_TYPE_80M,
     LLM_TYPE_109M,
     LLM_TYPE_137M,
+    LLM_TYPE_140M,
     LLM_TYPE_160M,
     LLM_TYPE_190M,
     LLM_TYPE_220M,
     LLM_TYPE_250M,
+    LLM_TYPE_256M,
     LLM_TYPE_270M,
     LLM_TYPE_335M,
+    LLM_TYPE_350M,
+    LLM_TYPE_360M,
     LLM_TYPE_410M,
     LLM_TYPE_450M,
     LLM_TYPE_475M,
+    LLM_TYPE_558M,
+    LLM_TYPE_700M,
     LLM_TYPE_770M,
     LLM_TYPE_780M,
+    LLM_TYPE_950M,
     LLM_TYPE_0_3B,
     LLM_TYPE_0_5B,
     LLM_TYPE_0_6B,
     LLM_TYPE_1B,
+    LLM_TYPE_1_2B,
     LLM_TYPE_1_3B,
     LLM_TYPE_1_4B,
     LLM_TYPE_1_5B,
@@ -72,9 +80,11 @@ enum llm_type {
     LLM_TYPE_32B,
     LLM_TYPE_34B,
     LLM_TYPE_35B,
+    LLM_TYPE_36B,
     LLM_TYPE_40B,
     LLM_TYPE_65B,
     LLM_TYPE_70B,
+    LLM_TYPE_120B,
     LLM_TYPE_142B,
     LLM_TYPE_236B,
     LLM_TYPE_290B,
@@ -95,8 +105,13 @@ enum llm_type {
     LLM_TYPE_57B_A14B,
     LLM_TYPE_17B_16E, // llama4 Scout
     LLM_TYPE_17B_128E, // llama4 Maverick
+    LLM_TYPE_A13B,
+    LLM_TYPE_21B_A3B, // Ernie MoE small
     LLM_TYPE_30B_A3B,
+    LLM_TYPE_106B_A12B, // GLM-4.5-Air
     LLM_TYPE_235B_A22B,
+    LLM_TYPE_300B_A47B, // Ernie MoE big
+    LLM_TYPE_355B_A32B, // GLM-4.5
     LLM_TYPE_E2B,
     LLM_TYPE_E4B,
 };
@@ -154,6 +169,21 @@ struct llama_layer_convnext {
     struct ggml_tensor * gamma = nullptr;
 };
 
+struct llama_layer_shortconv {
+    struct ggml_tensor * in_proj  = nullptr;
+    struct ggml_tensor * conv     = nullptr;
+    struct ggml_tensor * out_proj = nullptr;
+};
+
+struct llama_layer_nextn {
+    struct ggml_tensor * eh_proj          = nullptr;
+    struct ggml_tensor * embed_tokens     = nullptr;
+    struct ggml_tensor * enorm            = nullptr;
+    struct ggml_tensor * hnorm            = nullptr;
+    struct ggml_tensor * shared_head_head = nullptr;
+    struct ggml_tensor * shared_head_norm = nullptr;
+};
+
 struct llama_layer {
     // normalization
     struct ggml_tensor * attn_norm       = nullptr;
@@ -174,6 +204,9 @@ struct llama_layer {
     struct ggml_tensor * attn_norm_cross = nullptr;
     struct ggml_tensor * attn_norm_enc   = nullptr;
     struct ggml_tensor * ssm_norm        = nullptr;
+    struct ggml_tensor * ssm_dt_norm     = nullptr;
+    struct ggml_tensor * ssm_b_norm      = nullptr;
+    struct ggml_tensor * ssm_c_norm      = nullptr;
 
     // attention
     struct ggml_tensor * wq        = nullptr;
@@ -226,10 +259,14 @@ struct llama_layer {
     struct ggml_tensor * ffn_up_enc   = nullptr;
 
     // ff MoE
-    struct ggml_tensor * ffn_gate_inp  = nullptr;
-    struct ggml_tensor * ffn_gate_exps = nullptr;
-    struct ggml_tensor * ffn_down_exps = nullptr;
-    struct ggml_tensor * ffn_up_exps   = nullptr;
+    struct ggml_tensor * ffn_gate_inp    = nullptr;
+    struct ggml_tensor * ffn_gate_exps   = nullptr;
+    struct ggml_tensor * ffn_down_exps   = nullptr;
+    struct ggml_tensor * ffn_up_exps     = nullptr;
+    struct ggml_tensor * ffn_gate_inp_b  = nullptr;
+    struct ggml_tensor * ffn_gate_exps_b = nullptr;
+    struct ggml_tensor * ffn_down_exps_b = nullptr;
+    struct ggml_tensor * ffn_up_exps_b   = nullptr;
 
     // ff shared expert (shexp)
     struct ggml_tensor * ffn_gate_inp_shexp = nullptr;
@@ -334,9 +371,16 @@ struct llama_layer {
     struct ggml_tensor * laurel_r             = nullptr;
     struct ggml_tensor * laurel_post_norm     = nullptr;
 
+    // openai-moe
+    struct ggml_tensor * attn_sinks = nullptr;
+
     struct llama_layer_posnet posnet;
 
     struct llama_layer_convnext convnext;
+
+    struct llama_layer_shortconv shortconv;
+
+    struct llama_layer_nextn nextn;
 };
 
 struct llama_model {
@@ -440,10 +484,7 @@ struct llama_model {
     llama_memory_i * create_memory(const llama_memory_params & params, llama_cparams & cparams) const;
 
     // TODO: move this to new llm_arch_model_i interface
-    llm_graph_result_ptr build_graph(
-            const llm_graph_params & params,
-                       ggml_cgraph * gf,
-                    llm_graph_type   type) const;
+    ggml_cgraph * build_graph(const llm_graph_params & params) const;
 
 private:
     struct impl;

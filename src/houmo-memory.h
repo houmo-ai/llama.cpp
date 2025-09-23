@@ -101,16 +101,18 @@ class houmo_memory_i : public llama_memory_i {
     // state write/read
     //
 
-    virtual void state_write(llama_io_write_i &io,
-                             llama_seq_id seq_id = -1) const override {
-        (void) io;
-        (void) seq_id;
+    virtual void state_write(llama_io_write_i &io, llama_seq_id seq_id = -1,
+                             llama_state_seq_flags flags = 0) const override {
+        (void)io;
+        (void)seq_id;
+        (void)flags;
         return;
     }
-    virtual void state_read(llama_io_read_i &io,
-                            llama_seq_id seq_id = -1) override {
-        (void) io;
-        (void) seq_id;
+    virtual void state_read(llama_io_read_i &io, llama_seq_id seq_id = -1,
+                            llama_state_seq_flags flags = 0) override {
+        (void)io;
+        (void)seq_id;
+        (void)flags;
         return;
     }
 };
