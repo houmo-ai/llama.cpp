@@ -292,6 +292,9 @@ class ChatStore {
 		if (currentConfig.custom) {
 			apiOptions.custom = currentConfig.custom;
 		}
+		if (currentConfig.enable_thinking !== undefined && currentConfig.enable_thinking!== null) {
+			apiOptions.enable_thinking = Boolean(currentConfig.enable_thinking);
+		}
 
 		return apiOptions;
 	}

@@ -75,6 +75,11 @@
 					key: 'pdfAsImage',
 					label: 'Parse PDF as image',
 					type: 'checkbox'
+				},
+				{
+					key: 'max_history',
+					label: 'Max history messages',
+					type: 'input'
 				}
 			]
 		},
@@ -142,6 +147,11 @@
 				{
 					key: 'showThoughtInProgress',
 					label: 'Show thought in progress',
+					type: 'checkbox'
+				},
+				{
+					key: 'enable_thinking',
+					label: 'Enable thinking',
 					type: 'checkbox'
 				}
 			]

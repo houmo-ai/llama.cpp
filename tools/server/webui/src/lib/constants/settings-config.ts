@@ -32,7 +32,9 @@ export const SETTING_CONFIG_DEFAULT: Record<string, string | number | boolean> =
 	max_tokens: -1,
 	custom: '', // custom json-stringified object
 	// experimental features
-	pyInterpreterEnabled: false
+	pyInterpreterEnabled: false,
+	max_history: 3,
+	enable_thinking: true
 };
 
 export const SETTING_CONFIG_INFO: Record<string, string> = {
@@ -80,5 +82,7 @@ export const SETTING_CONFIG_INFO: Record<string, string> = {
 		'Ask for confirmation before automatically changing conversation title when editing the first message.',
 	pdfAsImage: 'Parse PDF as image instead of text (requires vision-capable model).',
 	pyInterpreterEnabled:
-		'Enable Python interpreter using Pyodide. Allows running Python code in markdown code blocks.'
+		'Enable Python interpreter using Pyodide. Allows running Python code in markdown code blocks.',
+	max_history: 'Maximum number of messages to keep in the message history. Set to 0 to disable message history.',
+	enable_thinking: 'Enable thinking mode for the model like qwen3.'
 };

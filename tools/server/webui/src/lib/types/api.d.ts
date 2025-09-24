@@ -145,6 +145,7 @@ export interface ApiChatCompletionRequest {
 	dry_penalty_last_n?: number;
 	// Sampler configuration
 	samplers?: string[];
+	chat_template_kwargs?: Record<string, boolean>;
 	// Custom parameters (JSON string)
 	custom?: Record<string, unknown>;
 }

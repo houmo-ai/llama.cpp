@@ -1,5 +1,4 @@
 import { config } from '$lib/stores/settings.svelte';
-import { log } from 'console';
 import { slotsService } from './slots';
 /**
  * ChatService - Low-level API communication layer for llama.cpp server interactions
@@ -76,7 +75,8 @@ export class ChatService {
 			// Other parameters
 			samplers,
 			custom,
-			timings_per_token
+			timings_per_token,
+			enable_thinking,
 		} = options;
 
 		// Cancel any ongoing request and create a new abort controller
@@ -142,7 +142,7 @@ export class ChatService {
 		if (dry_base !== undefined) requestBody.dry_base = dry_base;
 		if (dry_allowed_length !== undefined) requestBody.dry_allowed_length = dry_allowed_length;
 		if (dry_penalty_last_n !== undefined) requestBody.dry_penalty_last_n = dry_penalty_last_n;
-
+		if (enable_thinking !== undefined) requestBody.chat_template_kwargs = { enable_thinking };
 		if (samplers !== undefined) {
 			requestBody.samplers =
 				typeof samplers === 'string'
@@ -336,11 +336,11 @@ export class ChatService {
 								// }
 							}
 
-							// if (reasoningContent) {
-							// 	hasReceivedData = true;
-							// 	fullReasoningContent += reasoningContent;
-							// 	onReasoningChunk?.(reasoningContent);
-							// }
+							if (reasoningContent) {
+								hasReceivedData = true;
+								fullReasoningContent += reasoningContent;
+								onReasoningChunk?.(reasoningContent);
+							}
 						} catch (e) {
 							console.error('Error parsing JSON chunk:', e);
 						}
@@ -625,7 +625,8 @@ export class ChatService {
 	private injectSystemMessage(messages: ApiChatMessageData[]): ApiChatMessageData[] {
 		const currentConfig = config();
 		const systemMessage = currentConfig.systemMessage?.toString().trim();
-
+		const sliceIndex = messages.length - 1 - currentConfig.max_history;
+		messages = messages.slice(sliceIndex, messages.length)
 		if (!systemMessage) {
 			return messages;
 		}

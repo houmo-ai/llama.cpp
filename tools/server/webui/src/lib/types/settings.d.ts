@@ -38,6 +38,7 @@ export interface SettingsChatServiceOptions {
 	samplers?: string | string[];
 	// Custom parameters
 	custom?: string;
+	enable_thinking?: boolean;
 	// Callbacks
 	onChunk?: (chunk: string) => void;
 	onReasoningChunk?: (chunk: string) => void;
