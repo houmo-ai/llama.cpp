@@ -48,6 +48,7 @@
 
 					slotsService
 						.updateFromTimingData({
+							prompt_ms: message.timings.prompt_ms || 0,
 							prompt_n: message.timings.prompt_n || 0,
 							predicted_n: message.timings.predicted_n || 0,
 							predicted_per_second:

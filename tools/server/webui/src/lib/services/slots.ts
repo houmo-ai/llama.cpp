@@ -101,6 +101,7 @@ export class SlotsService {
 	 * Updates processing state with timing data from ChatService streaming response
 	 */
 	async updateFromTimingData(timingData: {
+		prompt_ms: number,
 		prompt_n: number;
 		predicted_n: number;
 		predicted_per_second: number;
@@ -163,6 +164,7 @@ export class SlotsService {
 		timingData: Record<string, unknown>
 	): Promise<ApiProcessingState | null> {
 		const promptTokens = (timingData.prompt_n as number) || 0;
+		const promptMS = (timingData.prompt_ms as number) || 0;
 		const predictedTokens = (timingData.predicted_n as number) || 0;
 		const tokensPerSecond = (timingData.predicted_per_second as number) || 0;
 		const cacheTokens = (timingData.cache_n as number) || 0;
@@ -207,7 +209,8 @@ export class SlotsService {
 			speculative: false,
 			progressPercent,
 			promptTokens,
-			cacheTokens
+			cacheTokens,
+			promptMS
 		};
 	}
 

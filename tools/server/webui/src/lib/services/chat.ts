@@ -706,6 +706,7 @@ export class ChatService {
 		// Update slots service with timing data (async but don't wait)
 		slotsService
 			.updateFromTimingData({
+				prompt_ms: timings?.prompt_ms || 0,
 				prompt_n: timings?.prompt_n || 0,
 				predicted_n: timings?.predicted_n || 0,
 				predicted_per_second: tokensPerSecond,

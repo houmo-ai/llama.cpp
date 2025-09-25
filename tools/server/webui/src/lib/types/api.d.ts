@@ -250,4 +250,5 @@ export interface ApiProcessingState {
 	progressPercent?: number;
 	promptTokens?: number;
 	cacheTokens?: number;
+	promptMS?: number;
 }

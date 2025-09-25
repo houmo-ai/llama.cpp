@@ -33,7 +33,7 @@ export const SETTING_CONFIG_DEFAULT: Record<string, string | number | boolean> =
 	custom: '', // custom json-stringified object
 	// experimental features
 	pyInterpreterEnabled: false,
-	max_history: 3,
+	max_history: 0,
 	enable_thinking: true
 };
 

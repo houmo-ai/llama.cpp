@@ -1,5 +1,6 @@
 import { slotsService } from '$lib/services';
 import { config } from '$lib/stores/settings.svelte';
+import { stat } from 'node:fs';
 
 export interface UseProcessingStateReturn {
 	readonly processingState: ApiProcessingState | null;
@@ -147,6 +148,9 @@ export function useProcessingState(): UseProcessingStateReturn {
 			stateToUse.tokensPerSecond > 0
 		) {
 			details.push(`${stateToUse.tokensPerSecond.toFixed(1)} tokens/sec`);
+		}
+		if (currentConfig.showTokensPerSecond && stateToUse.promptMS && stateToUse.promptMS > 0 && stateToUse.promptTokens > 0) {
+			details.push(`prompt_tokens:${stateToUse.promptTokens.toFixed(0)} prompt_time:${stateToUse.promptMS.toFixed(0)}ms`)
 		}
 
 		if (stateToUse.speculative) {

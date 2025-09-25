@@ -10,7 +10,7 @@ show_help() {
     echo ""
     echo "usage 示例1: <指定端口号>: run_llama_server.sh run model_name --port 18080"
     echo ""
-    echo "usage 示例2: <关闭Qwen3的Think机制>: run_llama_server.sh run model_name --jinja --chat-template-file bin/qwen3_nonthinking.jinja"
+    echo "usage 示例2: <关闭Qwen3的Think机制>: run_llama_server.sh run model_name --reasoning-budget 0"
     echo ""
     echo "usage 示例3: <非多batch模型性能会下降，且受限显存大小，最大4>: run_llama_server.sh run model_name -np 2"
     echo ""
@@ -215,6 +215,8 @@ launch_cmd=(
     -c 32000
     --no-context-shift
     --host 0.0.0.0
+    --jinja
+    --reasoning-format none
 )
 
 # 如果是VL模型，添加mmproj参数

@@ -44,4 +44,6 @@ start "" /b llama-server.exe ^
     -np 1 ^
     -c 32000 ^
     --no-context-shift  ^
+    --jinja ^
+    --reasoning-format none ^
     --host 0.0.0.0
