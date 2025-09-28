@@ -102,7 +102,19 @@ build_llama() {
     else
         cmake -B build -DLLAMA_CURL=OFF
     fi
+    if [ $? -ne 0 ]; then
+        echo "cmake failed."
+        exit 1
+    else
+        echo "cmake completed."
+    fi
     cmake  --build build --config Release -j 8
+    if [ $? -ne 0 ]; then
+        echo "make build failed."
+        exit 1
+    else
+        echo "make build completed."
+    fi
     echo "Build completed."
 }
 

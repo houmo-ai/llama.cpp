@@ -115,7 +115,19 @@ build_llama() {
             cmake .. -DLLAMA_CURL=OFF
         fi
     fi
+    if [ $? -ne 0 ]; then
+        echo "cmake failed."
+        exit 1
+    else
+        echo "cmake completed."
+    fi
     make -j$(nproc)
+    if [ $? -ne 0 ]; then
+        echo "make build failed."
+        exit 1
+    else
+        echo "make build completed."
+    fi
     cd ..
 
     echo "Build completed."
