@@ -36,10 +36,9 @@ esac
 
 # SDK URLs
 xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/08/14/0200/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_${ARCH}-2.4.2.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.3.0/2025/08/18/1047/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.3.0.tar.gz"
-xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/08/14/0200/ubuntu2004/houmo_drv_xh1_v2.4.2_ubuntu2004_${ARCH}.run"
-#FIXME:
-xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.3.0/2025/08/18/1047/ubuntu2004/houmo_drv_xh2_v0.3.0_ubuntu2004_${ARCH}.run"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.4.0/2025/09/26/1031/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.4.0.tar.gz"
+xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/09/19/0200/ubuntu2004/houmo_drv_xh1_v2.4.3_ubuntu2004_${ARCH}.run"
+xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.4.0/2025/09/26/1031/ubuntu2004/houmo_drv_xh2_v0.4.0_ubuntu2004_${ARCH}.run"
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/hlaw_ollama.${ARCH}"
 # 下载文件并检查是否成功
 download_file() {
