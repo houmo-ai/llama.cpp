@@ -12,10 +12,10 @@ export const SETTING_CONFIG_DEFAULT: Record<string, string | number | boolean> =
 	pdfAsImage: false,
 	// make sure these default values are in sync with `common.h`
 	samplers: 'top_k;typ_p;top_p;min_p;temperature',
-	temperature: 0.8,
+	temperature: 0.00,
 	dynatemp_range: 0.0,
 	dynatemp_exponent: 1.0,
-	top_k: 1,
+	top_k: 40,
 	top_p: 0.95,
 	min_p: 0.05,
 	xtc_probability: 0.0,

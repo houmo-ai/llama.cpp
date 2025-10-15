@@ -24,8 +24,8 @@ extra_args=()
 default_port_args=("--port" "17701")  # 默认端口号
 # xh1 模型列表
 declare -A models_xh1=(
-    ["Qwen2.5-14b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-14B-F16-8k-4core-xh1-v0.0.1.gguf"
-    ["Qwen2.5-7b-4batch"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-7B-4batch-F16-2k-4core-xh1-v0.0.1.gguf"
+    ["Qwen2.5-14b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-14B-2d-8k-4core-xh1-v0.0.2.gguf"
+    ["Qwen2.5-7b-4batch"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5/HiModel-Qwen2.5-7B-4batch-2k-4core-xh1-v0.0.2.gguf"
     ["Qwen3-8b-1batch"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen3/HiModel-Qwen3-8B-F16-8K-4core-xh1-v0.0.2.gguf"
     ["Qwenvl2.5-3b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-F16-2k-4core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-3B-mmproj-F16-2k-4core-xh1-v0.0.1.gguf"
     ["Qwenvl2.5-7b"]="http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-F16-2k-4core-xh1-v0.0.1.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/qwen2.5vl/HiModel-QwenVL2.5-7B-mmproj-F16-2k-4core-xh1-v0.0.1.gguf"
