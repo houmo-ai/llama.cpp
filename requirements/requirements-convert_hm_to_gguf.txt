@@ -5,4 +5,4 @@ transformers>=4.45.1,<5.0.0
 gguf~=0.17.1
 protobuf>=4.21.0
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch~=2.2.1; platform_machine != "s390x"
+torch>=2.4.0,<=2.9.0; platform_machine != "s390x"
