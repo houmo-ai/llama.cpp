@@ -62,48 +62,39 @@ void HoumoVision::read_tensor_to_buffer(const std::string &file_name,
     }
 }
 
-void HoumoVision::rgb_to_nchw(const std::vector<float> &rgb_data, int height,
-                              int width, int channels, int batch_size) {
-    // 检查输入参数有效性
-    if (height <= 0 || width <= 0 || channels <= 0 || batch_size <= 0) {
-        throw std::invalid_argument("Invalid input dimensions: height, width, "
-                                    "channels and batch_size must be positive");
-    }
+void HoumoVision::rgb_to_nchw(const std::vector<float> &rgb_data) {
 
     // 计算预期的数据大小
-    const size_t expected_size =
-        static_cast<size_t>(height * width * channels * batch_size);
+    const size_t expected_size = image_width_ * image_height_ * image_channels_ * batch_size_ * image_frames_;
     nchw_data_.resize(expected_size);
-    // 检查输入数据大小是否匹配
-    if (rgb_data.size() != expected_size) {
-        throw std::invalid_argument(
-            "Input data size does not match the given dimensions");
-    }
-    for (int b = 0; b < batch_size; ++b) {
-        const size_t batch_offset =
-            static_cast<size_t>(b) * height * width * channels;
+    bool only_one_frame = (rgb_data.size() == image_width_ * image_height_ * image_channels_);
+    // 转换逻辑：N→C→F→H→W
+    const size_t frame_size =image_height_ * image_width_ * image_channels_;
+    for (size_t b = 0; b < batch_size_; ++b) {// 批量维度（1）
+        for (size_t c = 0; c < image_channels_; ++c) {// 通道维度（3：R/G/B）
+            for (size_t f = 0; f < image_frames_; ++f) {// 帧维度（2）
+                // 计算当前帧在输入数据中的起始偏移（输入是按帧拼接的HWC）
+                const size_t img_index = only_one_frame ? 0 : f;
+                const size_t frame_offset = img_index * frame_size;
 
-        for (int c = 0; c < channels; ++c) {
-            const size_t channel_offset =
-                static_cast<size_t>(c) * height * width;
+                for (size_t h = 0; h < image_height_; ++h) {// 高度维度（364）
+                    for (size_t w = 0; w < image_width_; ++w) { // 宽度维度（644）
+                        // 输入HWC格式的索引：[帧偏移] + [行偏移] + [列×通道] + [通道]
+                        const size_t hwc_index = frame_offset
+                                                + h * image_width_ * image_channels_
+                                                + w * image_channels_
+                                                + c;
 
-            for (int h = 0; h < height; ++h) {
-                const size_t hwc_h_offset =
-                    static_cast<size_t>(h) * width * channels;
-                const size_t nchw_h_offset = static_cast<size_t>(h) * width;
-
-                for (int w = 0; w < width; ++w) {
-                    // 计算HWC格式中的索引
-                    const size_t hwc_index = batch_offset + hwc_h_offset +
-                                             static_cast<size_t>(w) * channels +
-                                             c;
-
-                    // 计算NCHW格式中的索引
-                    const size_t nchw_index =
-                        static_cast<size_t>(b) * channels * height * width +
-                        channel_offset + nchw_h_offset + w;
-
-                    nchw_data_[nchw_index] = rgb_data[hwc_index];
+                        // 输出NCFHW格式的索引：[N偏移] + [C偏移] + [F偏移] + [H偏移] + [W]
+                        const size_t ncfhw_index =
+                                    b * image_channels_ * image_frames_ * image_height_ * image_width_
+                                    + c * image_frames_ * image_height_ * image_width_
+                                    + f * image_height_ * image_width_
+                                    + h * image_width_
+                                    + w;
+                        // 赋值
+                        nchw_data_[ncfhw_index] = rgb_data[hwc_index];
+                    }
                 }
             }
         }
@@ -165,6 +156,15 @@ bool HoumoVision::init(const std::string &model_path) {
             image_width_ = input_info.Shape()[3];
             image_height_ = input_info.Shape()[2];
             image_channels_ = input_info.Shape()[1];
+            batch_size_ = input_info.Shape()[0];
+            image_frames_ = 1;
+            input_name_ = input_name;
+        } else if (input_info.Shape().size() == 5) {
+            image_width_ = input_info.Shape()[4];
+            image_height_ = input_info.Shape()[3];
+            image_frames_ = input_info.Shape()[2];
+            image_channels_ = input_info.Shape()[1];
+            batch_size_ = input_info.Shape()[0];
             input_name_ = input_name;
         }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
@@ -226,7 +226,7 @@ bool HoumoVision::encoding(const std::vector<float> &input_data,
         input_tensor.Buffer().CopyFromHost(yuv444_data.data(),
                                            input_tensor.MemSize());
     } else {
-        rgb_to_nchw(input_data, image_height_, image_width_, image_channels_);
+        rgb_to_nchw(input_data);
         // xh2  input_data 转成float16
         auto input_fp16_tensor = floatArrayToFloat16Tensor(nchw_data_);
         input_tensor.Buffer().CopyFromHost(

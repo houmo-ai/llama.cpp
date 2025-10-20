@@ -123,13 +123,9 @@ static bool parseMemoryString(const char *str,
     substr(baseStr, 0, len1, add1Str, sizeof(add1Str));
 
     size_t len2 = pos2 - pos1 - 1;
-    if ((pos1 + 1) == NULL) {
-        return false;
-    }
+
     substr(pos1 + 1, 0, len2, add2Str, sizeof(add2Str));
-    if ((pos2 + 1) == NULL) {
-        return false;
-    }
+
     substr(pos2 + 1, 0, strlen(pos2 + 1), add3Str, sizeof(add3Str));
 
     // 3. 转换add1 (void**)

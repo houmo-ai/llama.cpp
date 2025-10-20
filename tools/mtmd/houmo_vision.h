@@ -24,8 +24,7 @@ class HoumoVision {
                        int height, std::vector<uint8_t> &yuv444sp_data);
     void read_tensor_to_buffer(const std::string &file_name, size_t offset,
                                size_t size, std::vector<char> &buffer);
-    void rgb_to_nchw(const std::vector<float> &rgb_data, int height, int width,
-                     int channels = 3, int batch_size = 1);
+    void rgb_to_nchw(const std::vector<float> &rgb_data);
     /**
      * 分辨率固定，则index和mask可以预计算
      * 否则需要根据分辨率计算
@@ -44,6 +43,8 @@ class HoumoVision {
     uint32_t image_width_ = 644;
     uint32_t image_height_ = 364;
     uint32_t image_channels_ = 3;
+    uint32_t batch_size_ = 1;
+    uint32_t image_frames_ = 2;
     std::string input_name_;
     uint32_t patch_size_ = 14;
     std::vector<float> nchw_data_;
