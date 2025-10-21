@@ -624,6 +624,65 @@ class TextModel(ModelBase):
         if "model_arch" not in cls.__dict__:
             raise TypeError(f"Missing property 'model_arch' for {cls.__name__!r}")
 
+    def conver_embedding(self, embedding_path: Path):
+        # 加载嵌入权重
+        torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
+        embedding_weight = torch.load(
+            embedding_path, map_location="cpu", weights_only=True
+        )
+        if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
+            embedding_weight = embedding_weight["weight"]
+        if isinstance(embedding_weight, torch.nn.Embedding):
+            embedding_weight = embedding_weight.weight
+        print(f"embedding_weight.dtype: {embedding_weight.dtype}")
+        if embedding_weight.dtype == torch.int16:
+            print(
+                "keep weight to int16 for minimal memory usage. convert to float32 when using in C++"
+            )
+            embedding_weight = embedding_weight.to(torch.int16)
+        elif embedding_weight.dtype == torch.float16:
+            print("keep embedding weight as float16")
+        else:
+            print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
+            embedding_weight = embedding_weight.to(torch.float32)
+        # 创建空模块并手动注册参数
+        m = nn.Module()
+        # par = nn.Parameter(embedding_weight)  # 注册为可训练参数
+        m.register_buffer("0", embedding_weight)  # 参数名称为"0"
+        scripted_model = torch.jit.script(m)
+        out_path = self.dir_model / "cpp_quant_embedding.pt"
+        scripted_model.save(out_path)
+        if isinstance(scripted_model, torch.jit.ScriptModule):
+            print("****scripted_model is torch.jit.ScriptModule")
+        return out_path
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        # TODO: @guoxing.xu check & test this block
+        logger.info(".....Getting tensors")
+        for name in [
+            "quant_embedding.pt",
+            "prefill.hmm",
+            "decoder.hmm",
+            "prefill_0.hmm",
+            "prefill_1.hmm",
+            "decoder_0.hmm",
+            "decoder_1.hmm",
+        ]:
+            file_path = self.dir_model / name
+            logger.info(f".....Loading tensor from {file_path}")
+            if name == "quant_embedding.pt":
+                file_path = self.conver_embedding(file_path)
+            if not file_path.is_file():
+                logger.warning(f".....{file_path} not found")
+                continue
+            with open(file_path, "rb") as file:
+                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                logger.info(f".....Tensor size: {binary_data.shape}")
+                data = torch.from_numpy(binary_data.copy())
+                if name == "quant_embedding.pt":
+                    os.remove(file_path)
+                yield name, data
+
     def set_vocab(self):
         self._set_vocab_gpt2()
 
@@ -1610,65 +1669,6 @@ class Qwen2Model(TextModel):
         if self.model_description:
             self.gguf_writer.add_string("model.description", self.model_description)
 
-    def conver_embedding(self, embedding_path: Path):
-        # 加载嵌入权重
-        torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
-        embedding_weight = torch.load(
-            embedding_path, map_location="cpu", weights_only=True
-        )
-        if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
-            embedding_weight = embedding_weight["weight"]
-        if isinstance(embedding_weight, torch.nn.Embedding):
-            embedding_weight = embedding_weight.weight
-        print(f"embedding_weight.dtype: {embedding_weight.dtype}")
-        if embedding_weight.dtype == torch.int16:
-            print(
-                "keep weight to int16 for minimal memory usage. convert to float32 when using in C++"
-            )
-            embedding_weight = embedding_weight.to(torch.int16)
-        elif embedding_weight.dtype == torch.float16:
-            print("keep embedding weight as float16")
-        else:
-            print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
-            embedding_weight = embedding_weight.to(torch.float32)
-        # 创建空模块并手动注册参数
-        m = nn.Module()
-        # par = nn.Parameter(embedding_weight)  # 注册为可训练参数
-        m.register_buffer("0", embedding_weight)  # 参数名称为"0"
-        scripted_model = torch.jit.script(m)
-        out_path = self.dir_model / "cpp_quant_embedding.pt"
-        scripted_model.save(out_path)
-        if isinstance(scripted_model, torch.jit.ScriptModule):
-            print("****scripted_model is torch.jit.ScriptModule")
-        return out_path
-
-    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
-        # TODO: @guoxing.xu check & test this block
-        logger.info(".....Getting tensors")
-        for name in [
-            "quant_embedding.pt",
-            "prefill.hmm",
-            "decoder.hmm",
-            "prefill_0.hmm",
-            "prefill_1.hmm",
-            "decoder_0.hmm",
-            "decoder_1.hmm",
-        ]:
-            file_path = self.dir_model / name
-            logger.info(f".....Loading tensor from {file_path}")
-            if name == "quant_embedding.pt":
-                file_path = self.conver_embedding(file_path)
-            if not file_path.is_file():
-                logger.warning(f".....{file_path} not found")
-                continue
-            with open(file_path, "rb") as file:
-                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
-                logger.info(f".....Tensor size: {binary_data.shape}")
-                data = torch.from_numpy(binary_data.copy())
-                if name == "quant_embedding.pt":
-                    os.remove(file_path)
-                yield name, data
-
     def prepare_tensors(self):
         # TODO: @guoxing.xu check & test this block
         # 自定义的tensor，不需要该函数
@@ -1710,65 +1710,6 @@ class Qwen2VLModel(TextModel):
             self._set_vocab_sentencepiece()
         except FileNotFoundError:
             self._set_vocab_gpt2()
-
-    def conver_embedding(self, embedding_path: Path):
-        # 加载嵌入权重
-        torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
-        embedding_weight = torch.load(
-            embedding_path, map_location="cpu", weights_only=True
-        )
-        if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
-            embedding_weight = embedding_weight["weight"]
-        if isinstance(embedding_weight, torch.nn.Embedding):
-            embedding_weight = embedding_weight.weight
-
-        print(f"embedding_weight.dtype: {embedding_weight.dtype}")
-        if embedding_weight.dtype == torch.int16:
-            print(
-                "keep weight to int16 for minimal memory usage. convert to float32 when using in C++"
-            )
-            embedding_weight = embedding_weight.to(torch.int16)
-        elif embedding_weight.dtype == torch.float16:
-            print("keep embedding weight as float16")
-        else:
-            print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
-            embedding_weight = embedding_weight.to(torch.float32)
-        # 创建空模块并手动注册参数
-        m = nn.Module()
-        m.register_buffer("0", embedding_weight)  # 参数名称为"0""
-        scripted_model = torch.jit.script(m)
-        out_path = self.dir_model / "cpp_quant_embedding.pt"
-        scripted_model.save(out_path)
-        if isinstance(scripted_model, torch.jit.ScriptModule):
-            print("****scripted_model is torch.jit.ScriptModule")
-        return out_path
-
-    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
-        # TODO: @guoxing.xu check & test this block
-        logger.info(".....Getting tensors")
-        for name in [
-            "quant_embedding.pt",
-            "prefill.hmm",
-            "decoder.hmm",
-            "prefill_0.hmm",
-            "prefill_1.hmm",
-            "decoder_0.hmm",
-            "decoder_1.hmm",
-        ]:
-            file_path = self.dir_model / name
-            logger.info(f".....Loading tensor from {file_path}")
-            if name == "quant_embedding.pt":
-                file_path = self.conver_embedding(file_path)
-            if not file_path.is_file():
-                logger.warning(f".....{file_path} not found")
-                continue
-            with open(file_path, "rb") as file:
-                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
-                logger.info(f".....Tensor size: {binary_data.shape}")
-                data = torch.from_numpy(binary_data.copy())
-                if name == "quant_embedding.pt":
-                    os.remove(file_path)
-                yield name, data
 
     def prepare_tensors(self):
         # TODO: @guoxing.xu check & test this block
@@ -1993,55 +1934,26 @@ class Qwen2MoeModel(TextModel):
             self.gguf_writer.add_rope_scaling_orig_ctx_len(
                 rope_scaling["original_max_position_embeddings"]
             )
+        self.gguf_writer.add_bool("is_hmm", True)
+        if self.model_description:
+            self.gguf_writer.add_string("model.description", self.model_description)
 
     _experts: list[dict[str, Tensor]] | None = None
 
-    def modify_tensors(
-        self, data_torch: Tensor, name: str, bid: int | None
-    ) -> Iterable[tuple[str, Tensor]]:
-        # process the experts separately
-        if name.find("experts") != -1:
-            n_experts = self.hparams["num_experts"]
-            assert bid is not None
-
-            if self._experts is None:
-                self._experts = [{} for _ in range(self.block_count)]
-
-            self._experts[bid][name] = data_torch
-
-            if len(self._experts[bid]) >= n_experts * 3:
-                tensors: list[tuple[str, Tensor]] = []
-
-                # merge the experts into a single 3d tensor
-                for w_name in ["down_proj", "gate_proj", "up_proj"]:
-                    datas: list[Tensor] = []
-
-                    for xid in range(n_experts):
-                        ename = f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight"
-                        datas.append(self._experts[bid][ename])
-                        del self._experts[bid][ename]
-
-                    data_torch = torch.stack(datas, dim=0)
-
-                    merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
-
-                    new_name = self.map_tensor_name(merged_name)
-
-                    tensors.append((new_name, data_torch))
-                return tensors
-            else:
-                return []
-
-        return [(self.map_tensor_name(name), data_torch)]
-
     def prepare_tensors(self):
-        super().prepare_tensors()
-
-        if self._experts is not None:
-            # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
-            if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+        # TODO: @guoxing.xu check & test this block
+        # 自定义的tensor，不需要该函数
+        # super().prepare_tensors()
+        logger.info(".....Preparing tensors")
+        for name, data_torch in chain(
+            self.generate_extra_tensors(), self.get_tensors()
+        ):
+            logger.info(
+                f".....Adding tensor {name}, {data_torch.shape}, {data_torch.nbytes}"
+            )
+            self.gguf_writer.add_tensor(
+                name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
+            )
 
 
 @ModelBase.register("Qwen3ForCausalLM")

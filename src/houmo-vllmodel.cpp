@@ -260,27 +260,12 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             prefill_input_map_.at(prefill_model_->GetInputName(4));
         auto prefill_current_length =
             prefill_input_map_.at(prefill_model_->GetInputName(5));
-        if (time_position_id.Info().DataType() == tcim::DataType::INT16) {
-            SetInputData<int16_t>(time_position_id, time_position_ids_, valid_length);
-            SetInputData<int16_t>(hight_position_id, hight_position_ids_, valid_length);
-            SetInputData<int16_t>(width_position_id, width_position_ids_, valid_length);
-        } else if (time_position_id.Info().DataType() == tcim::DataType::INT32) {
-            SetInputData<int32_t>(time_position_id, time_position_ids_, valid_length);
-            SetInputData<int32_t>(hight_position_id, hight_position_ids_, valid_length);
-            SetInputData<int32_t>(width_position_id, width_position_ids_, valid_length);
-        }
-        if (prefill_valid_length.Info().DataType() == tcim::DataType::INT16) {
-            SetInputData<int16_t>(prefill_valid_length, n_prefill_batch_,
-                                  valid_length);
-            SetInputData<int16_t>(prefill_current_length, n_prefill_batch_,
-                                  current_length);
-        } else if (prefill_valid_length.Info().DataType() ==
-                   tcim::DataType::INT32) {
-            SetInputData<int32_t>(prefill_valid_length, n_prefill_batch_,
-                                  valid_length);
-            SetInputData<int32_t>(prefill_current_length, n_prefill_batch_,
-                                  current_length);
-        }
+        set_input_data(time_position_id, time_position_ids_, valid_length);
+        set_input_data(hight_position_id, hight_position_ids_, valid_length);
+        set_input_data(width_position_id, width_position_ids_, valid_length);
+        set_input_data(prefill_valid_length, n_prefill_batch_, valid_length);
+        set_input_data(prefill_current_length, n_prefill_batch_,
+                       current_length);
 
         prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
         prefill_model_->SetInput(prefill_model_->GetInputName(1),
@@ -428,19 +413,12 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
         decode_input_map_.at(decode_model_->GetInputName(4));
     auto decode_current_length =
         decode_input_map_.at(decode_model_->GetInputName(5));
-    if (decode_valid_length.Info().DataType() == tcim::DataType::INT16) {
-        SetInputData<int16_t>(decode_valid_length, valid_length_vec);
-        SetInputData<int16_t>(decode_current_length, current_length_vec);
-        SetInputData<int16_t>(time_position_id, position_vec);
-        SetInputData<int16_t>(hight_position_id, position_vec);
-        SetInputData<int16_t>(width_position_id, position_vec);
-    } else if (decode_valid_length.Info().DataType() == tcim::DataType::INT32) {
-        SetInputData<int32_t>(decode_valid_length, valid_length_vec);
-        SetInputData<int32_t>(decode_current_length, current_length_vec);
-        SetInputData<int32_t>(time_position_id, position_vec);
-        SetInputData<int32_t>(hight_position_id, position_vec);
-        SetInputData<int32_t>(width_position_id, position_vec);
-    }
+
+    set_input_data(time_position_id, position_vec);
+    set_input_data(hight_position_id, position_vec);
+    set_input_data(width_position_id, position_vec);
+    set_input_data(decode_valid_length, valid_length_vec);
+    set_input_data(decode_current_length, current_length_vec);
 
     decode_model_->SetInput(decode_model_->GetInputName(0), input_data);
     decode_model_->SetInput(decode_model_->GetInputName(1), time_position_id);
