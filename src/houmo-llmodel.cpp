@@ -387,7 +387,7 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
     auto option_prefill = tcim::Module::Option(wm);
     option_prefill.SetDummyTensors(dummy_tensor_names);
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
-    const std::regex kDecodePattern("^decoder(_\\d+)?\\.hmm$");
+    const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
 
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
@@ -460,6 +460,16 @@ bool HouMoSingleCardModel::houmo_load(const std::string &file_name) {
     }
     ggml_free(ctx_data);
     gguf_free(ctx);
+    if (embedding_.get() == nullptr || prefill_model_ == nullptr ||
+        decode_model_ == nullptr) {
+        LLAMA_LOG_ERROR("%s: failed to load model. load embedding=%d,load "
+                        "prefill=%d,load decode=%d\n",
+                        __func__, (embedding_.get() == nullptr),
+                        (prefill_model_ == nullptr),
+                        (decode_model_ == nullptr));
+        return false;
+    }
+
     return true;
 }
 

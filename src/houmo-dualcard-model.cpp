@@ -125,6 +125,12 @@ bool HouMoDualCardModel::houmo_load(const std::string &file_name) {
     }
     ggml_free(ctx_data);
     gguf_free(ctx);
+    if (embedding_.get() == nullptr || prefill_model_card0_ == nullptr ||
+        decode_model_card0_ == nullptr || prefill_model_card1_ == nullptr ||
+        decode_model_card1_ == nullptr) {
+        LLAMA_LOG_ERROR("Some model is not loaded\n");
+        return false;
+    }
     return true;
 }
 

@@ -656,32 +656,82 @@ class TextModel(ModelBase):
             print("****scripted_model is torch.jit.ScriptModule")
         return out_path
 
-    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
-        # TODO: @guoxing.xu check & test this block
+    def get_tensors(self) -> Iterator[Tuple[str, torch.Tensor]]:
         logger.info(".....Getting tensors")
-        for name in [
-            "quant_embedding.pt",
-            "prefill.hmm",
-            "decoder.hmm",
-            "prefill_0.hmm",
-            "prefill_1.hmm",
-            "decoder_0.hmm",
-            "decoder_1.hmm",
-        ]:
-            file_path = self.dir_model / name
-            logger.info(f".....Loading tensor from {file_path}")
-            if name == "quant_embedding.pt":
-                file_path = self.conver_embedding(file_path)
+
+        # 定义需要匹配的键名与模式映射
+        # 分为"必须存在"和"可选存在"两组
+        required_keys = {
+            "quant_embedding.pt": re.compile(r".*embedding\.pt$"),
+            "prefill.hmm": re.compile(r".*prefill\.hmm$"),
+            "decoder.hmm": re.compile(r".*decode(r)?\.hmm$"),
+        }
+        optional_keys = {
+            "prefill_0.hmm": re.compile(r".*prefill_0\.hmm$"),
+            "prefill_1.hmm": re.compile(r".*prefill_1\.hmm$"),
+            "decoder_0.hmm": re.compile(r".*decoder_0\.hmm$"),
+            "decoder_1.hmm": re.compile(r".*decoder_1\.hmm$"),
+        }
+
+        # 检查模型目录是否存在
+        if not self.dir_model.exists():
+            logger.error(f"Model directory {self.dir_model} does not exist")
+            raise FileNotFoundError(f"Model directory {self.dir_model} not found")
+
+        # 获取目录下所有文件
+        all_files = [f.name for f in self.dir_model.iterdir() if f.is_file()]
+
+        # 处理必须存在的文件（不存在则报错）
+        matched_required = {}
+        for key, pattern in required_keys.items():
+            matched = [file for file in all_files if pattern.match(file)]
+            if not matched:
+                logger.error(f"Missing required file for key: {key}")
+                raise FileNotFoundError(f"No file found for required key {key}")
+            matched_required[key] = matched[0]  # 取第一个匹配文件
+
+        # 处理可选文件（不存在则跳过）
+        matched_optional = {}
+        for key, pattern in optional_keys.items():
+            matched = [file for file in all_files if pattern.match(file)]
+            if matched:
+                matched_optional[key] = matched[0]  # 存在则记录
+            else:
+                logger.warning(f"Optional file for key {key} not found, skipping")
+
+        # 合并所有匹配的文件（必须存在的 + 可选存在的）
+        all_matched = {**matched_required, **matched_optional}
+
+        # 按顺序处理所有匹配到的文件
+        # 先处理必须存在的，再处理可选的（保持键名顺序）
+        for key in list(required_keys.keys()) + list(optional_keys.keys()):
+            if key not in all_matched:
+                continue  # 跳过不存在的可选文件
+
+            file_name = all_matched[key]
+            file_path = self.dir_model / file_name
+            logger.info(f".....Loading tensor from {file_path} (mapped to key: {key})")
+
             if not file_path.is_file():
-                logger.warning(f".....{file_path} not found")
-                continue
+                logger.error(f".....{file_path} not found")
+                raise FileNotFoundError(f"File {file_path} missing")
+
+            # 处理量化嵌入文件的特殊逻辑
+            if key == "quant_embedding.pt":
+                file_path = self.conver_embedding(file_path)
+
+            # 读取二进制数据并转换为Tensor
             with open(file_path, "rb") as file:
                 binary_data = np.frombuffer(file.read(), dtype=np.uint8)
-                logger.info(f".....Tensor size: {binary_data.shape}")
+                logger.info(f".....Tensor size for {key}: {binary_data.shape}")
                 data = torch.from_numpy(binary_data.copy())
-                if name == "quant_embedding.pt":
-                    os.remove(file_path)
-                yield name, data
+
+            # 移除转换后的临时文件
+            if key == "quant_embedding.pt":
+                os.remove(file_path)
+
+            # 以固定键名返回
+            yield key, data
 
     def set_vocab(self):
         self._set_vocab_gpt2()
