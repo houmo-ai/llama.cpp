@@ -32,6 +32,10 @@ class HoumoVision {
      */
     void set_windows_attention();
 
+    void resize_and_pad_image(const clip_image_u8 &image,
+                                       clip_image_u8 &dst,
+                                       const clip_image_size &target_resolution,
+                                       std::array<uint8_t, 3> pad_color);
     bool bicubic_resize(const clip_image_u8 &img,
                                      clip_image_u8 &dst, int target_width,
                                      int target_height);

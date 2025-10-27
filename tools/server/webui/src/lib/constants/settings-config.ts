@@ -2,7 +2,7 @@ export const SETTING_CONFIG_DEFAULT: Record<string, string | number | boolean> =
 	// Note: in order not to introduce breaking changes, please keep the same data type (number, string, etc) if you want to change the default value. Do not use null or undefined for default value.
 	// Do not use nested objects, keep it single level. Prefix the key if you need to group them.
 	apiKey: '',
-	systemMessage: '',
+	systemMessage: 'You are a helpful assistant.',
 	theme: 'system',
 	showTokensPerSecond: true,
 	showThoughtInProgress: true,
@@ -11,7 +11,7 @@ export const SETTING_CONFIG_DEFAULT: Record<string, string | number | boolean> =
 	pasteLongTextToFileLen: 2500,
 	pdfAsImage: false,
 	// make sure these default values are in sync with `common.h`
-	samplers: 'top_k;typ_p;top_p;min_p;temperature',
+	samplers: 'penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature',
 	temperature: 0.00,
 	dynatemp_range: 0.0,
 	dynatemp_exponent: 1.0,
@@ -45,7 +45,7 @@ export const SETTING_CONFIG_INFO: Record<string, string> = {
 	pasteLongTextToFileLen:
 		'On pasting long text, it will be converted to a file. You can control the file length by setting the value of this parameter. Value 0 means disable.',
 	samplers:
-		'The order at which samplers are applied, in simplified way. Default is "top_k;typ_p;top_p;min_p;temperature": top_k->typ_p->top_p->min_p->temperature',
+		'The order at which samplers are applied, in simplified way. Default is "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature": penalties->dry->top_n_sigma->top_k->typ_p->top_p->min_p->xtc->temperature',
 	temperature:
 		'Controls the randomness of the generated text by affecting the probability distribution of the output tokens. Higher = more random, lower = more focused.',
 	dynatemp_range:

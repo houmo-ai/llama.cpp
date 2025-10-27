@@ -253,11 +253,14 @@ int32_t HoumoVision::image_channels() const { return image_channels_; }
 static inline int clip(int x, int lower, int upper) {
     return std::max(lower, std::min(x, upper));
 }
+
 bool HoumoVision::image_resize(clip_image_u8_ptr &src,
                                clip_image_f32_ptr &dst) {
     // 先resize到合适的尺寸
     clip_image_u8 resized_img;
-    bicubic_resize(*src, resized_img, image_width_, image_height_);
+    // bicubic_resize(*src, resized_img, image_width_, image_height_);
+    const clip_image_size target_size = {static_cast<int>(image_width_), static_cast<int>(image_height_)};
+    resize_and_pad_image(*src, resized_img, target_size, {114, 114, 114});
     // 再转换成f32
     dst->nx = image_width_;
     dst->ny = image_height_;
@@ -335,6 +338,7 @@ void HoumoVision::set_windows_attention() {
     module_->SetInput(module_->GetInputName(2), mask_tensor);
 }
 
+/*更接近PIL的bicubic_resize*/
 bool HoumoVision::bicubic_resize(const clip_image_u8 &img, clip_image_u8 &dst,
                                  int target_width, int target_height) {
     const int nx = img.nx;
@@ -344,83 +348,109 @@ bool HoumoVision::bicubic_resize(const clip_image_u8 &img, clip_image_u8 &dst,
     dst.ny = target_height;
     dst.buf.resize(3 * target_width * target_height);
 
-    float Cc;
-    float C[5];
-    float d0, d2, d3, a0, a1, a2, a3;
-    int i, j, k, jj;
-    int x, y;
-    float dx, dy;
-    float tx, ty;
+    const float scale_x = static_cast<float>(nx) / target_width;
+    const float scale_y = static_cast<float>(ny) / target_height;
+    const float a = -0.5f; // Catmull–Rom spline (same as PIL Image.BICUBIC)
 
-    tx = (float)nx / (float)target_width;
-    ty = (float)ny / (float)target_height;
+    auto cubic_weight = [a](float x) -> float {
+        x = fabsf(x);
+        if (x <= 1.0f)
+            return (a + 2.0f) * x * x * x - (a + 3.0f) * x * x + 1.0f;
+        else if (x < 2.0f)
+            return a * x * x * x - 5.0f * a * x * x + 8.0f * a * x - 4.0f * a;
+        else
+            return 0.0f;
+    };
 
-    // Bicubic interpolation; adapted from ViT.cpp, inspired from :
-    //    ->
-    //    https://github.com/yglukhov/bicubic-interpolation-image-processing/blob/master/libimage.c#L36
-    //    -> https://en.wikipedia.org/wiki/Bicubic_interpolation
+    auto sample = [&](int px, int py, int c) -> float {
+        px = std::clamp(px, 0, nx - 1);
+        py = std::clamp(py, 0, ny - 1);
+        return static_cast<float>(img.buf[(py * nx + px) * 3 + c]);
+    };
 
-    for (i = 0; i < target_height; i++) {
-        for (j = 0; j < target_width; j++) {
-            x = (int)(tx * j);
-            y = (int)(ty * i);
+    for (int j = 0; j < target_height; ++j) {
+        float gy = (j + 0.5f) * scale_y - 0.5f;
+        int y_int = static_cast<int>(floorf(gy));
+        float dy = gy - y_int;
 
-            dx = tx * j - x;
-            dy = ty * i - y;
+        for (int i = 0; i < target_width; ++i) {
+            float gx = (i + 0.5f) * scale_x - 0.5f;
+            int x_int = static_cast<int>(floorf(gx));
+            float dx = gx - x_int;
 
-            for (k = 0; k < 3; k++) {
-                for (jj = 0; jj <= 3; jj++) {
-                    d0 = img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
-                                  clip(x - 1, 0, nx - 1)) *
-                                     3 +
-                                 k] -
-                         img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
-                                  clip(x, 0, nx - 1)) *
-                                     3 +
-                                 k];
-                    d2 = img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
-                                  clip(x + 1, 0, nx - 1)) *
-                                     3 +
-                                 k] -
-                         img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
-                                  clip(x, 0, nx - 1)) *
-                                     3 +
-                                 k];
-                    d3 = img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
-                                  clip(x + 2, 0, nx - 1)) *
-                                     3 +
-                                 k] -
-                         img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
-                                  clip(x, 0, nx - 1)) *
-                                     3 +
-                                 k];
-                    a0 = img.buf[(clip(y - 1 + jj, 0, ny - 1) * nx +
-                                  clip(x, 0, nx - 1)) *
-                                     3 +
-                                 k];
-
-                    a1 = -1.0 / 3 * d0 + d2 - 1.0 / 6 * d3;
-                    a2 = 1.0 / 2 * d0 + 1.0 / 2 * d2;
-                    a3 = -1.0 / 6 * d0 - 1.0 / 2 * d2 + 1.0 / 6 * d3;
-
-                    C[jj] = a0 + a1 * dx + a2 * dx * dx + a3 * dx * dx * dx;
-
-                    d0 = C[0] - C[1];
-                    d2 = C[2] - C[1];
-                    d3 = C[3] - C[1];
-                    a0 = C[1];
-                    a1 = -1.0 / 3 * d0 + d2 - 1.0 / 6 * d3;
-                    a2 = 1.0 / 2 * d0 + 1.0 / 2 * d2;
-                    a3 = -1.0 / 6 * d0 - 1.0 / 2 * d2 + 1.0 / 6 * d3;
-                    Cc = a0 + a1 * dy + a2 * dy * dy + a3 * dy * dy * dy;
-
-                    const uint8_t Cc2 =
-                        std::min(std::max(std::round(Cc), 0.0f), 255.0f);
-                    dst.buf[(i * target_width + j) * 3 + k] = float(Cc2);
+            for (int c = 0; c < 3; ++c) {
+                double sum = 0.0f;
+                double wsum = 0.0f;
+                for (int m = -1; m <= 2; ++m) {
+                    float wy = cubic_weight(m - dy);
+                    int yy = y_int + m;
+                    for (int n = -1; n <= 2; ++n) {
+                        float wx = cubic_weight(n - dx);
+                        int xx = x_int + n;
+                        float w = wx * wy;
+                        sum += sample(xx, yy, c) * w;
+                        wsum += w;
+                    }
                 }
+                float v = (wsum != 0.0f) ? (sum / wsum) : 0.0f;
+                dst.buf[(j * target_width + i) * 3 + c] =
+                    static_cast<uint8_t>(std::clamp(std::round(v), 0.0f, 255.0f));
             }
         }
     }
-
     return true;
+}
+
+void HoumoVision::resize_and_pad_image(const clip_image_u8 &image,
+                                       clip_image_u8 &dst,
+                                       const clip_image_size &target_resolution,
+                                       std::array<uint8_t, 3> pad_color) {
+    int target_width = target_resolution.width;
+    int target_height = target_resolution.height;
+
+    float scale_w = static_cast<float>(target_width) / image.nx;
+    float scale_h = static_cast<float>(target_height) / image.ny;
+
+    int new_width, new_height;
+
+    if (scale_w < scale_h) {
+        new_width = target_width;
+        new_height = std::min(static_cast<int>(std::ceil(image.ny * scale_w)),
+                              target_height);
+    } else {
+        new_height = target_height;
+        new_width = std::min(static_cast<int>(std::ceil(image.nx * scale_h)),
+                             target_width);
+    }
+
+    clip_image_u8 resized_image;
+    bicubic_resize(image, resized_image, new_width, new_height);
+
+    clip_image_u8 padded_image;
+    padded_image.nx = target_width;
+    padded_image.ny = target_height;
+    padded_image.buf.resize(3 * target_width * target_height);
+
+    // Fill the padded image with the fill color
+    for (size_t i = 0; i < padded_image.buf.size(); i += 3) {
+        padded_image.buf[i] = pad_color[0];
+        padded_image.buf[i + 1] = pad_color[1];
+        padded_image.buf[i + 2] = pad_color[2];
+    }
+
+    // Calculate padding offsets
+    int pad_x = 0;
+    int pad_y = 0;
+
+    // Copy the resized image into the top/left of the padded buffer
+    for (int y = 0; y < new_height; ++y) {
+        for (int x = 0; x < new_width; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                padded_image
+                    .buf[3 * ((y + pad_y) * target_width + (x + pad_x)) + c] =
+                    resized_image.buf[3 * (y * new_width + x) + c];
+            }
+        }
+    }
+    dst = std::move(padded_image);
 }

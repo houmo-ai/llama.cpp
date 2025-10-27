@@ -608,7 +608,30 @@ static json oaicompat_chat_params_parse(
         if (!content.is_array()) {
             throw std::runtime_error("Expected 'content' to be a string or an array");
         }
+        // 分离三类元素：图片、音频、其他
+        json images;    // 存放 image_url 类型
+        json audios;    // 存放 input_audio 类型
+        json others;    // 存放其他类型（如 text）
 
+        for (auto& p : content) {
+            std::string type = json_value(p, "type", std::string());
+            if (type == "image_url" || type == "input_audio") {
+                // 先暂存到对应分类，后续统一处理
+                if (type == "image_url") {
+                    images.push_back(p);
+                } else {
+                    audios.push_back(p);
+                }
+            } else {
+                others.push_back(p);
+            }
+        }
+
+        // 重新组合数组：图片在前 → 音频中间 → 其他在后
+        content.clear();
+        content.insert(content.end(), images.begin(), images.end());
+        content.insert(content.end(), audios.begin(), audios.end());
+        content.insert(content.end(), others.begin(), others.end());
         for (auto & p : content) {
             std::string type      = json_value(p, "type", std::string());
             if (type == "image_url") {

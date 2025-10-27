@@ -1106,22 +1106,9 @@ int llama_context::houmo_decode(const llama_batch &batch) {
                 return ret;
             }
 
-            // for debug...
-            // if (logits_out != nullptr) {
-            //     auto prefill_output_opts =
-            //     torch::TensorOptions().dtype(torch::kFloat);
-            //     auto
-            //     prefill_output_tensor = torch::from_blob(logits_out, {n_vocab},
-            //     prefill_output_opts).clone();
-            //     auto selected_output =
-            //     torch::argmax(prefill_output_tensor).to(torch::kInt32);
-            //     auto
-            //     generate_token = *(int32_t *)selected_output.data_ptr<int32_t>();
-            //     std::cout << "generate_token: " << generate_token << ","
-            //             << common_token_to_piece(
-            //                     & model.vocab, generate_token, true)
-            //             << std::endl;
-            // }
+            for (size_t i = 0; i < v.size(); i++) {
+                LLAMA_LOG_DEBUG("%s", common_token_to_piece(&model.vocab, v[i], true).c_str());
+            }
         }
     }
     n_outputs = n_outputs_all;
