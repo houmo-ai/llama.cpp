@@ -4133,13 +4133,18 @@ struct server_context {
     }
 
     json model_meta() const {
+        char model_desc[128] = {0};
+        llama_model_desc(model, model_desc, sizeof(model_desc)/sizeof(char));
         return json {
-            {"vocab_type",  llama_vocab_type       (vocab)},
-            {"n_vocab",     llama_vocab_n_tokens   (vocab)},
-            {"n_ctx_train", llama_model_n_ctx_train(model)},
-            {"n_embd",      llama_model_n_embd     (model)},
-            {"n_params",    llama_model_n_params   (model)},
-            {"size",        llama_model_size       (model)},
+            {"vocab_type",   llama_vocab_type       (vocab)},
+            {"n_vocab",      llama_vocab_n_tokens   (vocab)},
+            {"n_ctx_length", n_ctx},
+            {"n_layer",      llama_model_n_layer(model)},
+            {"n_embd",       llama_model_n_embd     (model)},
+            {"n_params",     llama_model_n_params   (model)},
+            {"n_ctx_train",  llama_model_n_ctx_train(model)},
+            {"size",         llama_model_size       (model)},
+            {"model_desc",   model_desc},
         };
     }
 };
