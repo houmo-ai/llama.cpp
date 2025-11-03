@@ -2,7 +2,6 @@
 /**
  * @brief HouMoVLLModel is a vision language model for HouMoLLModel.
  * @ 暂时分开实现，后续考虑合并到houmo-llmmode.h
- * @TODO: 多用户的支持..
  */
 class HouMoVLLModel : public HouMoLLModel::Impl {
   public:
@@ -20,20 +19,28 @@ class HouMoVLLModel : public HouMoLLModel::Impl {
                      std::vector<float *> logits) override;
 
   private:
-    void update_position_ids(int seq_id, int n_tokens, bool is_embedding);
-    void reset_position_ids();
+    void update_position_ids(int n_tokens,
+                             std::vector<int32_t> &time_position_ids,
+                             std::vector<int32_t> &high_position_ids,
+                             std::vector<int32_t> &width_position_ids,
+                             int32_t &position_index);
+    void compute_position_ids(int seq_id,
+                              std::vector<int32_t> &time_position_ids,
+                              std::vector<int32_t> &high_position_ids,
+                              std::vector<int32_t> &width_position_ids);
+    void reset_position_ids(int seq_id);
+
   private:
     int kSeqMax = 4; // maximum sequence number for single-card model
     std::shared_ptr<tcim::Module> prefill_model_;
     std::shared_ptr<tcim::Module> decode_model_;
     int ny = 13; // 364/patch_size_(14)*2 = 13;
     int nx = 23; // 644/patch_size_(14)*2 = 23;
-    std::vector<int16_t> input_embedding_ids_;
-    int32_t offset_embedding_id_ = 0;
-    std::vector<int32_t> time_position_ids_;
-    std::vector<int32_t> hight_position_ids_;
-    std::vector<int32_t> width_position_ids_;
-    int32_t start_pos_ = 0;
+    std::vector<std::vector<int16_t>> input_embedding_ids_;
+    std::vector<int32_t> offset_embedding_ids_;
+    std::vector<std::vector<int32_t>> prefill_input_lengths_;
+    std::vector<int32_t> position_indexs_;
+
     const std::string kVisualHeight = "hmm.vit.height";
     const std::string kVisualWidth = "hmm.vit.width";
 };

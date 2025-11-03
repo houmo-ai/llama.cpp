@@ -5,7 +5,6 @@
 #include <regex>
 HouMoVLLModel::HouMoVLLModel() : HouMoLLModel::Impl() {
     model_type_ = 1; // 1: image
-    offset_embedding_id_ = 0;
 }
 bool HouMoVLLModel::houmo_load(const std::string &file_name) {
 
@@ -123,10 +122,10 @@ void HouMoVLLModel::houmo_init(int seq_max) {
     decode_input_init(decode_model_, decode_input_map_);
     // 填充decode 的output
     decode_output_init(decode_model_, decode_output_map_, decode_output_names_);
-    if (seq_max > 1) {
-        LLAMA_LOG_ERROR("%s: seq_max > 1 not supported, set seq_max to 1\n",
+    if (seq_max > 4) {
+        LLAMA_LOG_ERROR("%s: seq_max > 4 not supported, set seq_max to 4\n",
                         __func__);
-        seq_max = 1;
+        seq_max = 4;
     }
     int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
     size = std::max(size, n_decode_batch_);
@@ -169,16 +168,21 @@ void HouMoVLLModel::houmo_init(int seq_max) {
         }
         kv_cache_[i] = item;
     }
-    input_embedding_ids_.resize(context_length_ * n_embd_, 0);
+    input_embedding_ids_.resize(seq_max);
+    offset_embedding_ids_.resize(seq_max);
+    position_indexs_.resize(seq_max);
+    prefill_input_lengths_.resize(seq_max);
+    for (int i = 0; i < seq_max; i++)
+        input_embedding_ids_[i].resize(context_length_ * n_embd_, 0);
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
     LLAMA_LOG_INFO("prefill_length_ = %d\n context_length_ = %d\n "
                    "n_blocks_ = %d\n n_embd_ = %ld\n n_prefill_batch_ = %d\n "
                    "n_decode_batch_ = "
                    "%d\n   kv_cache_size = %zu\n need_set_kv_cache_ = "
-                   "%d\n",
+                   "%d\n, seq_max = %d\n",
                    prefill_length_, context_length_, n_blocks_, n_embd_,
                    n_prefill_batch_, n_decode_batch_, kv_cache_.size(),
-                   need_set_kv_cache_);
+                   need_set_kv_cache_, seq_max);
 }
 
 int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
@@ -186,9 +190,9 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                     seq_id, tokens.size());
-    if ((offset_embedding_id_ + tokens.size()) >= (size_t) context_length_) {
+    if ((offset_embedding_ids_[seq_id] + tokens.size()) >= (size_t) context_length_) {
         LLAMA_LOG_WARN("excceed context length, reset offset_embedding_id_ to 0\n");
-        reset_position_ids();
+        reset_position_ids(seq_id);
         return 1;
     }
     int32_t current_length = 0;
@@ -211,31 +215,34 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         auto inputs_embeds_int16 = inputs_embeds.to(torch::kInt16);
         inputs_embeds_int16 = inputs_embeds_int16.view({-1, n_embd_});
         // 缓存输入
-        memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
+        memcpy(input_embedding_ids_[seq_id].data() + offset_embedding_ids_[seq_id] * n_embd_,
             inputs_embeds_int16.data_ptr<int16_t>(),
             tokens.size() * n_embd_ * sizeof(int16_t));
     } else {
-        memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
+        memcpy(input_embedding_ids_[seq_id].data() + offset_embedding_ids_[seq_id] * n_embd_,
             inputs_embeds.data_ptr<at::Half>(),
             tokens.size() * n_embd_ * sizeof(at::Half));
     }
-    offset_embedding_id_ += tokens.size();
-    update_position_ids(seq_id, tokens.size(), false);
-
+    offset_embedding_ids_[seq_id] += tokens.size();
+    prefill_input_lengths_[seq_id].push_back(tokens.size());
     // 计算所有embeddings
     if (logits == nullptr) {
         // 只缓存输入
-        LLAMA_LOG_INFO("%s: logits is nullptr, only cache input\n", __func__);
+        LLAMA_LOG_INFO("%s: logits is nullptr, only cache input. seq_id = %d\n", __func__, seq_id);
         return 0;
     }
-
-    size_t input_echo_len = offset_embedding_id_;
+    size_t input_echo_len = offset_embedding_ids_[seq_id];
     size_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
     static_cast<float>(prefill_length_));
 
-    time_position_ids_.resize(prefill_loop_round * prefill_length_);
-    hight_position_ids_.resize(prefill_loop_round * prefill_length_);
-    width_position_ids_.resize(prefill_loop_round * prefill_length_);
+    std::vector<int32_t> time_position_ids;
+    std::vector<int32_t> high_position_ids;
+    std::vector<int32_t> width_position_ids;
+    compute_position_ids(seq_id, time_position_ids, high_position_ids,
+                         width_position_ids);
+    time_position_ids.resize(prefill_loop_round * prefill_length_);
+    high_position_ids.resize(prefill_loop_round * prefill_length_);
+    width_position_ids.resize(prefill_loop_round * prefill_length_);
     int valid_length = 0;
     // 计算prefill输出
     for (size_t round = 0; round < prefill_loop_round; round++) {
@@ -247,12 +254,12 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         }
         auto input_data =
             prefill_input_map_.at(prefill_model_->GetInputName(0));
-        input_data.Buffer().CopyFromHost(input_embedding_ids_.data() +
+        input_data.Buffer().CopyFromHost(input_embedding_ids_[seq_id].data() +
                                              round * prefill_length_ * n_embd_,
                                          input_data.MemSize());
         auto time_position_id =
             prefill_input_map_.at(prefill_model_->GetInputName(1));
-        auto hight_position_id =
+        auto high_position_id =
             prefill_input_map_.at(prefill_model_->GetInputName(2));
         auto width_position_id =
             prefill_input_map_.at(prefill_model_->GetInputName(3));
@@ -260,9 +267,9 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             prefill_input_map_.at(prefill_model_->GetInputName(4));
         auto prefill_current_length =
             prefill_input_map_.at(prefill_model_->GetInputName(5));
-        set_input_data(time_position_id, time_position_ids_, valid_length);
-        set_input_data(hight_position_id, hight_position_ids_, valid_length);
-        set_input_data(width_position_id, width_position_ids_, valid_length);
+        set_input_data(time_position_id, time_position_ids, valid_length);
+        set_input_data(high_position_id, high_position_ids, valid_length);
+        set_input_data(width_position_id, width_position_ids, valid_length);
         set_input_data(prefill_valid_length, n_prefill_batch_, valid_length);
         set_input_data(prefill_current_length, n_prefill_batch_,
                        current_length);
@@ -271,7 +278,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         prefill_model_->SetInput(prefill_model_->GetInputName(1),
                                  time_position_id);
         prefill_model_->SetInput(prefill_model_->GetInputName(2),
-                                 hight_position_id);
+                                 high_position_id);
         prefill_model_->SetInput(prefill_model_->GetInputName(3),
                                  width_position_id);
         prefill_model_->SetInput(prefill_model_->GetInputName(4),
@@ -297,8 +304,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
 
     // reset input_embedding_ids_
-    memset(input_embedding_ids_.data(), 0, input_embedding_ids_.size() * sizeof(int16_t));
-    reset_position_ids();
+    reset_position_ids(seq_id);
     return 0;
 }
 
@@ -308,24 +314,25 @@ int HouMoVLLModel::houmo_prefill(const float *embeddings, int n_tokens,
                    n_tokens);
     if (logits == nullptr) {
         // 只缓存输入
-        if ((n_tokens + offset_embedding_id_) >= context_length_) {
+        if ((n_tokens + offset_embedding_ids_[seq_id]) >= context_length_) {
             LLAMA_LOG_WARN(
                 "excceed context length, reset offset_embedding_id_ to 0\n");
-            reset_position_ids();
+            reset_position_ids(seq_id);
             return 1;
         }
         const int16_t *input_data_ptr = (const int16_t *)embeddings;
 
-        memcpy(input_embedding_ids_.data() + offset_embedding_id_ * n_embd_,
+        memcpy(input_embedding_ids_[seq_id].data() + offset_embedding_ids_[seq_id] * n_embd_,
             input_data_ptr,
                n_tokens * n_embd_ * sizeof(int16_t));
 
-        offset_embedding_id_ += n_tokens;
-        update_position_ids(seq_id, n_tokens, true);
+        offset_embedding_ids_[seq_id] += n_tokens;
+        prefill_input_lengths_[seq_id].push_back(n_tokens);
         return 0;
     } else {
         // FIXME:
         LLAMA_LOG_ERROR("%s: logits is not null, not supported\n", __func__);
+                    reset_position_ids(seq_id);
         return -1;
     }
 }
@@ -389,7 +396,7 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     // set valid_length
     std::vector<int32_t> valid_length_vec(n_decode_batch_, 1);
     std::vector<int32_t> current_length_vec(n_decode_batch_, 1);
-    std::vector<int32_t> position_vec(n_decode_batch_, start_pos_);
+    std::vector<int32_t> position_vec(n_decode_batch_, 1);
     for (size_t k = 0; k < seq_ids.size(); k++) {
         int batch_id = seq_ids[k];
         // 单batch模式下所有序列共用batch 0
@@ -402,6 +409,7 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
                            __func__, batch_id, valid_length_vec[batch_id]);
             return 1;
         }
+        position_vec[batch_id]= position_indexs_[seq_ids[k]];
     }
     auto time_position_id =
         decode_input_map_.at(decode_model_->GetInputName(1));
@@ -454,6 +462,7 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     for (size_t i = 0; i < seq_ids.size(); i++) {
         auto batch_id = seq_ids[i];
         decode_valid_length_[batch_id]++;
+        position_indexs_[batch_id]++;
         // 单batch模式下所有序列共用batch 0
         if (n_decode_batch_ == 1)
             batch_id = 0;
@@ -462,42 +471,51 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
                             batch_id * n_vocab;
         memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
     }
-    start_pos_++;
     return 0;
 }
 
-void HouMoVLLModel::update_position_ids(int seq_id, int n_tokens,
-                                        bool is_embedding) {
-    (void) seq_id; // not used currently
-    if (time_position_ids_.size() == 0) {
-        start_pos_ = 0;
+void HouMoVLLModel::update_position_ids(int n_tokens,
+                                    std::vector<int32_t> &time_position_ids,
+        std::vector<int32_t> &high_position_ids,
+        std::vector<int32_t> &width_position_ids,
+        int32_t &start_pos) {
+    if (time_position_ids.size() == 0) {
+        start_pos = 0;
     }
-    if (is_embedding) {
+    if (n_tokens == nx * ny) {
         for (int y = 0; y < ny; y++) {
             for (int x = 0; x < nx; x++) {
-                time_position_ids_.push_back(start_pos_);
-                hight_position_ids_.push_back(start_pos_ + y);
-                width_position_ids_.push_back(start_pos_ + x);
+                time_position_ids.push_back(start_pos);
+                high_position_ids.push_back(start_pos + y);
+                width_position_ids.push_back(start_pos + x);
             }
         }
 
-        start_pos_ += nx;
+        start_pos += nx;
     } else {
         for (int i = 0; i < n_tokens; i++) {
-            time_position_ids_.push_back(start_pos_ + i);
-            hight_position_ids_.push_back(start_pos_ + i);
-            width_position_ids_.push_back(start_pos_ + i);
+            time_position_ids.push_back(start_pos + i);
+            high_position_ids.push_back(start_pos + i);
+            width_position_ids.push_back(start_pos + i);
         }
-        start_pos_ += n_tokens;
+        start_pos += n_tokens;
     }
 }
 
-void HouMoVLLModel::reset_position_ids() {
-    time_position_ids_.clear();
-    time_position_ids_.resize(0);
-    hight_position_ids_.clear();
-    hight_position_ids_.resize(0);
-    width_position_ids_.clear();
-    width_position_ids_.resize(0);
-    offset_embedding_id_ = 0;
+void HouMoVLLModel::compute_position_ids(
+    int seq_id, std::vector<int32_t> &time_position_ids,
+    std::vector<int32_t> &high_position_ids,
+    std::vector<int32_t> &width_position_ids) {
+    auto &lens = prefill_input_lengths_[seq_id];
+    // mutimedia call prefill three times.
+    for (size_t i = 0; i < lens.size(); ++i) {
+        update_position_ids(lens[i], time_position_ids,
+                            high_position_ids, width_position_ids,
+                            position_indexs_[seq_id]);
+    }
+}
+
+void HouMoVLLModel::reset_position_ids(int seq_id) {
+    offset_embedding_ids_[seq_id] = 0;
+    prefill_input_lengths_[seq_id].resize(0);
 }

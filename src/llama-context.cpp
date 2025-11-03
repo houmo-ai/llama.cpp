@@ -1008,18 +1008,6 @@ int llama_context::houmo_decode(const llama_batch &batch) {
     LLAMA_LOG_DEBUG("****batch.n_tokens: %d\n", batch.n_tokens);
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
     const int32_t n_vocab = model.vocab.n_tokens();
-    // 计算batch 是否要输出logits
-    bool output_logits_flag = false;
-    if (batch.logits == nullptr) {
-        output_logits_flag = true;
-    } else {
-        for (int i = 0; i < batch.n_tokens; i++) {
-            if (batch.logits && batch.logits[i] != 0) {
-                output_logits_flag = true;
-                break;
-            }
-        }
-    }
     // 输入的是数据，当前只支持prefill阶段是embdding
     if (batch.embd != nullptr) {
         int seq_id = 0;
@@ -1099,13 +1087,12 @@ int llama_context::houmo_decode(const llama_batch &batch) {
         // prefill阶段
         if (v.size() > 1) {
             float * logits_out = nullptr;
-            if (output_logits_flag == true)
+            if (seqid_pos_map.count(k) > 0)
                 logits_out = logits + seqid_pos_map[k] * n_vocab;
             ret = hm_llmodel->houmo_prefill(v, k, logits_out);
             if (ret != 0) {
                 return ret;
             }
-
             for (size_t i = 0; i < v.size(); i++) {
                 LLAMA_LOG_DEBUG("%s", common_token_to_piece(&model.vocab, v[i], true).c_str());
             }
