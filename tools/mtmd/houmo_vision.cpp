@@ -422,10 +422,17 @@ void HoumoVision::resize_and_pad_image(const clip_image_u8 &image,
         new_width = std::min(static_cast<int>(std::ceil(image.nx * scale_h)),
                              target_width);
     }
-
+    float min_scale =
+        std::min(static_cast<float>(new_width) / image.nx,
+                 static_cast<float>(new_height) / image.ny);
     clip_image_u8 resized_image;
-    bicubic_resize(image, resized_image, new_width, new_height);
-
+    if (min_scale < 1.0f) {
+        // 缩小
+        area_resize(image, resized_image, new_width, new_height);
+    } else {
+        // 放大
+        bicubic_resize(image, resized_image, new_width, new_height);
+    }
     clip_image_u8 padded_image;
     padded_image.nx = target_width;
     padded_image.ny = target_height;
@@ -453,4 +460,69 @@ void HoumoVision::resize_and_pad_image(const clip_image_u8 &image,
         }
     }
     dst = std::move(padded_image);
+}
+
+bool HoumoVision::area_resize(const clip_image_u8 &img, clip_image_u8 &dst,
+                              int target_width, int target_height) {
+    const int src_w = img.nx;
+    const int src_h = img.ny;
+
+    dst.nx = target_width;
+    dst.ny = target_height;
+    dst.buf.resize(3 * target_width * target_height);
+
+    const float scale_x = static_cast<float>(src_w) / target_width;
+    const float scale_y = static_cast<float>(src_h) / target_height;
+
+    auto sample = [&](int x, int y, int c) -> float {
+        x = std::clamp(x, 0, src_w - 1);
+        y = std::clamp(y, 0, src_h - 1);
+        return static_cast<float>(img.buf[(y * src_w + x) * 3 + c]);
+    };
+
+    // Loop over each pixel of destination
+    for (int dy = 0; dy < target_height; ++dy) {
+        // Corresponding source region y range
+        float sy1 = dy * scale_y;
+        float sy2 = sy1 + scale_y;
+        int sy_start = static_cast<int>(floorf(sy1));
+        int sy_end = static_cast<int>(ceilf(sy2));
+
+        for (int dx = 0; dx < target_width; ++dx) {
+            float sx1 = dx * scale_x;
+            float sx2 = sx1 + scale_x;
+            int sx_start = static_cast<int>(floorf(sx1));
+            int sx_end = static_cast<int>(ceilf(sx2));
+
+            for (int c = 0; c < 3; ++c) {
+                float sum = 0.0f;
+                float area = 0.0f;
+
+                // Average over all relevant input pixels
+                for (int sy = sy_start; sy < sy_end; ++sy) {
+                    float y1 = std::max(sy1, static_cast<float>(sy));
+                    float y2 = std::min(sy2, static_cast<float>(sy + 1));
+                    float wy = y2 - y1;
+                    if (wy <= 0) continue;
+
+                    for (int sx = sx_start; sx < sx_end; ++sx) {
+                        float x1 = std::max(sx1, static_cast<float>(sx));
+                        float x2 = std::min(sx2, static_cast<float>(sx + 1));
+                        float wx = x2 - x1;
+                        if (wx <= 0) continue;
+
+                        float w = wx * wy;
+                        sum += sample(sx, sy, c) * w;
+                        area += w;
+                    }
+                }
+
+                float val = (area > 0.0f) ? (sum / area) : 0.0f;
+                dst.buf[(dy * target_width + dx) * 3 + c] =
+                    static_cast<uint8_t>(std::clamp(std::round(val), 0.0f, 255.0f));
+            }
+        }
+    }
+
+    return true;
 }

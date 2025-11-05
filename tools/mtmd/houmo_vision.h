@@ -39,6 +39,8 @@ class HoumoVision {
     bool bicubic_resize(const clip_image_u8 &img,
                                      clip_image_u8 &dst, int target_width,
                                      int target_height);
+    bool area_resize(const clip_image_u8 &img, clip_image_u8 &dst,
+                     int target_width, int target_height);
 
   private:
     std::shared_ptr<tcim::Module> module_;
