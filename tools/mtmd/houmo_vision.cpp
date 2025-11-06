@@ -232,10 +232,7 @@ bool HoumoVision::encoding(const std::vector<float> &input_data,
         input_tensor.Buffer().CopyFromHost(
             input_fp16_tensor.data_ptr<at::Half>(), input_tensor.MemSize());
     }
-    auto window_index_tensor = input_tensors_[module_->GetInputName(1)];
-    auto window_mask_tensor = input_tensors_[module_->GetInputName(2)];
-    module_->SetInput(module_->GetInputName(1), window_index_tensor);
-    module_->SetInput(module_->GetInputName(2), window_mask_tensor);
+    // fixed resolution. index & mask already set in init()
     module_->SetInput(input_name_, input_tensor);
     module_->Run();
     module_->Sync();
@@ -326,7 +323,10 @@ void HoumoVision::set_windows_attention() {
     auto &tensor = input_tensors_[module_->GetInputName(1)];
     tensor.Buffer().CopyFromHost(inv_idx.data(), tensor.MemSize());
     module_->SetInput(module_->GetInputName(1), tensor);
-
+    if (module_->GetInputNum() < 3) {
+        // Some resolution models do not have a windows_mask input.
+        return;
+    }
     auto &mask_tensor = input_tensors_[module_->GetInputName(2)];
     if (mask_tensor.Info().DataType() == tcim::DataType::FLOAT16) {
         auto mask_fp16 = Int16ArrayToFloat16Tensor(mask);
