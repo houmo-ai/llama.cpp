@@ -1087,7 +1087,7 @@ int llama_context::houmo_decode(const llama_batch &batch) {
         // prefill阶段
         if (v.size() > 1) {
             float * logits_out = nullptr;
-            if (seqid_pos_map.count(k) > 0)
+            if (seqid_pos_map.count(k) > 0 || batch.logits == nullptr)
                 logits_out = logits + seqid_pos_map[k] * n_vocab;
             ret = hm_llmodel->houmo_prefill(v, k, logits_out);
             if (ret != 0) {
