@@ -1127,6 +1127,82 @@ int llama_context::houmo_decode(const llama_batch &batch) {
     return 0;
 }
 
+int llama_context::houmo_embedding(const llama_batch &batch) {
+    n_outputs = batch.n_tokens;
+    const int32_t n_embd = model.hparams.n_embd;
+    // 0. batch拆分
+    std::map<int, std::vector<llama_token>> seqid_token_map;
+    std::map<int, float*> seqid_embd_map;
+    int seq_id = 0;
+    // 恢复不同seq的tokens, 没有序列信息默认seq_id=0
+    if (batch.seq_id == nullptr) {
+        // 单序列推理
+        for (int j = 0; j < batch.n_tokens; j++) {
+            if (seqid_token_map.count(seq_id) == 0)
+                seqid_token_map[seq_id] = std::vector<llama_token>();
+            seqid_token_map[seq_id].push_back(batch.token[j]);
+            seqid_embd_map[seq_id] = embd + seq_id * n_embd;
+        }
+    } else {
+        // 多序列推理
+        for (int j = 0; j < batch.n_tokens; j++) {
+            for (int s = 0; s < batch.n_seq_id[j]; s++) {
+                seq_id = batch.seq_id[j][s];
+                if (seqid_token_map.count(seq_id) == 0)
+                    seqid_token_map[seq_id] = std::vector<llama_token>();
+                seqid_token_map[seq_id].push_back(batch.token[j]);
+                seqid_embd_map[seq_id] = embd + seq_id * n_embd;
+            }
+        }
+    }
+
+    // 1. 首先生成token的embedding
+    if (model.hm_llmodel->houmo_embedding(seqid_token_map, seqid_embd_map) != 0) {
+        LLAMA_LOG_ERROR("%s: houmo embedding failed\n", __func__);
+        return -1;
+    }
+    // 2. 然后根据pooling_type进行pooling. bge模型的embedding输出是pooling后的结果
+    if (n_outputs > 0) {
+
+        switch (cparams.pooling_type) {
+            case LLAMA_POOLING_TYPE_NONE: {
+                // extract token embeddings
+                GGML_ASSERT(embd != nullptr);
+                output_ids.resize(batch.n_tokens);
+                for (int i=0; i < batch.n_tokens; i++) {
+                    output_ids[i] = i;
+                }
+            } break;
+            case LLAMA_POOLING_TYPE_MEAN:
+            case LLAMA_POOLING_TYPE_CLS:
+            case LLAMA_POOLING_TYPE_LAST: {
+                // extract sequence embeddings (cleared before processing each
+                // batch)
+                auto &embd_seq_out = embd_seq;
+                for (const auto &[seq_id, addrs] : seqid_embd_map) {
+                    embd_seq_out[seq_id].resize(n_embd);
+                    memcpy(embd_seq_out[seq_id].data(), addrs, n_embd * sizeof(float));
+                }
+            } break;
+            case LLAMA_POOLING_TYPE_RANK: {
+                // extract the rerank score - n_cls_out floats per sequence
+                // FIXME:  @guoxing.xu .. Rerank not Tested..
+                auto &embd_seq_out = embd_seq;
+                const uint32_t n_cls_out = model.hparams.n_cls_out;
+                for (const auto &[seq_id, addrs] : seqid_embd_map) {
+                    embd_seq_out[seq_id].resize(n_cls_out);
+                    memcpy(embd_seq_out[seq_id].data(), addrs,
+                        n_cls_out * sizeof(float));
+                }
+            } break;
+            case LLAMA_POOLING_TYPE_UNSPECIFIED: {
+                GGML_ABORT("unknown pooling type");
+            }
+        }
+    }
+    return 0;
+}
+
 int llama_context::decode(const llama_batch & batch_inp) {
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
 
@@ -1140,10 +1216,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
         return -1;
     }
 
-    if (model.hparams.is_hmm) {
-        return houmo_decode(batch_inp);
-    }
-
     const auto & vocab   = model.vocab;
     const auto & hparams = model.hparams;
 
@@ -1152,6 +1224,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     // when computing embeddings, all tokens are output
     const bool output_all = cparams.embeddings;
+
+    if (model.hparams.is_hmm) {
+        if (cparams.embeddings)
+            return houmo_embedding(batch_inp);
+        else
+            return houmo_decode(batch_inp);
+    }
 
     if (!balloc->init(batch_inp, vocab, memory.get(), n_embd, cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max, output_all)) {
         LLAMA_LOG_ERROR("%s: failed to initialize batch\n", __func__);

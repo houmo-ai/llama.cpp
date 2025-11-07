@@ -184,6 +184,7 @@ private:
     // houmo patch for decoding
     void houmo_init(int32_t n_seq_max);
     int houmo_decode(const llama_batch &batch);
+    int houmo_embedding(const llama_batch &batch);
     //
     // output
     //

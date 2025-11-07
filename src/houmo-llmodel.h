@@ -29,6 +29,8 @@ class HouMoLLModel {
                       float *logits);
     int houmo_decode(std::vector<llama_token> &batches,
                      std::vector<int> &seq_ids, std::vector<float *> logits);
+    int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
+                        std::map<int, float *> &embeddings);
     int n_decode_batch();
     int n_prefill_batch();
     uint32_t n_context_length();
@@ -58,13 +60,19 @@ public:
                             float *logits) = 0;
   virtual int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
                             float *logits) {
-      (void ) embeddings; // unused parameter
-      (void ) n_tokens; // unused parameter
-      (void ) seq_id; // unused parameter
-      (void ) logits; // unused parameter
+      (void)embeddings; // unused parameter
+      (void)n_tokens;   // unused parameter
+      (void)seq_id;     // unused parameter
+      (void)logits;     // unused parameter
       return 0;
   }
-
+  virtual int
+  houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
+                  std::map<int, float *> &embeddings) {
+      (void)batches;    // unused parameter
+      (void)embeddings; // unused parameter
+      return 0;
+  }
   virtual int houmo_decode(std::vector<llama_token> &batches,
                            std::vector<int> &seq_ids,
                            std::vector<float *> logits) = 0;

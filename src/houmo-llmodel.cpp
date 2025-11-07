@@ -6,6 +6,8 @@
 #include "houmo-vllmodel.h"
 #include "houmo-qwenllm.h"
 #include "houmo-gptoss.h"
+#include "houmo-embed.h"
+#include "llama-batch.h"
 #include "llama-impl.h"
 #include <fstream>
 #include <map>
@@ -713,6 +715,8 @@ bool HouMoLLModel::houmo_load(const std::string &file_name) {
             } else {
                 impl_ = new HoumoQwenLLM();
             }
+        } else if (n_tensors == 1 && arch.find("bert") != std::string::npos) {
+            impl_ = new HouMoEmbed();
         } else {
             return false;
         }
@@ -739,8 +743,14 @@ int HouMoLLModel::n_decode_batch() { return impl_->n_decode_batch(); }
 int HouMoLLModel::n_prefill_batch() { return impl_->n_prefill_batch(); }
 
 uint32_t HouMoLLModel::n_context_length() { return impl_->n_context_length(); }
+
 int HouMoLLModel::houmo_prefill(const float *embeddings, int n_tokens,
                                 int seq_id, float *logits) {
-
     return impl_->houmo_prefill(embeddings, n_tokens, seq_id, logits);
+}
+
+int HouMoLLModel::houmo_embedding(
+    const std::map<int32_t, std::vector<llama_token>> &batches,
+    std::map<int, float *> &embeddings) {
+    return impl_->houmo_embedding(batches, embeddings);
 }
