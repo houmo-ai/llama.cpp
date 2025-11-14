@@ -96,6 +96,10 @@ class houmo_memory_i : public llama_memory_i {
         (void) seq_id;
         return -1;
     }
+    
+    virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override {
+        return std::map<ggml_backend_buffer_type_t, size_t>();
+    }
 
     //
     // state write/read

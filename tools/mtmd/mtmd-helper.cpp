@@ -182,7 +182,7 @@ int32_t mtmd_helper_decode_image_chunk(
     }
 
     const llama_model * model = llama_get_model(lctx);
-    int n_mmproj_embd = llama_model_n_embd(model);
+    int n_mmproj_embd = llama_model_n_embd_inp(model);
     int n_pos_per_embd = mtmd_decode_use_mrope(ctx) ? 4 : 1;
 
     int32_t n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
@@ -200,7 +200,6 @@ int32_t mtmd_helper_decode_image_chunk(
             const int nx = mtmd_image_tokens_get_nx(image_tokens);
             const int ny = mtmd_image_tokens_get_ny(image_tokens);
             batch_embd.set_position_mrope_2d(n_past, nx, ny, seq_id);
-            LOG_ERR("%s: nx = %d, ny = %d, n_pos_per_embd = %d, n_mmproj_embd = %d\n", __func__, nx, ny, n_pos_per_embd, n_mmproj_embd);
         } else if (chunk_type == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
             batch_embd.set_position_mrope_1d(n_past, seq_id);
         } else {
@@ -255,11 +254,11 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
     int32_t ret;
     llama_batch text_batch = llama_batch_init(n_batch, 0, 1);
     auto chunk_type = mtmd_input_chunk_get_type(chunk);
-    LOG_INF("decoding %s chunk\n", chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE ? "image" : "TEXT");
+
     if (chunk_type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
         size_t n_tokens;
         const auto tokens = mtmd_input_chunk_get_tokens_text(chunk, &n_tokens);
-        LOG_INF("decoding text chunk, n_tokens = %zu\n", n_tokens);
+        // LOG_INF("decoding text chunk, n_tokens = %zu\n", n_tokens);
         size_t i = 0;
         while (i < n_tokens) { // split into batches
             text_batch.n_tokens = 0; // clear the batch
@@ -329,13 +328,11 @@ int32_t mtmd_helper_eval_chunks(mtmd_context * ctx,
         LOG_ERR("no chunks to eval\n");
         return 0;
     }
-    LOG_INF("evaluating %zu chunks\n", n_chunks);
 
     for (size_t i = 0; i < n_chunks; i++) {
         bool chunk_logits_last = (i == n_chunks - 1) && logits_last;
         auto chunk = mtmd_input_chunks_get(chunks, i);
-        LOG_INF("n_past = %d, seq_id = %d, chunk %zu/%zu\n",
-                n_past, seq_id, i + 1, n_chunks);
+
         int32_t res = mtmd_helper_eval_chunk_single(ctx, lctx, chunk, n_past, seq_id, n_batch, chunk_logits_last, &n_past);
         if (res != 0) {
             LOG_ERR("failed to eval chunk %zu\n", i);

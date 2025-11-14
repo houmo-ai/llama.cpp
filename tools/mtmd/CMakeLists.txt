@@ -14,7 +14,10 @@ add_library(mtmd
             houmo_vision.cpp
             houmo_vision.h
             )
-
+# set_target_properties(mtmd PROPERTIES
+#     VERSION ${LLAMA_INSTALL_VERSION}
+#     SOVERSION 0
+# )
 target_link_libraries     (mtmd PUBLIC ggml llama)
 target_link_libraries     (mtmd PRIVATE Threads::Threads)
 target_include_directories(mtmd PUBLIC  .)

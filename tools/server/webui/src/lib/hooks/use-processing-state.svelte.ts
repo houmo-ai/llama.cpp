@@ -1,6 +1,5 @@
 import { slotsService } from '$lib/services';
 import { config } from '$lib/stores/settings.svelte';
-import { stat } from 'node:fs';
 
 export interface UseProcessingStateReturn {
 	readonly processingState: ApiProcessingState | null;

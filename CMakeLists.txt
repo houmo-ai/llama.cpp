@@ -12,7 +12,6 @@ if (NOT XCODE AND NOT MSVC AND NOT CMAKE_BUILD_TYPE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-
 set(HOUMO_TCIM_RUNTIME_PATH ${CMAKE_SOURCE_DIR}/third_party/houmo)
 find_library(HOUMO_RUNTIME_LIBRARIES NAMES tcim_runtime_lite PATHS ${HOUMO_TCIM_RUNTIME_PATH}/lib)
 message("LLAMA HOUMO_TCIM_LIBRARY=${HOUMO_RUNTIME_LIBRARIES}")
@@ -108,7 +107,7 @@ option(LLAMA_SANITIZE_ADDRESS   "llama: enable address sanitizer"   OFF)
 option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
 
 # utils
-option(LLAMA_BUILD_COMMON "llama: build common utils library" ON)
+option(LLAMA_BUILD_COMMON "llama: build common utils library" ${LLAMA_STANDALONE})
 
 # extra artifacts
 option(LLAMA_BUILD_TESTS    "llama: build tests"          ${LLAMA_STANDALONE})
@@ -119,6 +118,8 @@ option(LLAMA_TOOLS_INSTALL  "llama: install tools"        ${LLAMA_TOOLS_INSTALL_
 
 # 3rd party libs
 option(LLAMA_CURL       "llama: use libcurl to download model from an URL" ON)
+option(LLAMA_HTTPLIB    "llama: if libcurl is disabled, use httplib to download model from an URL" ON)
+option(LLAMA_OPENSSL    "llama: use openssl to support HTTPS" OFF)
 option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
 
 # Required for relocatable CMake package
@@ -226,6 +227,9 @@ endif()
 
 if (LLAMA_BUILD_COMMON)
     add_subdirectory(common)
+    if (LLAMA_HTTPLIB)
+        add_subdirectory(vendor/cpp-httplib)
+    endif()
 endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
