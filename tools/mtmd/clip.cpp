@@ -5022,6 +5022,10 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
             return ctx->model.mm_1_b->ne[0];
         case PROJECTOR_TYPE_QWEN3VL:
             // main path + deepstack paths
+            if (clip_is_hmm(ctx)) {
+                // 4=3+1, embedding + three deepstack_embeding
+                return ctx->model.hparams.projection_dim * 4;
+            }
             return ctx->model.mm_1_b->ne[0] * (1 + ctx->model.n_deepstack_layers);
         case PROJECTOR_TYPE_GEMMA3:
             return ctx->model.mm_input_proj_w->ne[0];

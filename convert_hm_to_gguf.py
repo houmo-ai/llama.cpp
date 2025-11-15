@@ -29,7 +29,10 @@ from typing import (
 from itertools import chain
 from transformers import AutoConfig
 
-import math
+
+if "NO_LOCAL_GGUF" not in os.environ:
+    sys.path.insert(1, str(Path(__file__).parent / "gguf-py"))
+import gguf
 import numpy as np
 import torch
 from torch import Tensor
@@ -2014,6 +2017,171 @@ class Qwen3Model(Qwen2Model):
 @ModelBase.register("Qwen3MoeForCausalLM")
 class Qwen3MoeModel(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.QWEN3MOE
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        hparams = ModelBase.load_hparams(self.dir_model)
+        self.origin_hf_arch = hparams.get("architectures", [None])[0]
+
+
+@ModelBase.register(
+    "Qwen3VLForConditionalGeneration", "Qwen3VLMoeForConditionalGeneration"
+)
+class Qwen3VLVisionModel(MmprojModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert self.hparams_vision is not None
+        # Compute image_size if not present
+        if "image_size" not in self.hparams_vision:
+            # For Qwen3VL/Qwen3VLMoe, compute from num_position_embeddings
+            num_pos = self.hparams_vision.get("num_position_embeddings", 2304)
+            patch_size = self.hparams_vision.get("patch_size", 16)
+            # num_position_embeddings = (image_size / patch_size) ** 2
+            # So image_size = sqrt(num_position_embeddings) * patch_size
+            image_size = int(num_pos**0.5 * patch_size)
+            self.hparams_vision["image_size"] = image_size
+
+        # Rename config values for compatibility
+        self.hparams_vision["num_attention_heads"] = self.hparams_vision.get(
+            "num_heads"
+        )
+        self.hparams_vision["num_hidden_layers"] = self.hparams_vision.get("depth")
+
+        self.is_deepstack_layers = [False] * int(
+            self.hparams_vision["num_hidden_layers"] or 0
+        )
+        for idx in self.hparams_vision.get("deepstack_visual_indexes", []):
+            self.is_deepstack_layers[idx] = True
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.QWEN3VL)
+        self.gguf_writer.add_vision_use_gelu(True)
+
+        if self.hparams_vision is not None:
+            merge_size = self.hparams_vision.get("spatial_merge_size")
+            if merge_size is not None:
+                self.gguf_writer.add_vision_spatial_merge_size(int(merge_size))
+
+        # Use text config's rms_norm_eps for vision attention layernorm eps
+        rms_norm_eps = self.global_config.get("text_config", {}).get(
+            "rms_norm_eps", 1e-6
+        )
+        self.gguf_writer.add_vision_attention_layernorm_eps(rms_norm_eps)
+
+        if self.is_deepstack_layers:
+            self.gguf_writer.add_vision_is_deepstack_layers(self.is_deepstack_layers)
+        self.gguf_writer.add_bool("is_hmm", True)
+        if self.model_description:
+            self.gguf_writer.add_string("model.description", self.model_description)
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        # TODO: @guoxing.xu check & test this block
+        logger.info(".....Getting tensors")
+        for name in [
+            "visual.hmm",
+        ]:
+            file_path = self.dir_model / name
+            logger.info(f".....Loading tensor from {file_path}")
+            if not file_path.is_file():
+                logger.warning(f".....{file_path} not found")
+                continue
+            with open(file_path, "rb") as file:
+                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                logger.info(f".....Tensor size: {binary_data.shape}")
+                data = torch.from_numpy(binary_data.copy())
+                yield name, data
+
+    def prepare_tensors(self):
+        # TODO: @guoxing.xu check & test this block
+        # 自定义的tensor，不需要该函数
+        # super().prepare_tensors()
+        logger.info(".....Preparing tensors")
+        for name, data_torch in chain(
+            self.generate_extra_tensors(), self.get_tensors()
+        ):
+            logger.info(
+                f".....Adding tensor {name}, {data_torch.shape}, {data_torch.nbytes}"
+            )
+            self.gguf_writer.add_tensor(
+                name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
+            )
+
+
+@ModelBase.register("Qwen3VLForConditionalGeneration")
+class Qwen3VLTextModel(Qwen3Model):
+    model_arch = gguf.MODEL_ARCH.QWEN3VL
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+
+        # Handle MRoPE (Multi-axis Rotary Position Embedding) for Qwen3-VL
+        text_config = self.hparams.get("text_config", {})
+        # rope_scaling is deprecated in V5, use rope_parameters instead
+        rope_scaling = (
+            text_config.get("rope_scaling") or text_config.get("rope_parameters") or {}
+        )
+
+        if rope_scaling.get("mrope_section"):
+            # mrope_section contains [time, height, width] dimensions
+            mrope_section = rope_scaling["mrope_section"]
+            # Pad to 4 dimensions [time, height, width, extra]
+            while len(mrope_section) < 4:
+                mrope_section.append(0)
+            self.gguf_writer.add_rope_dimension_sections(mrope_section[:4])
+
+            logger.info(f"MRoPE sections: {mrope_section[:4]}")
+
+        vision_config = self.hparams.get("vision_config", {})
+        deepstack_layer_num = len(vision_config.get("deepstack_visual_indexes", []))
+        self.gguf_writer.add_num_deepstack_layers(deepstack_layer_num)
+
+    def modify_tensors(
+        self, data_torch: Tensor, name: str, bid: int | None
+    ) -> Iterable[tuple[str, Tensor]]:
+        # Skip vision tensors - they go in the mmproj file
+        if name.startswith("model.visual."):
+            return []
+
+        return super().modify_tensors(data_torch, name, bid)
+
+
+@ModelBase.register("Qwen3VLMoeForConditionalGeneration")
+class Qwen3VLMoeTextModel(Qwen3MoeModel):
+    model_arch = gguf.MODEL_ARCH.QWEN3VLMOE
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+
+        # Handle MRoPE (Multi-axis Rotary Position Embedding) for Qwen3-VL
+        text_config = self.hparams.get("text_config", {})
+        # rope_scaling is deprecated in V5, use rope_parameters instead
+        rope_scaling = (
+            text_config.get("rope_scaling") or text_config.get("rope_parameters") or {}
+        )
+
+        if rope_scaling.get("mrope_section"):
+            # mrope_section contains [time, height, width] dimensions
+            mrope_section = rope_scaling["mrope_section"]
+            # Pad to 4 dimensions [time, height, width, extra]
+            while len(mrope_section) < 4:
+                mrope_section.append(0)
+            self.gguf_writer.add_rope_dimension_sections(mrope_section[:4])
+
+            logger.info(f"MRoPE sections: {mrope_section[:4]}")
+
+        vision_config = self.hparams.get("vision_config", {})
+        deepstack_layer_num = len(vision_config.get("deepstack_visual_indexes", []))
+        self.gguf_writer.add_num_deepstack_layers(deepstack_layer_num)
+
+    def modify_tensors(
+        self, data_torch: Tensor, name: str, bid: int | None
+    ) -> Iterable[tuple[str, Tensor]]:
+        # Skip vision tensors - they go in the mmproj file
+        if name.startswith("model.visual."):
+            return []
+
+        return super().modify_tensors(data_torch, name, bid)
 
 
 @ModelBase.register("GPT2LMHeadModel")

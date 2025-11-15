@@ -36,22 +36,23 @@ class HoumoVision {
                                        clip_image_u8 &dst,
                                        const clip_image_size &target_resolution,
                                        std::array<uint8_t, 3> pad_color);
-    bool bicubic_resize(const clip_image_u8 &img,
-                                     clip_image_u8 &dst, int target_width,
-                                     int target_height);
+    bool bicubic_resize(const clip_image_u8 &img, clip_image_u8 &dst,
+                        int target_width, int target_height);
     bool area_resize(const clip_image_u8 &img, clip_image_u8 &dst,
                      int target_width, int target_height);
+    void fill_header(std::vector<float> &output_data);
 
   private:
     std::shared_ptr<tcim::Module> module_;
     std::map<std::string, tcim::Tensor> input_tensors_;
-    std::map<std::string, tcim::Tensor> output_tensors_;
-    uint32_t image_width_ = 644;
-    uint32_t image_height_ = 364;
-    uint32_t image_channels_ = 3;
-    uint32_t batch_size_ = 1;
-    uint32_t image_frames_ = 2;
+    std::vector<std::string> output_names_;
+    uint16_t image_width_ = 644;
+    uint16_t image_height_ = 364;
+    uint16_t image_channels_ = 3;
+    uint16_t batch_size_ = 1;
+    uint16_t image_frames_ = 2;
     std::string input_name_;
     uint32_t patch_size_ = 14;
     std::vector<float> nchw_data_;
+    std::string kPatchSizeKey = "clip.vision.patch_size";
 };

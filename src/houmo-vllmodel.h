@@ -30,6 +30,8 @@ class HouMoVLLModel : public HouMoLLModel::Impl {
                               std::vector<int32_t> &width_position_ids);
     void reset_position_ids(int seq_id);
 
+    void fill_deepstack_embed(int seq_id, int valid_length);
+
   private:
     int kSeqMax = 4; // maximum sequence number for single-card model
     std::shared_ptr<tcim::Module> prefill_model_;
@@ -37,6 +39,9 @@ class HouMoVLLModel : public HouMoLLModel::Impl {
     int ny = 13; // 364/patch_size_(14)*2 = 13;
     int nx = 23; // 644/patch_size_(14)*2 = 23;
     std::vector<std::vector<int16_t>> input_embedding_ids_;
+    std::vector<std::vector<int16_t>> deepstack_features_0_; // only for qwen3vl
+    std::vector<std::vector<int16_t>> deepstack_features_1_; // only for qwen3vl
+    std::vector<std::vector<int16_t>> deepstack_features_2_; // only for qwen3vl
     std::vector<int32_t> offset_embedding_ids_;
     std::vector<std::vector<int32_t>> prefill_input_lengths_;
     std::vector<int32_t> position_indexs_;

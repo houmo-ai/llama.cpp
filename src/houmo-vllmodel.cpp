@@ -3,6 +3,15 @@
 #include "gguf.h"
 #include "llama-impl.h"
 #include <regex>
+#pragma pack(push, 1)
+struct CompactHeader {
+    int16_t magic;      // 16位标识
+    int16_t nx;         // 16位宽度
+    int16_t ny;         // 16位高度
+    int16_t chunksize;  // 16位块大小
+};
+#pragma pack(pop)
+
 HouMoVLLModel::HouMoVLLModel() : HouMoLLModel::Impl() {
     model_type_ = 1; // 1: image
 }
@@ -172,8 +181,26 @@ void HouMoVLLModel::houmo_init(int seq_max) {
     offset_embedding_ids_.resize(seq_max);
     position_indexs_.resize(seq_max);
     prefill_input_lengths_.resize(seq_max);
-    for (int i = 0; i < seq_max; i++)
+    deepstack_features_0_.resize(seq_max);
+    deepstack_features_1_.resize(seq_max);
+    deepstack_features_2_.resize(seq_max);
+    for (int i = 0; i < seq_max; i++) {
         input_embedding_ids_[i].resize(context_length_ * n_embd_, 0);
+        if (prefill_input_map_.size() == 9) {
+            deepstack_features_0_[i].resize(context_length_ * n_embd_, 0);
+            deepstack_features_1_[i].resize(context_length_ * n_embd_, 0);
+            deepstack_features_2_[i].resize(context_length_ * n_embd_, 0);
+        }
+    }
+    if (decode_input_map_.size() == 9) {
+        for (int i = 0; i < 3; i++) {
+            auto deepstack =
+                decode_input_map_.at(decode_model_->GetInputName(6 + i));
+            memset(deepstack.Data(), 0, deepstack.MemSize());
+            decode_model_->SetInput(decode_model_->GetInputName(6 + i),
+                                    deepstack);
+        }
+    }
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
     LLAMA_LOG_INFO("prefill_length_ = %d\n context_length_ = %d\n "
                    "n_blocks_ = %d\n n_embd_ = %ld\n n_prefill_batch_ = %d\n "
@@ -273,7 +300,8 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         set_input_data(prefill_valid_length, n_prefill_batch_, valid_length);
         set_input_data(prefill_current_length, n_prefill_batch_,
                        current_length);
-
+        // 当前仅qwen3vl生效
+        fill_deepstack_embed(seq_id, valid_length);
         prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
         prefill_model_->SetInput(prefill_model_->GetInputName(1),
                                  time_position_id);
@@ -320,12 +348,36 @@ int HouMoVLLModel::houmo_prefill(const float *embeddings, int n_tokens,
             reset_position_ids(seq_id);
             return 1;
         }
-        const int16_t *input_data_ptr = (const int16_t *)embeddings;
+        CompactHeader header;
+        int embedding_offset = 0;
+        std::memcpy(&header, embeddings, sizeof(CompactHeader));
+        if (header.magic == 0x1234) {
+            ny = header.ny;
+            nx = header.nx;
+            embedding_offset = sizeof(CompactHeader);
+        }
+        const int8_t* embeddings_ptr = reinterpret_cast<const int8_t *>(embeddings);
+        const int data_size_bytes = n_tokens * n_embd_ * sizeof(int16_t);
+        memcpy(input_embedding_ids_[seq_id].data() +
+                   offset_embedding_ids_[seq_id] * n_embd_,
+               embeddings_ptr + embedding_offset, data_size_bytes);
+        if (header.magic == 0x1234 && header.chunksize == 4) {
+            // for qwenvl3
+            embedding_offset += data_size_bytes;
+            LLAMA_LOG_INFO("deepstack feature 0 offset = %d, addr = %p\n", embedding_offset, embeddings_ptr + embedding_offset);
+            memcpy(deepstack_features_0_[seq_id].data() +
+                   offset_embedding_ids_[seq_id] * n_embd_,
+                   embeddings_ptr + embedding_offset, data_size_bytes);
+            embedding_offset += data_size_bytes;
 
-        memcpy(input_embedding_ids_[seq_id].data() + offset_embedding_ids_[seq_id] * n_embd_,
-            input_data_ptr,
-               n_tokens * n_embd_ * sizeof(int16_t));
-
+            memcpy(deepstack_features_1_[seq_id].data() +
+                   offset_embedding_ids_[seq_id] * n_embd_,
+                   embeddings_ptr + embedding_offset, data_size_bytes);
+            embedding_offset += data_size_bytes;
+            memcpy(deepstack_features_2_[seq_id].data() +
+                   offset_embedding_ids_[seq_id] * n_embd_,
+                   embeddings_ptr + embedding_offset, data_size_bytes);
+        }
         offset_embedding_ids_[seq_id] += n_tokens;
         prefill_input_lengths_[seq_id].push_back(n_tokens);
         return 0;
@@ -518,4 +570,36 @@ void HouMoVLLModel::compute_position_ids(
 void HouMoVLLModel::reset_position_ids(int seq_id) {
     offset_embedding_ids_[seq_id] = 0;
     prefill_input_lengths_[seq_id].resize(0);
+}
+
+void HouMoVLLModel::fill_deepstack_embed(int seq_id, int valid_length) {
+    if (prefill_input_map_.size() != 9)
+        return;
+    auto name = prefill_model_->GetInputName(6);
+    auto deepstack_tensor0 = prefill_input_map_.at(name);
+    deepstack_tensor0.Buffer().CopyFromHost(
+        deepstack_features_0_[seq_id].data() + valid_length * n_embd_,
+        deepstack_tensor0.MemSize());
+    prefill_model_->SetInput(name, deepstack_tensor0);
+    memset(deepstack_features_0_[seq_id].data() + valid_length * n_embd_, 0,
+           deepstack_tensor0.MemSize());
+
+    name = prefill_model_->GetInputName(7);
+    auto deepstack_tensor1 = prefill_input_map_.at(name);
+    deepstack_tensor1.Buffer().CopyFromHost(
+        deepstack_features_1_[seq_id].data() + valid_length * n_embd_,
+        deepstack_tensor1.MemSize());
+    prefill_model_->SetInput(name, deepstack_tensor1);
+    memset(deepstack_features_1_[seq_id].data() + valid_length * n_embd_, 0,
+           deepstack_tensor1.MemSize());
+
+    name = prefill_model_->GetInputName(8);
+    auto deepstack_tensor2 = prefill_input_map_.at(name);
+    deepstack_tensor2.Buffer().CopyFromHost(
+        deepstack_features_2_[seq_id].data() + valid_length * n_embd_,
+        deepstack_tensor2.MemSize());
+    prefill_model_->SetInput(name, deepstack_tensor2);
+    memset(deepstack_features_2_[seq_id].data() + valid_length * n_embd_, 0,
+           deepstack_tensor2.MemSize());
+
 }

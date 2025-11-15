@@ -8,6 +8,14 @@
 #include <fstream>
 #include <numeric>
 #include <torch/torch.h>
+#pragma pack(push, 1)
+struct CompactHeader {
+    int16_t magic;      // 16位标识
+    int16_t nx;         // 16位宽度
+    int16_t ny;         // 16位高度
+    int16_t chunksize;  // 16位块大小
+};
+#pragma pack(pop)
 
 static torch::Tensor floatArrayToFloat16Tensor(std::vector<float> &float_data) {
     // 1. 将float数组转换为float32张量
@@ -108,6 +116,13 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
         /*.ctx      = */ &ctx_data,
     };
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
+    auto key_id = gguf_find_key(ctx, kPatchSizeKey.c_str());
+    if (key_id < 0) {
+        LOG_ERR("%s: failed to find key %s in gguf file\n", __func__,
+                        kPatchSizeKey.c_str());
+    } else {
+        patch_size_ = gguf_get_val_u32(ctx, key_id);
+    }
     // 从gguf文件中加载hmmodels
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
     int device_id = 0;
@@ -153,18 +168,18 @@ bool HoumoVision::init(const std::string &model_path) {
         LOG_INF("%s: input_name: %s\n", __func__, input_name.c_str());
         auto input_info = module_->GetInputInfo(input_name).AsContiguous();
         if (input_info.Shape().size() == 4) {
-            image_width_ = input_info.Shape()[3];
-            image_height_ = input_info.Shape()[2];
-            image_channels_ = input_info.Shape()[1];
-            batch_size_ = input_info.Shape()[0];
+            image_width_ = static_cast<uint16_t>(input_info.Shape()[3]);
+            image_height_ = static_cast<uint16_t>(input_info.Shape()[2]);
+            image_channels_ = static_cast<uint16_t>(input_info.Shape()[1]);
+            batch_size_ = static_cast<uint16_t>(input_info.Shape()[0]);
             image_frames_ = 1;
             input_name_ = input_name;
         } else if (input_info.Shape().size() == 5) {
-            image_width_ = input_info.Shape()[4];
-            image_height_ = input_info.Shape()[3];
-            image_frames_ = input_info.Shape()[2];
-            image_channels_ = input_info.Shape()[1];
-            batch_size_ = input_info.Shape()[0];
+            image_width_ = static_cast<uint16_t>(input_info.Shape()[4]);
+            image_height_ = static_cast<uint16_t>(input_info.Shape()[3]);
+            image_frames_ = static_cast<uint16_t>(input_info.Shape()[2]);
+            image_channels_ = static_cast<uint16_t>(input_info.Shape()[1]);
+            batch_size_ = static_cast<uint16_t>(input_info.Shape()[0]);
             input_name_ = input_name;
         }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
@@ -175,13 +190,12 @@ bool HoumoVision::init(const std::string &model_path) {
     for (auto i = 0; i < out_size; ++i) {
         auto output_name = module_->GetOutputName(i);
         LOG_INF("%s: output_name: %s\n", __func__, output_name.c_str());
-        auto output_info = module_->GetOutputInfo(output_name).AsContiguous();
-        auto input_tensor = tcim::Tensor::CreateHostTensor(output_info);
-        output_tensors_.insert(
-            std::pair<std::string, tcim::Tensor>(output_name, input_tensor));
+        output_names_.push_back(output_name);
     }
-    set_windows_attention();
-
+    // Now Qwenvl2.5 clip three input. Qwen3vl clip one input.
+    if (input_tensors_.size() > 1) {
+        set_windows_attention();
+    }
     return true;
 }
 
@@ -236,11 +250,17 @@ bool HoumoVision::encoding(const std::vector<float> &input_data,
     module_->SetInput(input_name_, input_tensor);
     module_->Run();
     module_->Sync();
-    tcim::Tensor output_tensor = module_->GetOutput(module_->GetOutputName(0));
-    memcpy(output_data.data(), output_tensor.Buffer().Data(),
+    fill_header(output_data);
+    int offset = sizeof(CompactHeader);    
+    output_data.resize(output_data.size() * output_names_.size());
+    int8_t *output_data_ptr = reinterpret_cast<int8_t *>(output_data.data());
+    for (auto& name:output_names_) {
+        tcim::Tensor output_tensor = module_->GetOutput(name);
+        memcpy(output_data_ptr + offset, output_tensor.Buffer().Data(),
            output_tensor.MemSize());
-    LOG_INF("houmo_vision: run model done, output_data size: %d\n",
-            output_tensor.MemSize());
+        offset += output_tensor.MemSize();
+    }
+    LOG_INF("houmo_vision: run model done\n");
     return true;
 }
 
@@ -525,4 +545,39 @@ bool HoumoVision::area_resize(const clip_image_u8 &img, clip_image_u8 &dst,
     }
 
     return true;
+}
+
+void HoumoVision::fill_header(std::vector<float>& output_data) {
+    // 1. 构造紧凑数据结构
+    int16_t magic = 0x1234; 
+    // 计算 nx：uint32_t（image_width_）→ int16_t，显式转换+范围校验
+    uint32_t nx_uint = image_width_ / (patch_size_ * 2);
+    int16_t nx = (nx_uint > INT16_MAX) ? INT16_MAX : static_cast<int16_t>(nx_uint);
+
+    // 计算 ny：uint32_t（image_height_）→ int16_t，显式转换+范围校验
+    uint32_t ny_uint = image_height_ / (patch_size_ * 2);
+    int16_t ny = (ny_uint > INT16_MAX) ? INT16_MAX : static_cast<int16_t>(ny_uint);
+
+    // 计算 chunksize：size_t（output_names_.size()）→ int16_t，显式转换+范围校验
+    size_t chunksize_size = output_names_.size();
+    int16_t chunksize = (chunksize_size > INT16_MAX) ? INT16_MAX : static_cast<int16_t>(chunksize_size);
+    CompactHeader header = {
+        magic,    // 第一个字段：.magic
+        nx,       // 第二个字段：.nx
+        ny,       // 第三个字段：.ny
+        chunksize // 第四个字段：.chunksize
+    };
+
+    // 2. 确保 vector 至少有 2 个元素（前两个用于存储 header）
+    if (output_data.size() < 2) {
+        output_data.resize(2, 0.0f); // 扩容并初始化为 0，避免垃圾数据
+    }
+
+    // 3. 关键：将 8 字节 header 拷贝到 vector 前两个 float 元素的内存
+    // &output_data[0] 是第一个 float 的地址，连续 8 字节覆盖前两个 float
+    std::memcpy(
+        &output_data[0],  // 目标地址：vector 第一个元素（前 4 字节）
+        &header,          // 源地址：紧凑结构体（8 字节）
+        sizeof(CompactHeader) // 拷贝长度：8 字节（覆盖前两个 float）
+    );
 }
