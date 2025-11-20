@@ -50,10 +50,9 @@ struct kv_cache_item {
 */
 class HouMoLLModel::Impl {
 public:
-Impl() = default;
+  Impl() = default;
   virtual ~Impl() = default;
-
-  virtual bool houmo_load(const std::string &file_name) = 0;
+  virtual bool houmo_load(const std::string &file_name);
   virtual void houmo_init(int seq_max = 4) = 0;
   virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                             float *logits) = 0;
@@ -75,29 +74,89 @@ Impl() = default;
   uint32_t n_context_length() const { return context_length_;}
 
 protected:
-  void
-  prefill_input_init(std::shared_ptr<tcim::Module> prefill_model,
-                     std::map<std::string, tcim::Tensor> &prefill_input_map);
-  void
-  prefill_output_init(std::shared_ptr<tcim::Module> prefill_model,
-                      std::map<std::string, tcim::Tensor> &prefill_output_map,
-                      std::vector<std::string> &prefill_output_names);
-  void
-  decode_input_init(std::shared_ptr<tcim::Module> decode_model,
-                    std::map<std::string, tcim::Tensor> &decode_input_map);
-  void
-  decode_output_init(std::shared_ptr<tcim::Module> decode_model,
-                     std::map<std::string, tcim::Tensor> &decode_output_map,
-                     std::vector<std::string> &decode_output_names);
-  void fill_parameters(struct gguf_context *ctx);
+  /**
+   * @brief Initialize the model input and output.
+   * @details Initialize the model input and output with the given seq_max.
+   * @param seq_max The maximum sequences.
+   */
+  void model_inout_init(int seq_max);
+  /**
+   * @brief Set the kv cache for prefill.
+   * @details Set the kv cache for prefill with the given seq_id.
+   * @param seq_id The sequence id.
+   */
+  void set_kv_cache_for_prefill(int seq_id);
+  /**
+   * @brief Set the kv cache for decode.
+   * @details Set the kv cache for decode with the given seq_ids.
+   * @param seq_ids The sequence ids.
+   */
+  void set_kv_cache_for_decode(const std::vector<int> &seq_ids);
+  /**
+   * @brief Set the input for decode.
+   * @details Set the input for decode with the given batches and seq_ids.
+   * @param batches The input batches.
+   * @param seq_ids The sequence ids.
+   * @return 0 if success, -1 if failed.
+   */
+  int set_input_for_decode(std::vector<llama_token> &batches,
+                           std::vector<int> &seq_ids);
+  /**
+   * @brief Set the (valid_length&current_length) for decode.
+   * @details Set the valid_length&current_length for decode with the given seq_ids.
+   * @param seq_ids The sequence ids.
+   * @return 0 if success, -1 if failed.
+   */
+  int set_xlenght_for_decode(std::vector<int> &seq_ids);
 
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+  /**
+   * @brief Initialize functions.
+   * @details Initialize the prefill input with the given batch_size.
+   * @param batch_size The batch size.
+   */
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+  void prefill_input_init();
+  void prefill_output_init();
+  void decode_input_init();
+  void decode_output_init();
+  void initialize_kv_cache(int size);
+
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+  // helper functions                                                                           //
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+  /**
+   * @brief Parse the device ids.
+   * @details Parse the device ids form env. If single_card is true, return the first device id.
+   * @param single_card The single card.
+   * @return The device ids.
+   */
+  std::vector<int> parse_deviceids(bool single_card = true);
   void read_tensor_to_buffer(const std::string &file_name, size_t offset,
                              size_t size, std::vector<char> &buffer);
-  std::vector<int> parse_deviceids(bool single_card = true);
+  /**
+   * @brief Parse the gguf parameters.(n_blocks, n_embd, n_vocab)
+   * @details Parse the gguf parameters with the given ctx.
+   * @param ctx The gguf context.
+   */
+  void parser_gguf_parameters(struct gguf_context *ctx);
+  /**
+   * @brief Set the input data for the tensor.
+   * @details Set the input data for the tensor with the given batch_size and value.
+   * @param tensor The tensor.
+   * @param batch_size The batch size.
+   * @param value The value.
+   */
   void set_input_data(tcim::Tensor &tensor, int batch_size, int value);
+  /**
+   * @brief Set the input data for the tensor.
+   * @details Set the input data for the tensor with the given int32_vec and offset.
+   * @param tensor The tensor.
+   * @param int32_vec The int32 vector.
+   * @param offset The offset.
+   */
   void set_input_data(tcim::Tensor &tensor, std::vector<int32_t> &int32_vec,
                       size_t offset = 0);
-
 protected:
   int prefill_length_ = 256;
   int context_length_ = 4096;
@@ -107,19 +166,26 @@ protected:
   int64_t n_vocab_ = 30522;
   int n_prefill_batch_ = 1;
   int n_decode_batch_ = 1;
+  bool has_history_sum_ = false;
+
   torch::nn::Embedding embedding_ = nullptr;
+  std::shared_ptr<tcim::Module> prefill_model_;
+  std::shared_ptr<tcim::Module> decode_model_;
+
   std::map<std::string, tcim::Tensor> prefill_input_map_;
   std::map<std::string, tcim::Tensor> prefill_output_map_;
   std::map<std::string, tcim::Tensor> decode_input_map_;
   std::map<std::string, tcim::Tensor> decode_output_map_;
   std::vector<std::string> decode_output_names_;
   std::vector<std::string> prefill_output_names_;
-
+  std::vector<std::string> decode_valid_length_names_;
+  std::vector<std::string> decode_current_length_names_;
   std::map<int, kv_cache_item> kv_cache_;
   int need_set_kv_cache_ = 0; // 0: no need, 1: need
   std::string kGeneralArch = "general.architecture";
   std::string kEmbeddingLengthEx = ".embedding_length";
   std::string kBlockCountEx = ".block_count";
+  int kSeqMax = 4; // maximum sequence number for single-card model
+  std::string model_arch_ = "";
   bool xh1_ = true;
-  int model_type_ = 0; // 0:text, 1: image..
 };

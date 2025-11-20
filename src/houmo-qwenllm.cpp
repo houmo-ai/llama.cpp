@@ -1,0 +1,179 @@
+#include "houmo-qwenllm.h"
+#include "llama-impl.h"
+
+void HoumoQwenLLM::houmo_init(int seq_max) {
+    model_inout_init(seq_max);
+}
+int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
+                                float *logits) {
+
+    LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
+                   seq_id, tokens.size());
+    prefill_tokens_.insert(prefill_tokens_.end(), tokens.begin(), tokens.end());
+    if (prefill_tokens_.size() >= (uint32_t)context_length_) {
+        LLAMA_LOG_ERROR("%s: prefill_tokens_ size %zu > context_length_%d, "
+                        "reset to 0\n",
+                        __func__, prefill_tokens_.size(), context_length_);
+        prefill_tokens_.resize(0);
+        return 1;
+    }
+    if (logits == nullptr) {
+        LLAMA_LOG_INFO(
+            "%s: logits is null, just cache return, total size = %zu\n",
+            __func__, prefill_tokens_.size());
+        return 0;
+    }
+    size_t input_echo_len = prefill_tokens_.size();
+    int16_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
+                                      static_cast<float>(prefill_length_));
+    int32_t current_length = 0;
+    //[only for deepseek] clear kcache_history_sum before prefill.
+    auto &kv_item = kv_cache_[seq_id];
+    for (size_t idx = 0; idx < kv_item.names.size(); idx++) {
+        if (kv_item.names[idx].find("kcache_history_sum") == std::string::npos)
+            continue;
+        auto &input_data = kv_item.tensors[idx];
+        std::vector<int16_t> kcache_history_sum_init(input_data.MemSize() / 2,
+                                                     0);
+        input_data.Buffer().CopyFromHost(kcache_history_sum_init.data(),
+                                         input_data.MemSize());
+        decode_model_->SetInput(kv_item.names[idx], input_data);
+    }
+
+    std::vector<llama_token> input_ids;
+    int32_t valid_length = 0;
+    for (int round = 0; round < prefill_loop_round; round++) {
+        valid_length = round * prefill_length_;
+        if (round == prefill_loop_round - 1) {
+            current_length = input_echo_len - round * prefill_length_;
+            auto first = prefill_tokens_.begin() + round * prefill_length_;
+            auto last = prefill_tokens_.begin() + input_echo_len;
+            std::vector<llama_token> round_tokens(first, last);
+            input_ids = round_tokens;
+        } else {
+            current_length = prefill_length_;
+            auto first = prefill_tokens_.begin() + round * prefill_length_;
+            auto last = prefill_tokens_.begin() + (round + 1) * prefill_length_;
+            std::vector<llama_token> round_tokens(first, last);
+            input_ids = round_tokens;
+        }
+        torch::Tensor inputs_embeds;
+        auto opts = torch::TensorOptions().dtype(torch::kInt);
+        auto inp = torch::from_blob(input_ids.data(),
+                                    {int64_t(input_ids.size())}, opts);
+        try {
+            inputs_embeds = embedding_->forward(inp);
+        } catch (const c10::Error &e) {
+            std::cerr << "error loading the model\n"
+                      << e.what_without_backtrace();
+            prefill_tokens_.resize(0);
+            return -1;
+        }
+        auto effective_length = input_ids.size();
+        auto pad_embeds = torch::zeros(
+            {(int64_t)(prefill_length_ - effective_length), n_embd_},
+            inputs_embeds.dtype());
+        auto padded_embeds = torch::cat({inputs_embeds, pad_embeds});
+        auto input_data =
+            prefill_input_map_.at(prefill_model_->GetInputName(0));
+        padded_embeds = padded_embeds.view(input_data.Info().Shape());
+        // 区分一下更健壮的写法
+        if (xh1_) {
+            padded_embeds = padded_embeds.to(torch::kInt16);
+            input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<int16_t>(),
+                                             input_data.MemSize());
+        } else {
+            input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<at::Half>(),
+                                             input_data.MemSize());
+        }
+
+        auto prefill_valid_length =
+            prefill_input_map_.at(prefill_model_->GetInputName(1));
+        auto prefill_current_length =
+            prefill_input_map_.at(prefill_model_->GetInputName(2));
+        if (prefill_input_map_.count(prefill_model_->GetInputName(3)) > 0) {
+            // 设置 position_ids
+            auto prefill_position_ids =
+                prefill_input_map_.at(prefill_model_->GetInputName(3));
+            std::vector<int32_t> position_ids(prefill_length_, 1);
+            for (int i = 0; i < current_length; i++) {
+                position_ids[i] = valid_length + i;
+            }
+            set_input_data(prefill_position_ids, position_ids);
+            prefill_model_->SetInput(prefill_model_->GetInputName(3),
+                                     prefill_position_ids);
+        }
+        set_input_data(prefill_valid_length, n_prefill_batch_, valid_length);
+        set_input_data(prefill_current_length, n_prefill_batch_,
+                       current_length);
+
+        prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
+        prefill_model_->SetInput(prefill_model_->GetInputName(1),
+                                 prefill_valid_length);
+        prefill_model_->SetInput(prefill_model_->GetInputName(2),
+                                 prefill_current_length);
+        set_kv_cache_for_prefill(seq_id);
+        prefill_model_->Run();
+        prefill_model_->Sync();
+    }
+    decode_valid_length_[seq_id] = input_echo_len;
+    tcim::Tensor prefill_output_data =
+        prefill_model_->GetOutput(prefill_output_names_[0]);
+    assert(prefill_output_data.Info().DataType() == tcim::DataType::INT16);
+    // 转浮点
+    auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
+    prefill_output_data.CastTo(prefill_output_float);
+    memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+    prefill_tokens_.resize(0);
+    return 0;
+}
+
+int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
+                               std::vector<int> &seq_ids,
+                               std::vector<float *> logits) {
+    LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
+                    seq_ids.size(), batches.size());
+    if (seq_ids.size() > (size_t)n_decode_batch_) {
+        std::cerr << "seq_ids.size() > n_decode_batch_ not supported\n";
+        return -1;
+    }
+    // 1. 构造input_tokens
+    auto ret = set_input_for_decode(batches, seq_ids);
+    if (ret != 0) {
+        LLAMA_LOG_ERROR("%s: set_input_for_decode failed\n", __func__);
+        return ret;
+    }
+    // 2. set valid_length & current_length
+    ret = set_xlenght_for_decode(seq_ids);
+    if (ret != 0) {
+        LLAMA_LOG_ERROR("%s: set_xlenght_for_decode failed\n", __func__);
+        return ret;
+    }
+    // 3. set kv_cache
+    set_kv_cache_for_decode(seq_ids);
+
+    // 4. run & sync
+    decode_model_->Run();
+    decode_model_->Sync();
+
+    // 5. get output to logits
+    tcim::Tensor decode_data =
+        decode_model_->GetOutput(decode_output_names_[0]);
+    // 转浮点
+    auto &decode_output_float = decode_output_map_[decode_output_names_[0]];
+    decode_data.CastTo(decode_output_float);
+    auto n_vocab =
+        decode_output_float.MemSize() / (n_decode_batch_ * sizeof(float));
+    for (size_t i = 0; i < seq_ids.size(); i++) {
+        auto batch_id = seq_ids[i];
+        decode_valid_length_[batch_id]++;
+        // 单batch模式下所有序列共用batch 0
+        if (n_decode_batch_ == 1)
+            batch_id = 0;
+        float *logits_out = logits[i];
+        float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
+                            batch_id * n_vocab;
+        memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+    }
+    return 0;
+}

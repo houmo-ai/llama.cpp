@@ -233,6 +233,7 @@ launch_cmd=(
     --host 0.0.0.0
     --jinja
     --reasoning-format none
+    --log-prefix --log-timestamps
 )
 
 # 如果是VL模型，添加mmproj参数
@@ -257,7 +258,6 @@ fi
 
 echo "启动命令: ${launch_cmd[*]}"
 if [ "$rund" = false ]; then
-    echo "选择后台运行模式..."
     "${launch_cmd[@]}"
 else
 

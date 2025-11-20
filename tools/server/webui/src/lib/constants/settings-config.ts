@@ -2,7 +2,7 @@ export const SETTING_CONFIG_DEFAULT: Record<string, string | number | boolean> =
 	// Note: in order not to introduce breaking changes, please keep the same data type (number, string, etc) if you want to change the default value. Do not use null or undefined for default value.
 	// Do not use nested objects, keep it single level. Prefix the key if you need to group them.
 	apiKey: '',
-	systemMessage: 'You are a helpful assistant.',
+	systemMessage: '',
 	theme: 'system',
 	showTokensPerSecond: true,
 	showThoughtInProgress: true,

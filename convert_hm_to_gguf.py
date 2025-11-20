@@ -638,13 +638,20 @@ class TextModel(ModelBase):
         if isinstance(embedding_weight, torch.nn.Embedding):
             embedding_weight = embedding_weight.weight
         print(f"embedding_weight.dtype: {embedding_weight.dtype}")
-        if embedding_weight.dtype == torch.int16:
+        if (
+            embedding_weight.dtype == torch.int16
+            or embedding_weight.dtype == torch.int64
+            or embedding_weight.dtype == torch.int32
+        ):
             print(
-                "keep weight to int16 for minimal memory usage. convert to float32 when using in C++"
+                "M30：convert weight to int16 for minimal memory usage. convert to float32 when using in C++"
             )
             embedding_weight = embedding_weight.to(torch.int16)
         elif embedding_weight.dtype == torch.float16:
-            print("keep embedding weight as float16")
+            print("M50: keep embedding weight as float16")
+        elif embedding_weight.dtype == torch.bfloat16:
+            embedding_weight = embedding_weight.to(torch.float16)
+            print("M50: convert embedding weight to float16")
         else:
             print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
             embedding_weight = embedding_weight.to(torch.float32)
@@ -666,14 +673,14 @@ class TextModel(ModelBase):
         # 分为"必须存在"和"可选存在"两组
         required_keys = {
             "quant_embedding.pt": re.compile(r".*embedding\.pt$"),
-            "prefill.hmm": re.compile(r".*prefill\.hmm$"),
-            "decoder.hmm": re.compile(r".*decode(r)?\.hmm$"),
+            "prefill.hmm": re.compile(r".*prefill\.hmm(s)?$"),
+            "decoder.hmm": re.compile(r".*decode(r)?\.hmm(s)?$"),
         }
         optional_keys = {
-            "prefill_0.hmm": re.compile(r".*prefill_0\.hmm$"),
-            "prefill_1.hmm": re.compile(r".*prefill_1\.hmm$"),
-            "decoder_0.hmm": re.compile(r".*decoder_0\.hmm$"),
-            "decoder_1.hmm": re.compile(r".*decoder_1\.hmm$"),
+            "prefill_0.hmm": re.compile(r".*prefill_0\.hmm(s)?$"),
+            "prefill_1.hmm": re.compile(r".*prefill_1\.hmm(s)?$"),
+            "decoder_0.hmm": re.compile(r".*decoder_0\.hmm(s)?$"),
+            "decoder_1.hmm": re.compile(r".*decoder_1\.hmm(s)?$"),
         }
 
         # 检查模型目录是否存在
@@ -682,12 +689,22 @@ class TextModel(ModelBase):
             raise FileNotFoundError(f"Model directory {self.dir_model} not found")
 
         # 获取目录下所有文件
-        all_files = [f.name for f in self.dir_model.iterdir() if f.is_file()]
+        all_files = [
+            f
+            for f in self.dir_model.iterdir()
+            if f.is_file() and (f.suffix == ".hmm" or f.suffix == ".hmms")
+        ]
+        print(f"all_files: {all_files}")
+        for f in self.dir_model.rglob("*embedding.pt"):  # 递归查找所有 embedding.pt
+            if f.is_file():
+                all_files.append(f)
+                break
+        print(f"all_files: {all_files}")
 
         # 处理必须存在的文件（不存在则报错）
         matched_required = {}
         for key, pattern in required_keys.items():
-            matched = [file for file in all_files if pattern.match(file)]
+            matched = [file for file in all_files if pattern.match(file.name)]
             if not matched:
                 logger.error(f"Missing required file for key: {key}")
                 raise FileNotFoundError(f"No file found for required key {key}")
@@ -696,7 +713,7 @@ class TextModel(ModelBase):
         # 处理可选文件（不存在则跳过）
         matched_optional = {}
         for key, pattern in optional_keys.items():
-            matched = [file for file in all_files if pattern.match(file)]
+            matched = [file for file in all_files if pattern.match(file.name)]
             if matched:
                 matched_optional[key] = matched[0]  # 存在则记录
             else:
@@ -711,8 +728,7 @@ class TextModel(ModelBase):
             if key not in all_matched:
                 continue  # 跳过不存在的可选文件
 
-            file_name = all_matched[key]
-            file_path = self.dir_model / file_name
+            file_path = all_matched[key].absolute()
             logger.info(f".....Loading tensor from {file_path} (mapped to key: {key})")
 
             if not file_path.is_file():
@@ -849,6 +865,9 @@ class TextModel(ModelBase):
 
         self.gguf_writer.add_file_type(self.ftype)
         logger.info(f"gguf: file type = {self.ftype}")
+        self.gguf_writer.add_bool("is_hmm", True)
+        if self.model_description:
+            self.gguf_writer.add_string("model.description", self.model_description)
 
     def write_vocab(self):
         if len(self.gguf_writer.tensors) != 1:
@@ -1504,6 +1523,147 @@ class TextModel(ModelBase):
             self.gguf_writer.add_pooling_type(pooling_type)
 
 
+@ModelBase.register("MiniCPMForCausalLM")
+class MiniCPMModel(TextModel):
+    model_arch = gguf.MODEL_ARCH.MINICPM
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        embedding_scale = float(self.hparams["scale_emb"])
+        self.gguf_writer.add_embedding_scale(embedding_scale)
+        logger.info(f"gguf: (minicpm) embedding_scale = {embedding_scale}")
+        residual_scale = (
+            self.hparams["scale_depth"] / self.hparams["num_hidden_layers"] ** 0.5
+        )
+        self.gguf_writer.add_residual_scale(residual_scale)
+        logger.info(f"gguf: (minicpm) residual_scale = {residual_scale}")
+        logit_scale = self.hparams["hidden_size"] / self.hparams["dim_model_base"]
+        self.gguf_writer.add_logit_scale(logit_scale)
+        logger.info(f"gguf: (minicpm) logit_scale = {logit_scale}")
+        rope_scaling = self.hparams.get("rope_scaling") or {}
+        if rope_scaling.get("rope_type", rope_scaling.get("type")) == "longrope":
+            self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.LONGROPE)
+            logger.info(
+                f"gguf: (minicpm) rope_scaling_type = {gguf.RopeScalingType.LONGROPE}"
+            )
+
+    def prepare_tensors(self):
+        # TODO: @guoxing.xu check & test this block
+        # 自定义的tensor，不需要该函数
+        # super().prepare_tensors()
+        logger.info(".....Preparing tensors")
+        for name, data_torch in chain(
+            self.generate_extra_tensors(), self.get_tensors()
+        ):
+            logger.info(
+                f".....Adding tensor {name}, {data_torch.shape}, {data_torch.nbytes}"
+            )
+            self.gguf_writer.add_tensor(
+                name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
+            )
+
+    def set_vocab(self):
+        self._set_vocab_sentencepiece()
+
+
+@ModelBase.register("MiniCPM3ForCausalLM")
+class MiniCPM3Model(TextModel):
+    model_arch = gguf.MODEL_ARCH.MINICPM3
+
+    def set_gguf_parameters(self):
+        hparams = self.hparams
+
+        self.gguf_writer.add_file_type(self.ftype)
+        self.gguf_writer.add_context_length(hparams["max_position_embeddings"])
+        self.gguf_writer.add_embedding_length(hparams["hidden_size"])
+        self.gguf_writer.add_block_count(self.block_count)
+        self.gguf_writer.add_feed_forward_length(hparams["intermediate_size"])
+        self.gguf_writer.add_head_count(hparams["num_attention_heads"])
+        self.gguf_writer.add_head_count_kv(hparams["num_key_value_heads"])
+        self.gguf_writer.add_layer_norm_rms_eps(hparams["rms_norm_eps"])
+        self.gguf_writer.add_vocab_size(hparams["vocab_size"])
+        if "q_lora_rank" in hparams and hparams["q_lora_rank"] is not None:
+            self.gguf_writer.add_q_lora_rank(hparams["q_lora_rank"])
+        self.gguf_writer.add_kv_lora_rank(hparams["kv_lora_rank"])
+        self.gguf_writer.add_key_length(
+            hparams["qk_nope_head_dim"] + hparams["qk_rope_head_dim"]
+        )
+        self.gguf_writer.add_rope_dimension_count(hparams["qk_rope_head_dim"])
+
+    def prepare_tensors(self):
+        # TODO: @guoxing.xu check & test this block
+        # 自定义的tensor，不需要该函数
+        # super().prepare_tensors()
+        logger.info(".....Preparing tensors")
+        for name, data_torch in chain(
+            self.generate_extra_tensors(), self.get_tensors()
+        ):
+            logger.info(
+                f".....Adding tensor {name}, {data_torch.shape}, {data_torch.nbytes}"
+            )
+            self.gguf_writer.add_tensor(
+                name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
+            )
+
+    def set_vocab(self):
+        self._set_vocab_sentencepiece()
+
+    def _reverse_hf_permute(
+        self, weights: Tensor, n_head: int, n_kv_head: int | None = None
+    ) -> Tensor:
+        if n_kv_head is not None and n_head != n_kv_head:
+            n_head //= n_kv_head
+
+        return (
+            weights.reshape(
+                n_head, 2, weights.shape[0] // n_head // 2, *weights.shape[1:]
+            )
+            .swapaxes(1, 2)
+            .reshape(weights.shape)
+        )
+
+
+@ModelBase.register("GptOssForCausalLM")
+class GptOssModel(TextModel):
+    model_arch = gguf.MODEL_ARCH.GPT_OSS
+
+    def set_vocab(self):
+        self._set_vocab_gpt2()
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_sliding_window(self.hparams["sliding_window"])
+        self.gguf_writer.add_expert_feed_forward_length(
+            self.hparams["intermediate_size"]
+        )
+
+        rope_scaling = self.hparams.get("rope_scaling") or {}
+        rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
+        assert (
+            rope_type == "yarn"
+        ), f"GPT-OSS only supports yarn rope scaling, got {rope_type}"
+        self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.YARN)
+        self.gguf_writer.add_rope_scaling_factor(rope_scaling["factor"])
+        self.gguf_writer.add_rope_scaling_orig_ctx_len(
+            rope_scaling.get("original_max_position_embeddings", 4096)
+        )
+
+    def prepare_tensors(self):
+        # TODO: @guoxing.xu check & test this block
+        # 自定义的tensor，不需要该函数
+        # super().prepare_tensors()
+        logger.info(".....Preparing tensors")
+        for name, data_torch in chain(
+            self.generate_extra_tensors(), self.get_tensors()
+        ):
+            logger.info(
+                f".....Adding tensor {name}, {data_torch.shape}, {data_torch.nbytes}"
+            )
+            self.gguf_writer.add_tensor(
+                name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
+            )
+
+
 class MmprojModel(ModelBase):
     model_type = ModelType.MMPROJ
     model_arch = gguf.MODEL_ARCH.MMPROJ
@@ -1618,6 +1778,9 @@ class MmprojModel(ModelBase):
 
         if not self.has_vision_encoder and not self.has_audio_encoder:
             raise ValueError("MmprojModel must have either vision or audio encoder")
+        self.gguf_writer.add_bool("is_hmm", True)
+        if self.model_description:
+            self.gguf_writer.add_string("model.description", self.model_description)
 
     def write_vocab(self):
         raise ValueError("MmprojModel does not support vocab writing")
@@ -1639,6 +1802,46 @@ class MmprojModel(ModelBase):
         if optional:
             return None
         raise KeyError(f"could not find any of: {keys}")
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        # TODO: @guoxing.xu check & test this block
+        logger.info(".....Getting tensors")
+        pattern = "*visual.hmm"
+        # 遍历目录下匹配的所有文件（仅文件，不包含子目录）
+        for file_path in self.dir_model.glob(pattern):
+            logger.info(f".....Loading tensor from {file_path}")
+
+            if not file_path.is_file():
+                logger.warning(f".....{file_path} is not a file, skipping")
+                continue
+
+            try:
+                # 读取二进制数据并转换为 torch.Tensor
+                with open(file_path, "rb") as file:
+                    binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                    logger.info(f".....Tensor size: {binary_data.shape}")
+                    data = torch.from_numpy(binary_data.copy())
+                    yield "visual.hmm", data
+            except Exception as e:
+                logger.error(
+                    f".....Failed to load {file_path}: {str(e)}", exc_info=True
+                )
+                continue
+
+    def prepare_tensors(self):
+        # TODO: @guoxing.xu check & test this block
+        # 自定义的tensor，不需要该函数
+        # super().prepare_tensors()
+        logger.info(".....Preparing tensors")
+        for name, data_torch in chain(
+            self.generate_extra_tensors(), self.get_tensors()
+        ):
+            logger.info(
+                f".....Adding tensor {name}, {data_torch.shape}, {data_torch.nbytes}"
+            )
+            self.gguf_writer.add_tensor(
+                name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
+            )
 
 
 @ModelBase.register("QWenLMHeadModel")
@@ -1718,9 +1921,6 @@ class Qwen2Model(TextModel):
                 self.gguf_writer.add_rope_scaling_orig_ctx_len(
                     self.hparams["rope_scaling"]["original_max_position_embeddings"]
                 )
-        self.gguf_writer.add_bool("is_hmm", True)
-        if self.model_description:
-            self.gguf_writer.add_string("model.description", self.model_description)
 
     def prepare_tensors(self):
         # TODO: @guoxing.xu check & test this block
@@ -1752,11 +1952,8 @@ class Qwen2VLModel(TextModel):
         mrope_section = self.hparams["rope_scaling"]["mrope_section"]
         mrope_section += [0] * max(0, 4 - len(mrope_section))
         self.gguf_writer.add_rope_dimension_sections(mrope_section)
-        self.gguf_writer.add_bool("is_hmm", True)
         self.gguf_writer.add_uint32("hmm.vit.height", self.hmm_vit_height)
         self.gguf_writer.add_uint32("hmm.vit.width", self.hmm_vit_width)
-        if self.model_description:
-            self.gguf_writer.add_string("model.description", self.model_description)
 
     def set_vocab(self):
         try:
@@ -1842,41 +2039,6 @@ class Qwen2VLVisionModel(MmprojModel):
         self.gguf_writer.add_vision_attention_layernorm_eps(
             self.global_config.get("rms_norm_eps", 1e-6)
         )
-        self.gguf_writer.add_bool("is_hmm", True)
-        if self.model_description:
-            self.gguf_writer.add_string("model.description", self.model_description)
-
-    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
-        # TODO: @guoxing.xu check & test this block
-        logger.info(".....Getting tensors")
-        for name in [
-            "visual.hmm",
-        ]:
-            file_path = self.dir_model / name
-            logger.info(f".....Loading tensor from {file_path}")
-            if not file_path.is_file():
-                logger.warning(f".....{file_path} not found")
-                continue
-            with open(file_path, "rb") as file:
-                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
-                logger.info(f".....Tensor size: {binary_data.shape}")
-                data = torch.from_numpy(binary_data.copy())
-                yield name, data
-
-    def prepare_tensors(self):
-        # TODO: @guoxing.xu check & test this block
-        # 自定义的tensor，不需要该函数
-        # super().prepare_tensors()
-        logger.info(".....Preparing tensors")
-        for name, data_torch in chain(
-            self.generate_extra_tensors(), self.get_tensors()
-        ):
-            logger.info(
-                f".....Adding tensor {name}, {data_torch.shape}, {data_torch.nbytes}"
-            )
-            self.gguf_writer.add_tensor(
-                name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
-            )
 
 
 @ModelBase.register("Qwen2_5OmniModel")
@@ -1987,9 +2149,6 @@ class Qwen2MoeModel(TextModel):
             self.gguf_writer.add_rope_scaling_orig_ctx_len(
                 rope_scaling["original_max_position_embeddings"]
             )
-        self.gguf_writer.add_bool("is_hmm", True)
-        if self.model_description:
-            self.gguf_writer.add_string("model.description", self.model_description)
 
     _experts: list[dict[str, Tensor]] | None = None
 
@@ -2071,41 +2230,6 @@ class Qwen3VLVisionModel(MmprojModel):
 
         if self.is_deepstack_layers:
             self.gguf_writer.add_vision_is_deepstack_layers(self.is_deepstack_layers)
-        self.gguf_writer.add_bool("is_hmm", True)
-        if self.model_description:
-            self.gguf_writer.add_string("model.description", self.model_description)
-
-    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
-        # TODO: @guoxing.xu check & test this block
-        logger.info(".....Getting tensors")
-        for name in [
-            "visual.hmm",
-        ]:
-            file_path = self.dir_model / name
-            logger.info(f".....Loading tensor from {file_path}")
-            if not file_path.is_file():
-                logger.warning(f".....{file_path} not found")
-                continue
-            with open(file_path, "rb") as file:
-                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
-                logger.info(f".....Tensor size: {binary_data.shape}")
-                data = torch.from_numpy(binary_data.copy())
-                yield name, data
-
-    def prepare_tensors(self):
-        # TODO: @guoxing.xu check & test this block
-        # 自定义的tensor，不需要该函数
-        # super().prepare_tensors()
-        logger.info(".....Preparing tensors")
-        for name, data_torch in chain(
-            self.generate_extra_tensors(), self.get_tensors()
-        ):
-            logger.info(
-                f".....Adding tensor {name}, {data_torch.shape}, {data_torch.nbytes}"
-            )
-            self.gguf_writer.add_tensor(
-                name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
-            )
 
 
 @ModelBase.register("Qwen3VLForConditionalGeneration")

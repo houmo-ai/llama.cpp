@@ -2001,13 +2001,13 @@ struct server_slot {
             t_prompt        = t_prompt_processing_no_image / n_prompt_tokens_processed;
             n_prompt_second = 1e3 / t_prompt_processing_no_image * n_prompt_tokens_processed;
             SLT_INF(*this,
-                    "\n==================================================================\n"
+                    "\n====================================================================================================\n"
                     "=image   eval time = %10.2f ms / %5d images (%8.2f ms per image, %9d tokens per image)\n"
                     "=prefill eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
                     "=decoder eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
                     "=total   eval time = %10.2f ms\n"
                     "=context %d/%d (%f%%)\n"
-                    "==================================================================\n",
+                    "====================================================================================================\n",
                     t_image_processing, n_images, t_image_processing / n_images, n_image_tokens / n_images,
                     t_prompt_processing_no_image, n_prompt_tokens_processed, t_prompt, n_prompt_second,
                     t_token_generation, n_decoded, t_gen, n_gen_second,
@@ -2015,12 +2015,12 @@ struct server_slot {
                     (n_prompt_tokens_processed + n_decoded), n_ctx, percent_used);
         } else {
             SLT_INF(*this,
-                    "\n==================================================================\n"
+                    "\n====================================================================================================\n"
                     "=prefill eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
                     "=decoder eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
                     "=total   eval time = %10.2f ms\n"
                     "=context %d/%d (%f%%)\n"
-                    "==================================================================\n",
+                    "====================================================================================================\n",
                     t_prompt_processing, n_prompt_tokens_processed, t_prompt, n_prompt_second,
                     t_token_generation, n_decoded, t_gen, n_gen_second,
                     t_prompt_processing + t_token_generation,
@@ -2028,14 +2028,14 @@ struct server_slot {
         }
         double e2e_latency = (t_prompt_processing + t_token_generation)/1000;
         SLT_INF(*this,
-                "\n==================================================================\n"
+                "\n====================================================================================================\n"
                 "=Model Context Lenght                   = %5d tokens\n"
                 "=Prompt Tokens Processed                = %5d tokens\n"
                 "=TTFT(Time to First Token)              = %8.2f ms\n"
                 "=TOPT(Time Per Output Token             = %8.2f ms\n"
                 "=E2E Latency (End-to-End Latency)       = %8.2f s\n"
                 "=E2E TPS (End-to-End Tokens Per Second) = %8.2f tokens/s\n"
-                "==================================================================\n",
+                "====================================================================================================\n",
                 n_ctx, n_prompt_tokens_processed, t_prompt_processing, t_gen, e2e_latency, n_decoded / e2e_latency);
 
         if (n_draft_total > 0) {
@@ -5925,14 +5925,13 @@ int main(int argc, char ** argv) {
     };
     SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
+    auto model_meta = ctx_server.model_meta();
+    info_printer.print_model_info(model_meta);
+    info_printer.print_process_memory_info();
     LOG_INF("%s: server is listening on %s - starting the main loop\n", __func__,
             is_sock ? string_format("unix://%s",    params.hostname.c_str()).c_str() :
                       string_format("http://%s:%d", params.hostname.c_str(), params.port).c_str());
 
-
-    auto model_meta = ctx_server.model_meta();
-    info_printer.print_model_info(model_meta);
-    info_printer.print_process_memory_info();
     // this call blocks the main thread until queue_tasks.terminate() is called
     ctx_server.queue_tasks.start_loop();
 

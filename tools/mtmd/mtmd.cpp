@@ -188,8 +188,12 @@ struct mtmd_context {
         if (!ctx_v && !ctx_a) {
             throw std::runtime_error(string_format("Failed to load CLIP model from %s\n", mmproj_fname));
         }
+
         if (clip_is_hmm(ctx_v)) {
-            hm_vision = new HoumoVision();
+            if (clip_is_qwen2vl(ctx_v))
+                hm_vision = new HoumoQwenVision();
+            if (clip_is_minicpmv(ctx_v))
+                hm_vision = new HoumoMinicpmVision();
             if (!hm_vision->init(mmproj_fname))
                 throw std::runtime_error(string_format(
                     "Failed to load HMM model from %s\n", mmproj_fname));

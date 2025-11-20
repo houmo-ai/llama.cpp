@@ -2636,8 +2636,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"-v", "--verbose", "--log-verbose"},
         "Set verbosity level to infinity (i.e. log all messages, useful for debugging)",
         [](common_params & params) {
-            params.verbosity = INT_MAX;
-            common_log_set_verbosity_thold(INT_MAX);
+            params.verbosity = 1;
+            common_log_set_verbosity_thold(1);
         }
     ));
     add_opt(common_arg(

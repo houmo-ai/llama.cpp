@@ -9,43 +9,46 @@
 class HoumoVision {
   public:
     HoumoVision() = default;
-    ~HoumoVision();
-    bool init(const std::string &model_path);
-    bool encoding(const std::vector<float> &input_data,
-                  std::vector<float> &output_data);
-    int32_t image_width() const;
-    int32_t image_height() const;
-    int32_t image_channels() const;
+    virtual ~HoumoVision() = default;
+    virtual bool init(const std::string &model_path) = 0;
+    virtual bool encoding(const std::vector<float> &input_data,
+                          std::vector<float> &output_data) = 0;
+    int16_t image_width() const  {
+        return image_width_;
+    }
+    int16_t image_height() const {
+        return image_height_;
+    }
+    int16_t image_channels() const {
+        return image_channels_;
+    }
+    int16_t batch_size() const {
+        return batch_size_;
+    }
     bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output);
 
-  private:
+  protected:
     bool houmo_load(const std::string &file_name);
     void rgb_to_yuv444(const std::vector<float> &bgr_data, int width,
                        int height, std::vector<uint8_t> &yuv444sp_data);
     void read_tensor_to_buffer(const std::string &file_name, size_t offset,
                                size_t size, std::vector<char> &buffer);
     void rgb_to_nchw(const std::vector<float> &rgb_data);
-    /**
-     * 分辨率固定，则index和mask可以预计算
-     * 否则需要根据分辨率计算
-     * porting from clip.cpp
-     */
-    void set_windows_attention();
-
-    void resize_and_pad_image(const clip_image_u8 &image,
-                                       clip_image_u8 &dst,
-                                       const clip_image_size &target_resolution,
-                                       std::array<uint8_t, 3> pad_color);
+    void resize_and_pad_image(const clip_image_u8 &image, clip_image_u8 &dst,
+                              const clip_image_size &target_resolution,
+                              std::array<uint8_t, 3> pad_color);
     bool bicubic_resize(const clip_image_u8 &img, clip_image_u8 &dst,
                         int target_width, int target_height);
     bool area_resize(const clip_image_u8 &img, clip_image_u8 &dst,
                      int target_width, int target_height);
     void fill_header(std::vector<float> &output_data);
 
-  private:
+  protected:
     std::shared_ptr<tcim::Module> module_;
     std::map<std::string, tcim::Tensor> input_tensors_;
     std::vector<std::string> output_names_;
+    std::string kPatchSizeKey = "clip.vision.patch_size";
+    std::vector<float> nchw_data_;
     uint16_t image_width_ = 644;
     uint16_t image_height_ = 364;
     uint16_t image_channels_ = 3;
@@ -53,6 +56,35 @@ class HoumoVision {
     uint16_t image_frames_ = 2;
     std::string input_name_;
     uint32_t patch_size_ = 14;
-    std::vector<float> nchw_data_;
-    std::string kPatchSizeKey = "clip.vision.patch_size";
+};
+/*
+*@ 基于qwen架构的视觉模型, 支持Qwen2.5vl, Qwen3vl模型
+*/
+class HoumoQwenVision : public HoumoVision {
+  public:
+    HoumoQwenVision(): HoumoVision() {}
+    ~HoumoQwenVision() override = default;
+    virtual bool init(const std::string &model_path) override;
+    virtual bool encoding(const std::vector<float> &input_data,
+                          std::vector<float> &output_data) override;
+
+  private:
+    /**
+     * 分辨率固定，则index和mask可以预计算
+     * 否则需要根据分辨率计算
+     * porting from clip.cpp
+     */
+    void set_windows_attention();
+};
+
+/*
+*@ 基于minicpm的视觉模型, 支持M50模型
+*/
+class HoumoMinicpmVision : public HoumoVision {
+  public:
+    HoumoMinicpmVision() : HoumoVision() {}
+    ~HoumoMinicpmVision() override = default;
+    virtual bool init(const std::string &model_path) override;
+    virtual bool encoding(const std::vector<float> &input_data,
+                          std::vector<float> &output_data) override;
 };
