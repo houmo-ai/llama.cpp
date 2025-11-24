@@ -356,9 +356,36 @@ bool parse_cpu_mask(const std::string & mask, bool (&boolmask)[GGML_MAX_N_THREAD
 }
 
 void common_init() {
-    llama_log_set([](ggml_log_level level, const char * text, void * /*user_data*/) {
-        if (LOG_DEFAULT_LLAMA <= common_log_verbosity_thold) {
+    llama_log_set([](const ggml_log_level level, const char * text, void * /*user_data*/) {
+        // by default, only print info, warning and error logs
+        if (level < GGML_LOG_LEVEL_INFO && common_log_verbosity_thold == LOG_DEFAULT_LLAMA) {
+            return;
+        }
+        if ( common_log_verbosity_thold >= 0) {
+            if (level < common_log_verbosity_thold) {
+                return;
+            }
             common_log_add(common_log_main(), level, "%s", text);
+        } else {
+            if (level <= std::abs(common_log_verbosity_thold)) {
+                return;
+            }
+            switch (level) {
+                case GGML_LOG_LEVEL_NONE:
+                case GGML_LOG_LEVEL_CONT:
+                case GGML_LOG_LEVEL_DEBUG:
+                    spdlog::default_logger()->debug(text);
+                    break;
+                case GGML_LOG_LEVEL_INFO:
+                    spdlog::default_logger()->info(text);
+                    break;
+                case GGML_LOG_LEVEL_WARN:
+                    spdlog::default_logger()->warn(text);
+                    break;
+                case GGML_LOG_LEVEL_ERROR:
+                    spdlog::default_logger()->error(text);
+                    break;
+            }
         }
     }, NULL);
 

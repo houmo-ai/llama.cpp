@@ -58,7 +58,11 @@ rund=false  # 是否后台运行
 # 设置xh2特定环境变量
 if [ "$xh_type" == "xh2" ]; then
     export TCIM_BACKEND=Xh2HalBackend
-    export TCIM_RUNTIME_PATH=$(pwd)
+    if [ -f /usr/local/houmo-sdk/hal/lib/libhal_xh2a.so ]; then
+        export TCIM_RUNTIME_PATH=$(dirname /usr/local/houmo-sdk/hal/lib/libhal_xh2a.so)
+    else
+        export TCIM_RUNTIME_PATH=$(pwd)
+    fi
 fi
 
 # 构建模型列表（修复关联数组赋值错误）

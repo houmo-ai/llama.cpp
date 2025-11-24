@@ -24,9 +24,6 @@
 #include <array>
 #include <functional>
 
-// TODO: allow to pass callback from user code
-struct clip_logger_state g_logger_state = {GGML_LOG_LEVEL_CONT, clip_log_callback_default, NULL};
-
 enum ffn_op_type {
     FFN_GELU,
     FFN_GELU_ERF,
@@ -3312,7 +3309,7 @@ struct clip_model_loader {
                 LOG_WRN("%s: WARNING: flash attention not supported by %s, memory usage will increase\n", __func__, ggml_backend_name(ctx_clip.backend));
                 LOG_WRN("%s: op params: \n", __func__);
                 static auto print_shape = [](const char * fn, const char * name, ggml_tensor * t) {
-                    LOG_WRN("%s:   %s: type = %s, ne = [%d %d %d %d], nb = [%d %d %d %d]\n", fn,
+                    LOG_WRN("%s:   %s: type = %s, ne = [%" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 "], nb = [%" PRIuPTR " %" PRIuPTR " %" PRIuPTR " %" PRIuPTR "]\n", fn,
                             name, ggml_type_name(t->type),
                             t->ne[0], t->ne[1], t->ne[2], t->ne[3],
                             t->nb[0], t->nb[1], t->nb[2], t->nb[3]);
@@ -3350,7 +3347,7 @@ struct clip_model_loader {
                 LOG_WRN("%s:          the performance will be suboptimal                      \n", __func__);
                 LOG_WRN("%s:          list of unsupported ops (backend=%s):\n", __func__, ggml_backend_name(ctx_clip.backend));
                 for (const auto & op : unsupported_ops) {
-                    LOG_WRN("%s: %16s: type = %s, ne = [%d %d %d %d]\n", __func__,
+                    LOG_WRN("%s: %16s: type = %s, ne = [%" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 "]\n", __func__,
                             ggml_op_name(op.op->op),
                             ggml_type_name(op.op->type),
                             op.op->ne[0], op.op->ne[1], op.op->ne[2], op.op->ne[3]);
@@ -3511,7 +3508,6 @@ struct clip_model_loader {
 };
 
 struct clip_init_result clip_init(const char * fname, struct clip_context_params ctx_params) {
-    g_logger_state.verbosity_thold = ctx_params.verbosity;
     clip_ctx * ctx_vision = nullptr;
     clip_ctx * ctx_audio = nullptr;
 

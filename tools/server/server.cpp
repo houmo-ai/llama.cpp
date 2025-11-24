@@ -9,7 +9,7 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "mtmd.h"
-
+#include "info_printer.h"
 // mime type for sending response
 #define MIMETYPE_JSON "application/json; charset=utf-8"
 
@@ -1718,6 +1718,9 @@ struct server_slot {
 
     double t_prompt_processing; // ms
     double t_token_generation;  // ms
+    double t_image_processing;  // ms
+    int32_t n_images = 0;
+    int32_t n_image_tokens = 0;
 
     std::function<void(int)> callback_on_release;
 
@@ -1987,20 +1990,53 @@ struct server_slot {
     }
 
     void print_timings() const {
-        const double t_prompt        =       t_prompt_processing / n_prompt_tokens_processed;
-        const double n_prompt_second = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
+        double t_prompt        =       t_prompt_processing / n_prompt_tokens_processed;
+        double n_prompt_second = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
 
         const double t_gen        =       t_token_generation / n_decoded;
         const double n_gen_second = 1e3 / t_token_generation * n_decoded;
-
+        const double percent_used = (n_prompt_tokens_processed + n_decoded) / (double)n_ctx * 100.0;
+        if (n_image_tokens > 0 && n_images > 0) {
+            double t_prompt_processing_no_image = t_prompt_processing - t_image_processing;
+            t_prompt        = t_prompt_processing_no_image / n_prompt_tokens_processed;
+            n_prompt_second = 1e3 / t_prompt_processing_no_image * n_prompt_tokens_processed;
+            SLT_INF(*this,
+                    "\n==================================================================\n"
+                    "=image   eval time = %10.2f ms / %5d images (%8.2f ms per image, %9d tokens per image)\n"
+                    "=prefill eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
+                    "=decoder eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
+                    "=total   eval time = %10.2f ms\n"
+                    "=context %d/%d (%f%%)\n"
+                    "==================================================================\n",
+                    t_image_processing, n_images, t_image_processing / n_images, n_image_tokens / n_images,
+                    t_prompt_processing_no_image, n_prompt_tokens_processed, t_prompt, n_prompt_second,
+                    t_token_generation, n_decoded, t_gen, n_gen_second,
+                    t_prompt_processing + t_token_generation,
+                    (n_prompt_tokens_processed + n_decoded), n_ctx, percent_used);
+        } else {
+            SLT_INF(*this,
+                    "\n==================================================================\n"
+                    "=prefill eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
+                    "=decoder eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
+                    "=total   eval time = %10.2f ms\n"
+                    "=context %d/%d (%f%%)\n"
+                    "==================================================================\n",
+                    t_prompt_processing, n_prompt_tokens_processed, t_prompt, n_prompt_second,
+                    t_token_generation, n_decoded, t_gen, n_gen_second,
+                    t_prompt_processing + t_token_generation,
+                    (n_prompt_tokens_processed + n_decoded), n_ctx, percent_used);
+        }
+        double e2e_latency = (t_prompt_processing + t_token_generation)/1000;
         SLT_INF(*this,
-                "\n"
-                "prompt eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
-                "       eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
-                "      total time = %10.2f ms / %5d tokens\n",
-                t_prompt_processing, n_prompt_tokens_processed, t_prompt, n_prompt_second,
-                t_token_generation, n_decoded, t_gen, n_gen_second,
-                t_prompt_processing + t_token_generation, n_prompt_tokens_processed + n_decoded);
+                "\n==================================================================\n"
+                "=Model Context Lenght                   = %5d tokens\n"
+                "=Prompt Tokens Processed                = %5d tokens\n"
+                "=TTFT(Time to First Token)              = %8.2f ms\n"
+                "=TOPT(Time Per Output Token             = %8.2f ms\n"
+                "=E2E Latency (End-to-End Latency)       = %8.2f s\n"
+                "=E2E TPS (End-to-End Tokens Per Second) = %8.2f tokens/s\n"
+                "==================================================================\n",
+                n_ctx, n_prompt_tokens_processed, t_prompt_processing, t_gen, e2e_latency, n_decoded / e2e_latency);
 
         if (n_draft_total > 0) {
             const float draft_ratio = (float) n_draft_accepted / n_draft_total;
@@ -3691,7 +3727,9 @@ struct server_context {
                     if (slot.state == SLOT_STATE_STARTED) {
                         slot.t_start_process_prompt = ggml_time_us();
                         slot.t_start_generation = 0;
-
+                        slot.t_image_processing = 0.0f;
+                        slot.n_image_tokens = 0;
+                        slot.n_images = 0;
                         slot.state = SLOT_STATE_PROCESSING_PROMPT;
 
                         SLT_INF(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
@@ -3967,6 +4005,7 @@ struct server_context {
                     if (slot.prompt.n_tokens() < slot.task->n_tokens() && input_tokens[slot.prompt.n_tokens()] == LLAMA_TOKEN_NULL) {
                         // process the image
                         size_t n_tokens_out = 0;
+                        time_t t0 = ggml_time_ms();
                         int32_t res = input_tokens.process_chunk(ctx, mctx, slot.prompt.n_tokens(), slot.prompt.tokens.pos_next(), slot.id, n_tokens_out);
                         if (res != 0) {
                             SLT_ERR(slot, "failed to process image, res = %d\n", res);
@@ -3974,7 +4013,9 @@ struct server_context {
                             slot.release();
                             continue;
                         }
-
+                        slot.t_image_processing += ggml_time_ms() - t0;
+                        slot.n_image_tokens += n_tokens_out;
+                        slot.n_images++;
                         slot.n_prompt_tokens_processed += n_tokens_out;
 
                         // add the image chunk to cache
@@ -4551,12 +4592,12 @@ int main(int argc, char ** argv) {
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_SERVER)) {
         return 1;
     }
-
+    InfoPrinter info_printer;
     // TODO: should we have a separate n_parallel parameter for the server?
     //       https://github.com/ggml-org/llama.cpp/pull/16736#discussion_r2483763177
     // TODO: this is a common configuration that is suitable for most local use cases
     //       however, overriding the parameters is a bit confusing - figure out something more intuitive
-    
+
     //FIXME: commented by guoxing.xu
     // if (params.n_parallel == 1 && params.kv_unified == false && !params.has_speculative()) {
     //     LOG_WRN("%s: setting n_parallel = 4 and kv_unified = true (add -kvu to disable this)\n", __func__);
@@ -5844,7 +5885,7 @@ int main(int argc, char ** argv) {
     LOG_INF("%s: model loaded\n", __func__);
 
     // print sample chat example to make it clear which template is used
-    LOG_INF("%s: chat template, chat_template: %s, example_format: '%s'\n", __func__,
+    LOG_DBG("%s: chat template, chat_template: %s, example_format: '%s'\n", __func__,
         common_chat_templates_source(ctx_server.chat_templates.get()),
         common_chat_format_example(ctx_server.chat_templates.get(), ctx_server.params_base.use_jinja, ctx_server.params_base.default_template_kwargs).c_str());
 
@@ -5874,11 +5915,14 @@ int main(int argc, char ** argv) {
     };
     SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
-
     LOG_INF("%s: server is listening on %s - starting the main loop\n", __func__,
             is_sock ? string_format("unix://%s",    params.hostname.c_str()).c_str() :
                       string_format("http://%s:%d", params.hostname.c_str(), params.port).c_str());
 
+
+    auto model_meta = ctx_server.model_meta();
+    info_printer.print_model_info(model_meta);
+    info_printer.print_process_memory_info();
     // this call blocks the main thread until queue_tasks.terminate() is called
     ctx_server.queue_tasks.start_loop();
 
