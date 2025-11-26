@@ -4434,6 +4434,12 @@ struct server_context {
     json model_meta() const {
         char model_desc[128] = {0};
         llama_model_desc(model, model_desc, sizeof(model_desc)/sizeof(char));
+        int32_t vision_width = 0;
+        int32_t vision_height = 0;
+        if (mctx) {
+            vision_width = mtmd_vision_width(mctx);
+            vision_height = mtmd_vision_height(mctx);
+        }
         return json {
             {"vocab_type",   llama_vocab_type       (vocab)},
             {"n_vocab",      llama_vocab_n_tokens   (vocab)},
@@ -4443,6 +4449,10 @@ struct server_context {
             {"n_params",     llama_model_n_params   (model)},
             {"n_ctx_train",  llama_model_n_ctx_train(model)},
             {"size",         llama_model_size       (model)},
+            {"allow_image", mctx ? mtmd_support_vision(mctx) : false},
+            {"allow_audio", mctx ? mtmd_support_audio (mctx) : false},
+            {"vision_width", vision_width},
+            {"vision_height", vision_height},
             {"model_desc",   model_desc},
         };
     }

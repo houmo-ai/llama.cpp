@@ -220,6 +220,10 @@ MTMD_API float * mtmd_get_output_embd(mtmd_context * ctx);
 // test function, to be used in test-mtmd-c-api.c
 MTMD_API mtmd_input_chunks * mtmd_test_create_input_chunks(void);
 
+// add by guoxing.xu only for HOUMO
+MTMD_API int32_t mtmd_vision_height(const mtmd_context * ctx);
+MTMD_API int32_t mtmd_vision_width(const mtmd_context * ctx);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

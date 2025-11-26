@@ -1148,3 +1148,19 @@ mtmd_input_chunks * mtmd_test_create_input_chunks() {
 
     return chunks;
 }
+
+int32_t mtmd_vision_height(const mtmd_context *ctx) {
+    if (ctx->hm_vision) {
+        return ctx->hm_vision->image_height();
+    } else {
+        return 0;
+    }
+}
+
+int32_t mtmd_vision_width(const mtmd_context *ctx) {
+    if (ctx->hm_vision) {
+        return ctx->hm_vision->image_width();
+    } else {
+        return 0;
+    }
+}

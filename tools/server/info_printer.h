@@ -114,7 +114,7 @@ class InfoPrinter {
                 "=VmHWM: %lu MB\n"
                 "=VmRSS: %lu MB\n"
                 "=UpTime: %f seconds\n",
-                virtual_size, virtual_peak, working_set_size, working_set_peak,
+                virtual_peak, virtual_size , working_set_peak, working_set_size,
                 elapsed_seconds());
     }
     void print_model_info(json &model_meta) {
@@ -123,10 +123,18 @@ class InfoPrinter {
             "=n_ctx_length = %5d\n"
             "=n_layer      = %5d\n"
             "=n_embd       = %5d\n"
+            "=allow_image  = %5d\n"
+            "=allow_audio  = %5d\n"
+            "=vision_width = %5d\n"
+            "=vision_height= %5d\n"
             "=model_desc   = %s\n",
             json_value(model_meta, "n_ctx_length", 0),
             json_value(model_meta, "n_layer", 0),
             json_value(model_meta, "n_embd", 0),
+            json_value(model_meta, "allow_image", false),
+            json_value(model_meta, "allow_audio", false),
+            json_value(model_meta, "vision_width", 0),
+            json_value(model_meta, "vision_height", 0),
             json_value(model_meta, "model_desc", std::string("")).c_str());
     }
 };
