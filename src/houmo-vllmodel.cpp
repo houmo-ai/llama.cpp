@@ -24,20 +24,6 @@ bool HouMoVLLModel::houmo_load(const std::string &file_name) {
     };
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
     fill_parameters(ctx);
-    // 从gguf中读取visual 宽度&高度
-    auto key_id = gguf_find_key(ctx, kVisualHeight.c_str());
-    if (key_id > 0) {
-        auto visual_height_ = gguf_get_val_u32(ctx, key_id);
-        ny = visual_height_ / (14 * 2);
-        LLAMA_LOG_INFO("visual height is %d, ny is %d\n", visual_height_, ny);
-    }
-    key_id = gguf_find_key(ctx, kVisualWidth.c_str());
-    if (key_id > 0) {
-        auto visual_width_ = gguf_get_val_u32(ctx, key_id);
-        nx = visual_width_ / (14 * 2);
-        LLAMA_LOG_INFO("visual width is %d, nx is %d\n", visual_width_, nx);
-    }
-
     LLAMA_LOG_INFO("HouMoVLLModel after gguf_init_from_file\n");
     // 从gguf文件中加载hmmodels
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
@@ -55,6 +41,13 @@ bool HouMoVLLModel::houmo_load(const std::string &file_name) {
             "model_layers_" + std::to_string(idx) + "_self_attn_kcache_input";
         std::string v_cache_name =
             "model_layers_" + std::to_string(idx) + "_self_attn_vcache_input";
+        dummy_tensor_names.push_back(k_cache_name);
+        dummy_tensor_names.push_back(v_cache_name);
+        // FIXME: M30 QWENVL 的命名和M50 不一致, 量化后续会统一后移除
+        k_cache_name = "model_language_model_layers_" +
+                        std::to_string(idx) + "_self_attn_kcache_input";
+        v_cache_name = "model_language_model_layers_" +
+                        std::to_string(idx) + "_self_attn_vcache_input";
         dummy_tensor_names.push_back(k_cache_name);
         dummy_tensor_names.push_back(v_cache_name);
     }
@@ -140,13 +133,26 @@ void HouMoVLLModel::houmo_init(int seq_max) {
     size = std::max(size, n_decode_batch_);
     LLAMA_LOG_INFO("seq_max = %d, n_prefill_batch_ = %d, n_decode_batch_ = %d\n",
                    seq_max, n_prefill_batch_, n_decode_batch_);
+    std::string kv_prefix_name = "model_layers_";
+    // FIXME: M30 QWENVL 的命名和M50 不一致, 量化后续会统一后移除
+    for (size_t i = 0; i < prefill_model_->GetInputNum(); i++) {
+        auto input_name = prefill_model_->GetInputName(i);
+        if (input_name.find("kcache") != std::string::npos ||
+            input_name.find("vcache") != std::string::npos) {
+            // 判断是否有model_language_model_layers_ 前缀
+            if (input_name.find("model_language_model_layers_") != std::string::npos) {
+                kv_prefix_name = "model_language_model_layers_";
+            }
+            break;
+        }
+    }
     for (int i = 0; i < size; i++) {
         kv_cache_item item;
         item.seq_id = i;
         for (int idx = 0; idx < n_blocks_; idx++) {
-            std::string k_cache_name = "model_layers_" + std::to_string(idx) +
+            std::string k_cache_name = kv_prefix_name + std::to_string(idx) +
                                        "_self_attn_kcache_input";
-            std::string v_cache_name = "model_layers_" + std::to_string(idx) +
+            std::string v_cache_name = kv_prefix_name + std::to_string(idx) +
                                        "_self_attn_vcache_input";
             item.names.push_back(k_cache_name);
             item.names.push_back(v_cache_name);

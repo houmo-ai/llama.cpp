@@ -45,7 +45,4 @@ class HouMoVLLModel : public HouMoLLModel::Impl {
     std::vector<int32_t> offset_embedding_ids_;
     std::vector<std::vector<int32_t>> prefill_input_lengths_;
     std::vector<int32_t> position_indexs_;
-
-    const std::string kVisualHeight = "hmm.vit.height";
-    const std::string kVisualWidth = "hmm.vit.width";
 };
