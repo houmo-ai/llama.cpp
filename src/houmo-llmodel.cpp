@@ -30,7 +30,6 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
         tcim::DevManager::Create(device_ids, "Xh2HalBackend");
     auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
 #else
-    // FIXME: xh1 还未发布v2.5.0, 还不支持DevManager
     auto wm = tcim::Module::WeightManager::CreateWeightManager(device_ids[0]);
 #endif
     auto option_decoder = tcim::Module::Option(wm);
@@ -454,13 +453,8 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                         k_cache_history_sum_name + "_batch" + std::to_string(i);
                 }
             }
-#ifdef XH2_ENABLED
             auto kcache = decode_model_->GetDevInput(k_cache_name);
             auto vcache = decode_model_->GetDevInput(v_cache_name);
-#else
-            auto kcache = decode_model_->GetInput(k_cache_name);
-            auto vcache = decode_model_->GetInput(v_cache_name);
-#endif
             if (n_decode_batch_ > 1 || size == 1) {
                 item.tensors.push_back(kcache);
                 item.tensors.push_back(vcache);
@@ -471,13 +465,8 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
             }
 
             if (has_history_sum_) {
-#ifdef XH2_ENABLED
                 auto kcache_history_sum =
                     decode_model_->GetDevInput(k_cache_history_sum_name);
-#else
-                auto kcache_history_sum =
-                    decode_model_->GetInput(k_cache_history_sum_name);
-#endif
                 if (n_decode_batch_ > 1) {
                     item.tensors.push_back(kcache_history_sum);
                 } else {

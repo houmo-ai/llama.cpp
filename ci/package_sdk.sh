@@ -35,10 +35,13 @@ case "$PLATFORM" in
 esac
 
 # SDK URLs
-xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/08/14/0200/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_${ARCH}-2.4.2.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.5.0/2025/10/28/1950/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.5.0.tar.gz"
-xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/09/19/0200/ubuntu2004/houmo_drv_xh1_v2.4.3_ubuntu2004_${ARCH}.run"
-xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.5.0/2025/10/28/1950/ubuntu2004/houmo_drv_xh2_v0.5.0_ubuntu2004_${ARCH}.run"
+xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.5.0/2025/11/18/2140/ubuntu1804/houmo_tcim_runtime_xh1_ubuntu1804_x86_64-2.5.0.tar.gz"
+xh1_dadao_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.5.0/2025/11/18/2140/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_aarch64-2.5.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.6.0/2025/12/04/2104/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.6.0.tar.gz"
+xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.5.0/2025/11/21/2224/ubuntu2004/houmo_drv_xh1_v2.5.0_ubuntu2004_${ARCH}.run"
+xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.6.0/2025/12/04/2104/ubuntu1804/houmo_drv_xh2_v0.6.0_ubuntu1804_x86_64.run"
+xh2_sw_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.6.0/2025/12/04/2104/ubuntu2004/houmo_drv_xh2_v0.6.0_ubuntu2004_aarch64.run"
+
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/hlaw_ollama.${ARCH}"
 # 下载文件并检查是否成功
 download_file() {
@@ -154,13 +157,16 @@ package_llama() {
     cp build/common/libcommon.a "$release_dir/lib/"
     cp third_party/houmo/lib/*.so* "$release_dir/lib/" || true
     cp /opt/libtorch/$ARCH/libtorch/lib/*.so* "$release_dir/lib/" || true
+    cp version.cfg "$release_dir/version.txt"
 
-    # 复制系统库(如果存在)
-    if [[ -f /lib/x86_64-linux-gnu/libstdc++.so.6 && "$ARCH" == "x86_64" ]]; then
-        cp /lib/x86_64-linux-gnu/libstdc++.so.6 "$release_dir/lib/"
-    fi
-    if [[ -f /usr/aarch64-linux-gnu/lib/libstdc++.so.6 && "$ARCH" == "aarch64" ]]; then
-        cp /usr/aarch64-linux-gnu/lib/libstdc++.so.6 "$release_dir/lib/"
+    if [ "$PLATFORM" == "xh1" ]; then
+        # 复制系统库(如果存在), xh2 已经不存在这个问题
+        if [[ -f /lib/x86_64-linux-gnu/libstdc++.so.6 && "$ARCH" == "x86_64" ]]; then
+            cp /lib/x86_64-linux-gnu/libstdc++.so.6 "$release_dir/lib/"
+        fi
+        if [[ -f /usr/aarch64-linux-gnu/lib/libstdc++.so.6 && "$ARCH" == "aarch64" ]]; then
+            cp /usr/aarch64-linux-gnu/lib/libstdc++.so.6 "$release_dir/lib/"
+        fi
     fi
 
     # 仅复制llama-server可执行文件供测试使用
@@ -216,10 +222,18 @@ main() {
     # 确定使用的SDK URL
     case "$PLATFORM" in
         xh1)
-            deploy_dadao_sdk "$xh1_dadao_sdk_url" "$xh1_sw_sdk_url"
+            if [ "$ARCH" == "aarch64" ]; then
+                deploy_dadao_sdk "$xh1_dadao_sdk_url_aarch64" "$xh1_sw_sdk_url"
+            else
+                deploy_dadao_sdk "$xh1_dadao_sdk_url" "$xh1_sw_sdk_url"
+            fi
             ;;
         xh2)
-            deploy_dadao_sdk "$xh2_dadao_sdk_url" "$xh2_sw_sdk_url"
+            if [ "$ARCH" == "aarch64" ]; then
+                deploy_dadao_sdk "$xh2_dadao_sdk_url" "$xh2_sw_sdk_url_aarch64"
+            else
+                deploy_dadao_sdk "$xh2_dadao_sdk_url" "$xh2_sw_sdk_url"
+            fi
             ;;
     esac
 

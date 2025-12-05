@@ -9,10 +9,10 @@ PLATFORM=$1
 ARCH=x86_64
 
 # SDK URLs
-xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/08/14/0200/windows11/houmo_tcim_runtime_xh1_windows11_x86_64-2.4.2.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.5.0/2025/10/28/1950/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-0.5.0.tar.gz"
-xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_v2.4.0/2025/09/19/0200/windows11/houmo_drv_xh1_v2.4.3_windows11_x86_64.zip"
-xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.5.0/2025/10/28/1950/windows11/houmo_drv_xh2_v0.5.0_windows11_x86_64.zip"
+xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.5.0/2025/11/18/2140/windows11/houmo_tcim_runtime_xh1_windows11_x86_64-2.5.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.6.0/2025/12/04/2104/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-0.6.0.tar.gz"
+xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.5.0/2025/11/21/2224/windows11/houmo_drv_xh1_v2.5.0_windows11_x86_64.zip"
+xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.6.0/2025/12/04/2104/windows11/houmo_drv_xh2_v0.6.0_windows11_x86_64.zip"
 
 # libtorch 下载地址
 libtorch_url="http://10.10.1.53:8082/artifactory/thirdparty_local/libtorch/torch.zip"
