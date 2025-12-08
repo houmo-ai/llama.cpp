@@ -142,7 +142,7 @@ add_library(llama
 # )
 
 target_include_directories(llama PRIVATE .)
-target_include_directories(llama PUBLIC ../include ../common ${HOUMO_TCIM_RUNTIME_PATH}/include)
+target_include_directories(llama PUBLIC ../include ../vendor ../common ${HOUMO_TCIM_RUNTIME_PATH}/include)
 target_compile_features   (llama PUBLIC cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml  ${TORCH_LIBRARIES} ${HOUMO_RUNTIME_LIBRARIES})

@@ -12,6 +12,84 @@
 #include <regex>
 #include <string>
 #include <vector>
+#include "nlohmann/json.hpp"
+using json = nlohmann::ordered_json;
+
+bool HouMoLLModel::Impl::create_infer_engine(bool prefill,
+                                             const std::vector<char> &raw_data,
+                                             bool load_from_file) {
+    auto device_ids = parse_deviceids();
+#ifdef XH2_ENABLED
+    bool is_dual_card = false;
+    if (!load_from_file) {
+        std::string model_info =
+            tcim::Module::LoadModelInfo(raw_data.data(), raw_data.size());
+        json model_info_json = json::parse(model_info);
+        if (model_info_json.contains("input")) {
+            auto input = model_info_json["input"];
+            for (size_t i = 0; i < input.size(); i++) {
+                if (input[i].contains("sub_tensors") &&
+                    input[i]["sub_tensors"] > 1) {
+                    is_dual_card = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (device_ids.size() == 1 && is_dual_card) {
+        // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
+        device_ids = {0, 1};
+        LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
+    } else if (device_ids.size() == 2 && !is_dual_card) {
+        // 模型是单卡模型，需要将device_ids 缩小为{0}
+        device_ids = {0};
+        LLAMA_LOG_WARN("single card model, set device_ids size is 2, need to "
+                       "resize device_ids to {0}");
+    }
+    tcim::DevManager dev_manager =
+        tcim::DevManager::Create(device_ids, "Xh2HalBackend");
+#else
+    tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids);
+#endif
+    auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
+    auto option_decoder = tcim::Module::Option(wm);
+    tcim::Status status;
+
+    if (prefill) {
+        std::vector<std::string> dummy_tensor_names;
+        // 防止更高效使用内存，这个将prefill 设置为dummy_tensor_names
+        for (int idx = 0; idx < n_blocks_; idx++) {
+            std::string k_cache_name = "model_layers_" + std::to_string(idx) +
+                                       "_self_attn_kcache_input";
+            std::string v_cache_name = "model_layers_" + std::to_string(idx) +
+                                       "_self_attn_vcache_input";
+            dummy_tensor_names.push_back(k_cache_name);
+            dummy_tensor_names.push_back(v_cache_name);
+        }
+        prefill_model_ = std::make_shared<tcim::Module>();
+        auto option = tcim::Module::Option(wm);
+        option.SetDummyTensors(dummy_tensor_names);
+        if (!load_from_file)
+            status = prefill_model_->LoadModel(raw_data.data(), raw_data.size(),
+                                              option);
+        else
+            status = prefill_model_->LoadModel("./hmms/prefill.hmm", option);
+    } else {
+        decode_model_ = std::make_shared<tcim::Module>();
+        auto option = tcim::Module::Option(wm);
+        if (!load_from_file)
+            status = decode_model_->LoadModel(raw_data.data(), raw_data.size(),
+                                              option);
+        else
+            status = decode_model_->LoadModel("./hmms/decoder.hmm", option);
+    }
+    if (status != tcim::Status::OK) {
+        LLAMA_LOG_ERROR("LoadModel failed: prefill == %d\n", prefill);
+        return false;
+    }
+    return true;
+}
+
 bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
     struct ggml_context *ctx_data = NULL;
     struct gguf_init_params params = {
@@ -24,40 +102,18 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
     parser_gguf_parameters(ctx);
     LLAMA_LOG_INFO("HouMoLLModel::houmo_load after gguf_init_from_file\n");
     // 从gguf文件中加载hmmodels
-    auto device_ids = parse_deviceids();
-#ifdef XH2_ENABLED
-    tcim::DevManager dev_manager =
-        tcim::DevManager::Create(device_ids, "Xh2HalBackend");
-    auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
-#else
-    auto wm = tcim::Module::WeightManager::CreateWeightManager(device_ids[0]);
-#endif
-    auto option_decoder = tcim::Module::Option(wm);
-
-    std::vector<std::string> dummy_tensor_names;
-    // 防止更高效使用内存，这个将prefill 设置为dummy_tensor_names
-    for (int idx = 0; idx < n_blocks_; idx++) {
-        std::string k_cache_name =
-            "model_layers_" + std::to_string(idx) + "_self_attn_kcache_input";
-        std::string v_cache_name =
-            "model_layers_" + std::to_string(idx) + "_self_attn_vcache_input";
-        dummy_tensor_names.push_back(k_cache_name);
-        dummy_tensor_names.push_back(v_cache_name);
-    }
-    auto option_prefill = tcim::Module::Option(wm);
-    option_prefill.SetDummyTensors(dummy_tensor_names);
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
     const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
 
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
+    bool load_result = true;
     for (int i = 0; i < n_tensors; ++i) {
         const char *name = gguf_get_tensor_name(ctx, i);
         LLAMA_LOG_INFO("tensor[%d]: name = %s\n", i, name);
         const size_t size = gguf_get_tensor_size(ctx, i);
         size_t offset =
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
-        tcim::Status status;
         if (strncmp(name, "quant_embedding.pt", strlen("quant_embedding.pt")) ==
             0) {
             std::vector<char> buffer(size);
@@ -79,35 +135,30 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
 
         } else if (std::regex_match(name, kPrefillPattern)) {
             // load prefill
-            prefill_model_ = std::make_shared<tcim::Module>();
             if (!load_from_file) {
                 std::vector<char> buffer(size);
                 read_tensor_to_buffer(file_name, offset, size, buffer);
-                status = prefill_model_->LoadModel(buffer.data(), size,
-                                                   option_prefill);
+                load_result = create_infer_engine(true, buffer, false);
             } else {
-                LLAMA_LOG_INFO("load %s\n", "./hmms/prefill.hmm");
-                status = prefill_model_->LoadModel("./hmms/prefill.hmm",
-                                                   option_prefill);
+                std::vector<char> buffer(0);
+                load_result = create_infer_engine(true, buffer, true);
             }
-            if (status != tcim::Status::OK) {
+            if (!load_result) {
                 LLAMA_LOG_ERROR("%s: failed to load prefill.hmm\n", __func__);
                 return false;
             }
             LLAMA_LOG_INFO("%s: succeed to load prefill.hmm\n", __func__);
         } else if (std::regex_match(name, kDecodePattern)) {
             // load decode
-            decode_model_ = std::make_shared<tcim::Module>();
             if (!load_from_file) {
                 std::vector<char> buffer(size);
                 read_tensor_to_buffer(file_name, offset, size, buffer);
-                status = decode_model_->LoadModel(buffer.data(), size,
-                                                  option_decoder);
+                load_result = create_infer_engine(false, buffer, false);
             } else {
-                status = decode_model_->LoadModel("./hmms/decoder.hmm",
-                                                  option_decoder);
+                std::vector<char> buffer(0);
+                load_result = create_infer_engine(false, buffer, true);
             }
-            if (status != tcim::Status::OK) {
+            if (!load_result) {
                 LLAMA_LOG_ERROR("%s: failed to load decode.hmm\n", __func__);
                 return false;
             }

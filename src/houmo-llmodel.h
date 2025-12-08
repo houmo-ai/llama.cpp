@@ -157,6 +157,9 @@ protected:
    */
   void set_input_data(tcim::Tensor &tensor, std::vector<int32_t> &int32_vec,
                       size_t offset = 0);
+private:
+  bool create_infer_engine(bool prefill, const std::vector<char> &raw_data, bool load_from_file = false);
+
 protected:
   int prefill_length_ = 256;
   int context_length_ = 4096;
