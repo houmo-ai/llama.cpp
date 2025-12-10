@@ -28,7 +28,7 @@ from typing import (
 )
 from itertools import chain
 from transformers import AutoConfig
-
+import struct
 
 if "NO_LOCAL_GGUF" not in os.environ:
     sys.path.insert(1, str(Path(__file__).parent / "gguf-py"))
@@ -627,43 +627,105 @@ class TextModel(ModelBase):
         if "model_arch" not in cls.__dict__:
             raise TypeError(f"Missing property 'model_arch' for {cls.__name__!r}")
 
+    # def conver_embedding(self, embedding_path: Path):
+    #     # 加载嵌入权重
+    #     torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
+    #     embedding_weight = torch.load(
+    #         embedding_path, map_location="cpu", weights_only=True
+    #     )
+    #     if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
+    #         embedding_weight = embedding_weight["weight"]
+    #     if isinstance(embedding_weight, torch.nn.Embedding):
+    #         embedding_weight = embedding_weight.weight
+    #     print(f"embedding_weight.dtype: {embedding_weight.dtype}")
+    #     if (
+    #         embedding_weight.dtype == torch.int16
+    #         or embedding_weight.dtype == torch.int64
+    #         or embedding_weight.dtype == torch.int32
+    #     ):
+    #         print(
+    #             "M30：convert weight to int16 for minimal memory usage. convert to float32 when using in C++"
+    #         )
+    #         embedding_weight = embedding_weight.to(torch.int16)
+    #     elif embedding_weight.dtype == torch.float16:
+    #         print("M50: keep embedding weight as float16")
+    #     elif embedding_weight.dtype == torch.bfloat16:
+    #         embedding_weight = embedding_weight.to(torch.float16)
+    #         print("M50: convert embedding weight to float16")
+    #     else:
+    #         print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
+    #         embedding_weight = embedding_weight.to(torch.float32)
+    #     # 创建空模块并手动注册参数
+    #     m = nn.Module()
+    #     # par = nn.Parameter(embedding_weight)  # 注册为可训练参数
+    #     m.register_buffer("0", embedding_weight)  # 参数名称为"0"
+    #     scripted_model = torch.jit.script(m)
+    #     out_path = self.dir_model / "cpp_quant_embedding.pt"
+    #     scripted_model.save(out_path)
+    #     if isinstance(scripted_model, torch.jit.ScriptModule):
+    #         print("****scripted_model is torch.jit.ScriptModule")
+    #     return out_path
     def conver_embedding(self, embedding_path: Path):
-        # 加载嵌入权重
+        # ===================== 1. 保留原权重加载+类型转换逻辑 =====================
         torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
         embedding_weight = torch.load(
             embedding_path, map_location="cpu", weights_only=True
         )
+
+        # 提取核心权重张量
         if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
             embedding_weight = embedding_weight["weight"]
         if isinstance(embedding_weight, torch.nn.Embedding):
             embedding_weight = embedding_weight.weight
+
         print(f"embedding_weight.dtype: {embedding_weight.dtype}")
-        if (
-            embedding_weight.dtype == torch.int16
-            or embedding_weight.dtype == torch.int64
-            or embedding_weight.dtype == torch.int32
-        ):
+
+        # 数据类型转换（保留int16，仅调整日志注释）
+        dtype_mapping = {torch.int16: 0, torch.float16: 1}  # 类型标识与C++端对齐
+        final_dtype = None
+        if embedding_weight.dtype == torch.int16:
             print(
-                "M30：convert weight to int16 for minimal memory usage. convert to float32 when using in C++"
+                "M30：keep weight as int16 for minimal memory usage"  # 移除转float32注释
             )
             embedding_weight = embedding_weight.to(torch.int16)
+            final_dtype = torch.int16
         elif embedding_weight.dtype == torch.float16:
+            embedding_weight = embedding_weight.to(torch.float16)
             print("M50: keep embedding weight as float16")
+            final_dtype = torch.float16
         elif embedding_weight.dtype == torch.bfloat16:
             embedding_weight = embedding_weight.to(torch.float16)
             print("M50: convert embedding weight to float16")
+            final_dtype = torch.float16
         else:
-            print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
-            embedding_weight = embedding_weight.to(torch.float32)
-        # 创建空模块并手动注册参数
-        m = nn.Module()
-        # par = nn.Parameter(embedding_weight)  # 注册为可训练参数
-        m.register_buffer("0", embedding_weight)  # 参数名称为"0"
-        scripted_model = torch.jit.script(m)
-        out_path = self.dir_model / "cpp_quant_embedding.pt"
-        scripted_model.save(out_path)
-        if isinstance(scripted_model, torch.jit.ScriptModule):
-            print("****scripted_model is torch.jit.ScriptModule")
+            print(f"both M30 & M50 not suuport ")
+            sys.exit(1)
+
+        # ===================== 2. 导出为通用二进制格式（保留原类型） =====================
+        out_path = self.dir_model / "cpp_quant_embedding.bin"
+        embedding_weight = embedding_weight.contiguous()  # 确保内存连续
+
+        with open(out_path, "wb") as f:
+            # 写入维度数
+            dims = embedding_weight.shape
+            f.write(struct.pack("I", len(dims)))  # I=uint32
+
+            # 写入各维度值
+            for d in dims:
+                f.write(struct.pack("I", d))
+
+            # 写入数据类型标识
+            f.write(struct.pack("I", dtype_mapping[final_dtype]))
+
+            # 写入原始数据（保留原类型，不转换）
+            if final_dtype == torch.int16:
+                f.write(embedding_weight.numpy().astype(np.int16).tobytes())
+            elif final_dtype == torch.float16:
+                f.write(embedding_weight.numpy().astype(np.float16).tobytes())
+
+        print(f"Embedding weight exported to binary file: {out_path}")
+        print(f"Binary info - shape: {dims}, dtype: {final_dtype}")
+
         return out_path
 
     def get_tensors(self) -> Iterator[Tuple[str, torch.Tensor]]:

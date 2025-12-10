@@ -69,30 +69,10 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
     int32_t current_length = 0;
     // 先计算embedding.
-    torch::Tensor inputs_embeds;
-    auto opts = torch::TensorOptions().dtype(torch::kInt);
-    auto inp = torch::from_blob(tokens.data(), {int64_t(tokens.size())}, opts);
-    try {
-        inputs_embeds = embedding_->forward(inp);
-    } catch (const c10::Error &e) {
-        LLAMA_LOG_ERROR("%s: error embedding_forward\n", __func__);
-        reset_position_ids(seq_id);
-        return -1;
-    }
+    embedding_layer_->get_embedding_batch(
+        tokens, input_embedding_ids_[seq_id].data() +
+                       offset_embedding_ids_[seq_id] * n_embd_);
 
-    // 1. 将半精度浮点转换为int16_t
-    if (xh1_) {
-        auto inputs_embeds_int16 = inputs_embeds.to(torch::kInt16);
-        inputs_embeds_int16 = inputs_embeds_int16.view({-1, n_embd_});
-        // 缓存输入
-        memcpy(input_embedding_ids_[seq_id].data() + offset_embedding_ids_[seq_id] * n_embd_,
-            inputs_embeds_int16.data_ptr<int16_t>(),
-            tokens.size() * n_embd_ * sizeof(int16_t));
-    } else {
-        memcpy(input_embedding_ids_[seq_id].data() + offset_embedding_ids_[seq_id] * n_embd_,
-            inputs_embeds.data_ptr<at::Half>(),
-            tokens.size() * n_embd_ * sizeof(at::Half));
-    }
     offset_embedding_ids_[seq_id] += tokens.size();
     prefill_input_lengths_[seq_id].push_back(tokens.size());
     // 计算所有embeddings

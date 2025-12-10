@@ -35,11 +35,12 @@ add_library(llama
             unicode-data.cpp
             unicode.cpp
             unicode.h
-	        houmo-llmodel.cpp
+	    houmo-llmodel.cpp
             houmo-gptoss.cpp
             houmo-qwenllm.cpp
             houmo-vllmodel.cpp
             houmo-embed.cpp
+            houmo-embedding_layer.cpp
             models/apertus.cpp
             models/arcee.cpp
             models/arctic.cpp

@@ -14,6 +14,7 @@
 #include <regex>
 #include <string>
 #include <vector>
+#include <sstream>
 #include "nlohmann/json.hpp"
 using json = nlohmann::ordered_json;
 
@@ -118,25 +119,10 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
         const size_t size = gguf_get_tensor_size(ctx, i);
         size_t offset =
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
-        if (strncmp(name, "quant_embedding.pt", strlen("quant_embedding.pt")) ==
-            0) {
-            std::vector<char> buffer(size);
-            read_tensor_to_buffer(file_name, offset, size, buffer);
-            torch::Tensor input;
-            try {
-                torch::load(input, buffer.data(), size);
-                if (!input.is_floating_point()) {
-                    input = input.to(torch::kFloat32);
-                }
-                input = input.detach();
-                input = input.view({-1, n_embd_});
-                embedding_ = torch::nn::Embedding::from_pretrained(input);
-            } catch (const c10::Error &e) {
-                LLAMA_LOG_ERROR("%s: failed to load quant_embedding.pt %s\n",
-                                __func__, e.what());
-                return false;
-            }
-
+        if (strncmp(name, "quant_embedding.bin",
+                           strlen("quant_embedding.bin")) == 0) {
+            embedding_layer_ =
+                std::make_shared<HoumoEmbeddingLayer>(file_name, offset, size);
         } else if (std::regex_match(name, kPrefillPattern)) {
             // load prefill
             if (!load_from_file) {
@@ -175,12 +161,10 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
     }
     ggml_free(ctx_data);
     gguf_free(ctx);
-    if (embedding_.get() == nullptr || prefill_model_ == nullptr ||
-        decode_model_ == nullptr) {
-        LLAMA_LOG_ERROR("%s: failed to load model. load embedding=%d,load "
+    if (prefill_model_ == nullptr || decode_model_ == nullptr) {
+        LLAMA_LOG_ERROR("%s: failed to load model. load "
                         "prefill=%d,load decode=%d\n",
-                        __func__, (embedding_.get() == nullptr),
-                        (prefill_model_ == nullptr),
+                        __func__, (prefill_model_ == nullptr),
                         (decode_model_ == nullptr));
         return false;
     }
@@ -572,26 +556,12 @@ int HouMoLLModel::Impl::set_input_for_decode(std::vector<llama_token> &batches,
             batch_id = 0;
         input_ids[batch_id] = batches[i];
     }
-
-    torch::Tensor input_emd;
-    auto decode_opts = torch::TensorOptions().dtype(torch::kInt);
-    auto decode_inp = torch::from_blob(
-        input_ids.data(), {int64_t(input_ids.size())}, decode_opts);
-    try {
-        input_emd = embedding_->forward(decode_inp);
-    } catch (const c10::Error &e) {
-        std::cerr << "error loading the model\n" << e.what_without_backtrace();
-        return -1;
-    }
     auto input_data = decode_input_map_.at(decode_model_->GetInputName(0));
-    // 填充数据
-    if (xh1_) {
-        input_emd = input_emd.to(torch::kInt16);
-        input_data.Buffer().CopyFromHost(input_emd.data_ptr<int16_t>(),
-                                         input_data.MemSize());
-    } else {
-        input_data.Buffer().CopyFromHost(input_emd.data_ptr<at::Half>(),
-                                         input_data.MemSize());
+    try {
+         embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
+    } catch (...) {
+        std::cerr << "error get embedding batch\n";
+        return -1;
     }
     decode_model_->SetInput(decode_model_->GetInputName(0), input_data);
     return 0;

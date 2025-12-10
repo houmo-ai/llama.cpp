@@ -22,7 +22,7 @@ class HouMoGPTOSS : public HouMoLLModel::Impl {
     int set_attentions_for_decode(std::vector<int> &seq_ids);
     std::vector<float> generate_mask(int batch_size, int query_length,
                                      int past_seq_length, bool is_local);
-    std::vector<int16_t> generate_mask_f16(int batch_size, int query_length,
+    std::vector<uint16_t> generate_mask_f16(int batch_size, int query_length,
                                            int past_seq_length, bool is_local);
 
   private:

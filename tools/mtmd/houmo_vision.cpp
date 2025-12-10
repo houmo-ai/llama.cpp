@@ -7,7 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <numeric>
-#include <torch/torch.h>
+#include <array>
 #pragma pack(push, 1)
 struct CompactHeader {
     int16_t magic;      // 16位标识
@@ -17,33 +17,6 @@ struct CompactHeader {
 };
 #pragma pack(pop)
 
-static torch::Tensor floatArrayToFloat16Tensor(std::vector<float> &float_data) {
-    // 1. 将float数组转换为float32张量
-    torch::Tensor tensor =
-        torch::from_blob(float_data.data(),           // 数据指针
-                         uint64_t{float_data.size()}, // 张量形状
-                         torch::kFloat32              // 原始数据类型
-        );
-
-    // 2. 转换为float16（half）类型
-    torch::Tensor float16_tensor = tensor.to(torch::kHalf);
-    return float16_tensor;
-}
-
-static torch::Tensor
-Int16ArrayToFloat16Tensor(std::vector<int16_t> &int16_data) {
-    // 1. 将float数组转换为float32张量
-    torch::Tensor tensor =
-        torch::from_blob(int16_data.data(),           // 数据指针
-                         uint64_t{int16_data.size()}, // 张量形状
-                         torch::kInt16                // 原始数据类型
-        );
-
-    // 2. 转换为float16（half）类型
-    torch::Tensor float16_tensor = tensor.to(torch::kHalf);
-
-    return float16_tensor;
-}
 void HoumoVision::read_tensor_to_buffer(const std::string &file_name,
                                         size_t offset, size_t size,
                                         std::vector<char> &buffer) {
@@ -487,9 +460,12 @@ void HoumoQwenVision::set_windows_attention() {
     }
     auto &mask_tensor = input_tensors_[module_->GetInputName(2)];
     if (mask_tensor.Info().DataType() == tcim::DataType::FLOAT16) {
-        auto mask_fp16 = Int16ArrayToFloat16Tensor(mask);
-        mask_tensor.Buffer().CopyFromHost(mask_fp16.data_ptr<at::Half>(),
-                                          mask_tensor.MemSize());
+        // 创建int16的tcim tensor
+        tcim::Tensor mask_int16 = tcim::Tensor::CreateHostTensor(
+            mask_tensor.Info().AsContiguous().AsType(tcim::DataType::INT16));
+        // 拷贝数据到int16的tcim tensor
+        mask_int16.Buffer().CopyFromHost(mask.data(), mask_int16.MemSize());
+        mask_int16.CastTo(mask_tensor);
     } else {
         mask_tensor.Buffer().CopyFromHost(mask.data(), mask_tensor.MemSize());
     }
@@ -551,9 +527,11 @@ bool HoumoQwenVision::encoding(const std::vector<float> &input_data,
     } else {
         rgb_to_nchw(input_data);
         // xh2  input_data 转成float16
-        auto input_fp16_tensor = floatArrayToFloat16Tensor(nchw_data_);
-        input_tensor.Buffer().CopyFromHost(
-            input_fp16_tensor.data_ptr<at::Half>(), input_tensor.MemSize());
+        tcim::Tensor input_fp32_tensor = tcim::Tensor::CreateHostTensor(
+            input_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+        input_fp32_tensor.Buffer().CopyFromHost(nchw_data_.data(),
+                                                input_fp32_tensor.MemSize());
+        input_fp32_tensor.CastTo(input_tensor);
     }
     // fixed resolution. index & mask already set in init()
     module_->SetInput(input_name_, input_tensor);

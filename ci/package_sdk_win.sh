@@ -14,8 +14,6 @@ xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2
 xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.5.0/2025/11/21/2224/windows11/houmo_drv_xh1_v2.5.0_windows11_x86_64.zip"
 xh2_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.6.0/2025/12/10/2033/windows11/houmo_drv_xh2_v0.6.0_windows11_x86_64.zip"
 
-# libtorch 下载地址
-libtorch_url="http://10.10.1.53:8082/artifactory/thirdparty_local/libtorch/torch.zip"
 # 下载文件并检查是否成功
 download_file() {
     local url=$1
@@ -180,7 +178,6 @@ main() {
     esac
 
     echo "Deployed Dadao SDK and System SDK for $PLATFORM/$ARCH."
-    deploy_torch
 
     # 编译和打包
     build_llama

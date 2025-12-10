@@ -1,37 +1,14 @@
 #include "houmo-gptoss.h"
+#include <cstring>
 #include "llama-impl.h"
 static constexpr int ALIGN_NUM = 16; // 对齐值
 static constexpr uint16_t F16_NEG_INF_UINT = 0xFC00; // 二进制：1111110000000000
-static constexpr int16_t F16_NEG_INF = static_cast<int16_t>(F16_NEG_INF_UINT); 
-static torch::Tensor
-Int16ArrayToFloat16Tensor(std::vector<int16_t> &int16_data) {
-    // 1. 从int16数组创建CPU张量（保留原始数据，不拷贝）
-    // 注意：from_blob不接管内存，需保证int16_data生命周期长于张量
-    torch::Tensor int16_tensor = torch::from_blob(
-        int16_data.data(),                  // 数据指针
-        {static_cast<long long>(int16_data.size())}, // 一维形状
-        torch::TensorOptions().dtype(torch::kInt16)  // 显式指定原始类型
-    ).to(torch::kCPU); // 确保在CPU上处理（避免设备不匹配）
 
-    // 2. 核心：将非0值置为-65504.0f（float16负无穷），0值保留
-    // 步骤2.1：创建掩码（非0值为True，0值为False）
-    torch::Tensor non_zero_mask = int16_tensor != 0;
-    
-    // 步骤2.2：初始化float16张量（全0）
-    torch::Tensor float16_tensor = torch::zeros_like(int16_tensor, torch::kHalf);
-    
-    // 步骤2.3：将非0区域填充为float16负无穷（-65504.0f）
-    // 注意：torch::kHalf的负无穷需用torch::tensor(-65504.0f).to(torch::kHalf)构造
-    auto neg_inf_val = torch::tensor(-65504.0f, torch::kHalf);
-    float16_tensor.masked_fill_(non_zero_mask, neg_inf_val);
-
-    return float16_tensor;
-}
 // 辅助函数：内存对齐
 inline int aligned(int size, int align) {
     return ((size + align - 1) / align) * align;
 }
-std::vector<int16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
+std::vector<uint16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
                                                     int query_length,
                                                     int past_seq_length,
                                                     bool is_local) {
@@ -51,7 +28,7 @@ std::vector<int16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
 
     // ========== 3. 初始化掩码 ==========
     const int mask_size = batch_size * 1 * fill_length * width;
-    std::vector<int16_t> mask_tensor(mask_size, F16_NEG_INF);
+    std::vector<uint16_t> mask_tensor(mask_size, F16_NEG_INF_UINT);
 
     // ========== 4. 核心填充逻辑 ==========
     for (int b = 0; b < batch_size; ++b) {
@@ -60,7 +37,7 @@ std::vector<int16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
             if (is_local) {
                 // 1. 计算当前token的绝对位置
                 int current_abs_pos = old_cache_length + i;
-                
+
                 // 2. 正确计算滑窗的起始点（核心修正）
                 // 也就是：当前位置 减去 窗口大小，再加1（因为是闭区间或长度计算），并防止为负
                 int start_idx = std::max(0, current_abs_pos - sliding_window_ + 1);
@@ -157,29 +134,9 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             std::vector<llama_token> round_tokens(first, last);
             input_ids = round_tokens;
         }
-        torch::Tensor inputs_embeds;
-        auto opts = torch::TensorOptions().dtype(torch::kInt);
-        auto inp = torch::from_blob(input_ids.data(),
-                                    {int64_t(input_ids.size())}, opts);
-        try {
-            inputs_embeds = embedding_->forward(inp);
-        } catch (const c10::Error &e) {
-            std::cerr << "error loading the model\n"
-                      << e.what_without_backtrace();
-            prefill_tokens_.resize(0);
-            return -1;
-        }
-        auto effective_length = input_ids.size();
-        auto pad_embeds = torch::zeros(
-            {(int64_t)(prefill_length_ - effective_length), n_embd_},
-            inputs_embeds.dtype());
-        auto padded_embeds = torch::cat({inputs_embeds, pad_embeds});
-        auto input_data =
-            prefill_input_map_.at(prefill_model_->GetInputName(0));
-        padded_embeds = padded_embeds.view(input_data.Info().Shape());
-
-        input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<at::Half>(),
-                                            input_data.MemSize());
+        auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
+        memset(input_data.Data(), 0, input_data.MemSize());
+        embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
 
         auto prefill_valid_length =
             prefill_input_map_.at(prefill_model_->GetInputName(1));
@@ -202,7 +159,6 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     decode_valid_length_[seq_id] = input_echo_len;
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
-    assert(prefill_output_data.Info().DataType() == tcim::DataType::INT16);
     // 转浮点
     auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
     prefill_output_data.CastTo(prefill_output_float);
@@ -217,7 +173,7 @@ int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
     LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
                     seq_ids.size(), batches.size());
     if (seq_ids.size() > (size_t)n_decode_batch_) {
-        std::cerr << "seq_ids.size() > n_decode_batch_ not supported\n";
+        LLAMA_LOG_ERROR("%s: seq_ids.size() > n_decode_batch_ not supported\n", __func__);
         return -1;
     }
     // 1. 构造input_tokens
@@ -269,47 +225,42 @@ int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
 }
 
 int HouMoGPTOSS::set_attentions_for_prefill(int current_length, int valid_length) {
-    // set local   
+    // set local
     std::string name = prefill_model_->GetInputName(3);
     auto& local_mask_input_data = prefill_input_map_.at(name);
     auto prefill_local_mask_host = generate_mask_f16(1, current_length, valid_length, true);
-    auto tensor = Int16ArrayToFloat16Tensor(prefill_local_mask_host);
     LLAMA_LOG_DEBUG("%s: current_length = %d, valid_length = %d, "
                    "prefill_local_mask_host.size() = %zu\n",
                    __func__, current_length, valid_length,
                    prefill_local_mask_host.size());
     local_mask_input_data.Buffer().CopyFromHost(
-        tensor.data_ptr<at::Half>() , local_mask_input_data.MemSize());
+        prefill_local_mask_host.data(), local_mask_input_data.MemSize());
     prefill_model_->SetInput(name, local_mask_input_data);
-    
+
     // set global attention mask
     name = prefill_model_->GetInputName(4);
     auto &global_mask_input_data = prefill_input_map_.at(name);
     auto prefill_global_mask_host = generate_mask_f16(1, current_length, valid_length, false);
-    auto tensor_global = Int16ArrayToFloat16Tensor(prefill_global_mask_host);
-    global_mask_input_data.Buffer().CopyFromHost(tensor_global.data_ptr<at::Half>(), global_mask_input_data.MemSize());
+    global_mask_input_data.Buffer().CopyFromHost(prefill_global_mask_host.data(), global_mask_input_data.MemSize());
     prefill_model_->SetInput(name, global_mask_input_data);
     return 0;
 }
 int HouMoGPTOSS::set_attentions_for_decode(std::vector<int> &seq_ids) {
     int current_length = 1;
     for (auto seq_id : seq_ids) {
-    
         int valid_length = decode_valid_length_[seq_ids[0]];
         // set local attention mask
         std::string name = local_attention_names_[seq_id];
         auto& local_mask_input_data = decode_input_map_.at(name);
         auto local_mask_host = generate_mask_f16(1, current_length, valid_length, true);
-        auto tensor_local = Int16ArrayToFloat16Tensor(local_mask_host);
-        local_mask_input_data.Buffer().CopyFromHost(tensor_local.data_ptr<at::Half>(), local_mask_input_data.MemSize());
+        local_mask_input_data.Buffer().CopyFromHost(local_mask_host.data(), local_mask_input_data.MemSize());
         decode_model_->SetInput(name, local_mask_input_data);
 
         // set global attention mask
         name = global_attention_names_[seq_id];
         auto& global_mask_input_data = decode_input_map_.at(name);
         auto global_mask_host = generate_mask_f16(1, current_length, valid_length, false);
-        auto tensor_global = Int16ArrayToFloat16Tensor(global_mask_host);
-        global_mask_input_data.Buffer().CopyFromHost(tensor_global.data_ptr<at::Half>(), global_mask_input_data.MemSize());
+        global_mask_input_data.Buffer().CopyFromHost(global_mask_host.data(), global_mask_input_data.MemSize());
         decode_model_->SetInput(name, global_mask_input_data);
     }
 

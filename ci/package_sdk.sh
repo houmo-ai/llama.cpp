@@ -128,7 +128,6 @@ package_llama() {
     cp build/bin/*.so "$release_dir/lib/" || true
     cp build/common/libcommon.a "$release_dir/lib/"
     cp third_party/houmo/lib/*.so* "$release_dir/lib/" || true
-    cp /opt/libtorch/$ARCH/libtorch/lib/*.so* "$release_dir/lib/" || true
     cp version.cfg "$release_dir/version.txt"
 
     if [[ -f /lib/x86_64-linux-gnu/libstdc++.so.6 && "$ARCH" == "x86_64" ]]; then

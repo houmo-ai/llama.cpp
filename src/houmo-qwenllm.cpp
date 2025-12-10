@@ -1,4 +1,5 @@
 #include "houmo-qwenllm.h"
+#include <cstring>
 #include "llama-impl.h"
 
 void HoumoQwenLLM::houmo_init(int seq_max) {
@@ -57,35 +58,9 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             std::vector<llama_token> round_tokens(first, last);
             input_ids = round_tokens;
         }
-        torch::Tensor inputs_embeds;
-        auto opts = torch::TensorOptions().dtype(torch::kInt);
-        auto inp = torch::from_blob(input_ids.data(),
-                                    {int64_t(input_ids.size())}, opts);
-        try {
-            inputs_embeds = embedding_->forward(inp);
-        } catch (const c10::Error &e) {
-            std::cerr << "error loading the model\n"
-                      << e.what_without_backtrace();
-            prefill_tokens_.resize(0);
-            return -1;
-        }
-        auto effective_length = input_ids.size();
-        auto pad_embeds = torch::zeros(
-            {(int64_t)(prefill_length_ - effective_length), n_embd_},
-            inputs_embeds.dtype());
-        auto padded_embeds = torch::cat({inputs_embeds, pad_embeds});
-        auto input_data =
-            prefill_input_map_.at(prefill_model_->GetInputName(0));
-        padded_embeds = padded_embeds.view(input_data.Info().Shape());
-        // 区分一下更健壮的写法
-        if (xh1_) {
-            padded_embeds = padded_embeds.to(torch::kInt16);
-            input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<int16_t>(),
-                                             input_data.MemSize());
-        } else {
-            input_data.Buffer().CopyFromHost(padded_embeds.data_ptr<at::Half>(),
-                                             input_data.MemSize());
-        }
+        auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
+        memset(input_data.Data(), 0, input_data.MemSize());
+        embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
 
         auto prefill_valid_length =
             prefill_input_map_.at(prefill_model_->GetInputName(1));
@@ -119,7 +94,6 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     decode_valid_length_[seq_id] = input_echo_len;
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
-    assert(prefill_output_data.Info().DataType() == tcim::DataType::INT16);
     // 转浮点
     auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
     prefill_output_data.CastTo(prefill_output_float);
@@ -134,7 +108,7 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
     LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
                     seq_ids.size(), batches.size());
     if (seq_ids.size() > (size_t)n_decode_batch_) {
-        std::cerr << "seq_ids.size() > n_decode_batch_ not supported\n";
+        LLAMA_LOG_ERROR("%s: seq_ids.size() > n_decode_batch_ not supported\n", __func__);
         return -1;
     }
     // 1. 构造input_tokens

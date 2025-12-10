@@ -160,10 +160,6 @@ while [[ "$#" -gt 0 ]]; do
                 exit 1
             fi
             model_name=$2
-            if echo "$model_name" | grep -q "2card"; then
-                echo "2card....."
-                export HOUMO_DEVICE_ID=0,1
-            fi
             if [ -f $model_name ]; then
                 model_path=$model_name
             else

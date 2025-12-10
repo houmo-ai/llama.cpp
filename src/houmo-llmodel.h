@@ -3,10 +3,10 @@
 #include <map>
 #include <string>
 #include <vector>
-
+#include <cmath>
 #include "llama-batch.h"
 #include "tcim/tcim_runtime.h"
-#include "torch/torch.h"
+#include "houmo-embedding_layer.h"
 // houmo llm model defination
 //
 // @guoxing.xu 2025-05-23
@@ -179,7 +179,7 @@ protected:
   int n_decode_batch_ = 1;
   bool has_history_sum_ = false;
 
-  torch::nn::Embedding embedding_ = nullptr;
+  std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_;
   std::shared_ptr<tcim::Module> prefill_model_;
   std::shared_ptr<tcim::Module> decode_model_;
   tcim::Module::WeightManager wm_;

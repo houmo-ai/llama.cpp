@@ -17,12 +17,6 @@ find_library(HOUMO_RUNTIME_LIBRARIES NAMES tcim_runtime_lite PATHS ${HOUMO_TCIM_
 message("LLAMA HOUMO_TCIM_LIBRARY=${HOUMO_RUNTIME_LIBRARIES}")
 set(HOUMO_RUNTIME_LIBRARIES ${HOUMO_RUNTIME_LIBRARIES})
 
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-    set(CMAKE_PREFIX_PATH /opt/libtorch/aarch64/libtorch/ third_party/libtorch)
-else ()
-    set(CMAKE_PREFIX_PATH /opt/libtorch/x86_64/libtorch/ third_party/libtorch)
-endif ()
-find_package(Torch REQUIRED)
 
 message("LLAMA TORCH_LIBRARIES=${TORCH_LIBRARIES}")
 option(ENABLE_HOUMO_XH2 "Enable HOUMO XH2" OFF)
