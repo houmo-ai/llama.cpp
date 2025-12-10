@@ -182,6 +182,7 @@ protected:
   torch::nn::Embedding embedding_ = nullptr;
   std::shared_ptr<tcim::Module> prefill_model_;
   std::shared_ptr<tcim::Module> decode_model_;
+  tcim::Module::WeightManager wm_;
 
   std::map<std::string, tcim::Tensor> prefill_input_map_;
   std::map<std::string, tcim::Tensor> prefill_output_map_;

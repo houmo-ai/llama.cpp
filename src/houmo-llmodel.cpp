@@ -20,41 +20,43 @@ using json = nlohmann::ordered_json;
 bool HouMoLLModel::Impl::create_infer_engine(bool prefill,
                                              const std::vector<char> &raw_data,
                                              bool load_from_file) {
-    auto device_ids = parse_deviceids();
+    if (wm_.GetInitStatus() != tcim::Status::OK) {
+        auto device_ids = parse_deviceids();
 #ifdef XH2_ENABLED
-    bool is_dual_card = false;
-    if (!load_from_file) {
-        std::string model_info =
-            tcim::Module::LoadModelInfo(raw_data.data(), raw_data.size());
-        json model_info_json = json::parse(model_info);
-        if (model_info_json.contains("input")) {
-            auto input = model_info_json["input"];
-            for (size_t i = 0; i < input.size(); i++) {
-                if (input[i].contains("sub_tensors") &&
-                    input[i]["sub_tensors"] > 1) {
-                    is_dual_card = true;
-                    break;
+        bool is_dual_card = false;
+        if (!load_from_file) {
+            std::string model_info =
+                tcim::Module::LoadModelInfo(raw_data.data(), raw_data.size());
+            json model_info_json = json::parse(model_info);
+            if (model_info_json.contains("input")) {
+                auto input = model_info_json["input"];
+                for (size_t i = 0; i < input.size(); i++) {
+                    if (input[i].contains("sub_tensors") &&
+                        input[i]["sub_tensors"] > 1) {
+                        is_dual_card = true;
+                        break;
+                    }
                 }
             }
         }
-    }
-    if (device_ids.size() == 1 && is_dual_card) {
-        // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
-        device_ids = {0, 1};
-        LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
-    } else if (device_ids.size() == 2 && !is_dual_card) {
-        // 模型是单卡模型，需要将device_ids 缩小为{0}
-        device_ids = {0};
-        LLAMA_LOG_WARN("single card model, set device_ids size is 2, need to "
-                       "resize device_ids to {0}");
-    }
-    tcim::DevManager dev_manager =
-        tcim::DevManager::Create(device_ids, "Xh2HalBackend");
+        if (device_ids.size() == 1 && is_dual_card) {
+            // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
+            device_ids = {0, 1};
+            LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
+        } else if (device_ids.size() == 2 && !is_dual_card) {
+            // 模型是单卡模型，需要将device_ids 缩小为{0}
+            device_ids = {0};
+            LLAMA_LOG_WARN(
+                "single card model, set device_ids size is 2, need to "
+                "resize device_ids to {0}");
+        }
+        tcim::DevManager dev_manager =
+            tcim::DevManager::Create(device_ids, "Xh2HalBackend");
 #else
-    tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids);
+        tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids);
 #endif
-    auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
-    auto option_decoder = tcim::Module::Option(wm);
+        wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
+    }
     tcim::Status status;
 
     if (prefill) {
@@ -69,7 +71,7 @@ bool HouMoLLModel::Impl::create_infer_engine(bool prefill,
             dummy_tensor_names.push_back(v_cache_name);
         }
         prefill_model_ = std::make_shared<tcim::Module>();
-        auto option = tcim::Module::Option(wm);
+        auto option = tcim::Module::Option(wm_);
         option.SetDummyTensors(dummy_tensor_names);
         if (!load_from_file)
             status = prefill_model_->LoadModel(raw_data.data(), raw_data.size(),
@@ -78,7 +80,7 @@ bool HouMoLLModel::Impl::create_infer_engine(bool prefill,
             status = prefill_model_->LoadModel("./hmms/prefill.hmm", option);
     } else {
         decode_model_ = std::make_shared<tcim::Module>();
-        auto option = tcim::Module::Option(wm);
+        auto option = tcim::Module::Option(wm_);
         if (!load_from_file)
             status = decode_model_->LoadModel(raw_data.data(), raw_data.size(),
                                               option);
