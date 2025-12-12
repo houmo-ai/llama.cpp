@@ -4,6 +4,7 @@
 #include "llama.h"
 #include "ggml.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>

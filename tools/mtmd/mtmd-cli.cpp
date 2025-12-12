@@ -135,8 +135,8 @@ struct mtmd_cli_context {
         mparams.use_gpu          = params.mmproj_use_gpu;
         mparams.print_timings    = true;
         mparams.n_threads        = params.cpuparams.n_threads;
-        mparams.verbosity        = params.verbosity > 0 ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_INFO;
         mparams.flash_attn_type  = params.flash_attn_type;
+        mparams.warmup           = params.warmup;
         mparams.image_min_tokens = params.image_min_tokens;
         mparams.image_max_tokens = params.image_max_tokens;
         ctx_vision.reset(mtmd_init_from_file(clip_path, model, mparams));
@@ -277,6 +277,7 @@ int main(int argc, char ** argv) {
     }
 
     common_init();
+    mtmd_helper_log_set(common_log_default_callback, nullptr);
 
     if (params.mmproj.path.empty()) {
         show_additional_info(argc, argv);
@@ -285,7 +286,7 @@ int main(int argc, char ** argv) {
     }
 
     mtmd_cli_context ctx(params);
-    LOG("%s: loading model: %s\n", __func__, params.model.path.c_str());
+    LOG_INF("%s: loading model: %s\n", __func__, params.model.path.c_str());
 
     bool is_single_turn = !params.prompt.empty() && !params.image.empty();
 
@@ -308,6 +309,9 @@ int main(int argc, char ** argv) {
     }
 
     if (g_is_interrupted) return 130;
+
+    LOG_WRN("WARN: This is an experimental CLI for testing multimodal capability.\n");
+    LOG_WRN("      For normal use cases, please use the standard llama-cli\n");
 
     if (is_single_turn) {
         g_is_generating = true;
@@ -348,11 +352,11 @@ int main(int argc, char ** argv) {
         while (!g_is_interrupted) {
             g_is_generating = false;
             LOG("\n> ");
-            console::set_display(console::user_input);
+            console::set_display(DISPLAY_TYPE_USER_INPUT);
             std::string line;
             console::readline(line, false);
             if (g_is_interrupted) break;
-            console::set_display(console::reset);
+            console::set_display(DISPLAY_TYPE_RESET);
             line = string_strip(line);
             if (line.empty()) {
                 continue;

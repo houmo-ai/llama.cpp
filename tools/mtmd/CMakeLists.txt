@@ -23,7 +23,6 @@ target_link_libraries     (mtmd PRIVATE Threads::Threads)
 target_include_directories(mtmd PUBLIC  .)
 target_include_directories(mtmd PRIVATE ../..)
 target_include_directories(mtmd PRIVATE ../../vendor)
-target_include_directories(mtmd PRIVATE ../../common)
 target_compile_features   (mtmd PRIVATE cxx_std_17)
 
 if (BUILD_SHARED_LIBS)

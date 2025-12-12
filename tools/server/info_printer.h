@@ -12,7 +12,7 @@
 #endif
 #include <string>
 #include "nlohmann/json.hpp"
-#include "utils.hpp"
+#include "server-common.h"
 using json = nlohmann::ordered_json;
 
 class InfoPrinter {
@@ -108,12 +108,13 @@ class InfoPrinter {
 #else
 #error "Unsupported platform"
 #endif
-        LOG_INF("\n===========up info==========================\n"
+        LOG_INF("\n===========up info=============================\n"
                 "=VmPeak: %lu MB\n"
                 "=VmSize: %lu MB\n"
                 "=VmHWM: %lu MB\n"
                 "=VmRSS: %lu MB\n"
-                "=UpTime: %f seconds\n",
+                "=UpTime: %f seconds\n"
+                "===========up info=============================\n",
                 virtual_peak, virtual_size , working_set_peak, working_set_size,
                 elapsed_seconds());
     }
@@ -127,7 +128,8 @@ class InfoPrinter {
             "=allow_audio  = %5d\n"
             "=vision_width = %5d\n"
             "=vision_height= %5d\n"
-            "=model_desc   = %s\n",
+            "=model_desc   = %s\n"
+            "==========model info===========================\n",
             json_value(model_meta, "n_ctx_length", 0),
             json_value(model_meta, "n_layer", 0),
             json_value(model_meta, "n_embd", 0),

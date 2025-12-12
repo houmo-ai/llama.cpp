@@ -162,6 +162,8 @@ while [[ "$#" -gt 0 ]]; do
             model_name=$2
             if [ -f $model_name ]; then
                 model_path=$model_name
+            elif [ -d $model_name ]; then
+                model_path=$model_name
             else
                 if [ -z "${models[$model_name]}" ]; then
                     echo "错误: 模型 $model_name 不存在"
@@ -198,50 +200,35 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # 检查模型文件是否存在
-if [ ! -f "$model_path" ]; then
+if [ ! -e "$model_path" ]; then
     echo "错误: 模型文件 $model_path 不存在，请先使用 --download $model_name 下载"
     exit 1
 fi
 
-# 停止可能正在运行的llama-server实例
-echo "检查是否存在正在运行的llama-server进程..."
-if pgrep -f "llama-server -m" > /dev/null; then
-    echo "找到正在运行的llama-server进程，正在停止..."
-    pkill -9 -f "llama-server -m"
-    sleep 3
-    # 等待进程停止
-    while pgrep -f "llama-server -m" > /dev/null; do
-        echo "等待llama-server进程停止..."
-        sleep 1
-    done
-    echo "现有llama-server进程已停止。"
-else
-    echo "未找到正在运行的llama-server进程。"
-fi
-
-if [ $model_name == "Qwen2.5-14b" ]; then
-    if [ -z "${HOUMO_DEVICE_ID:-}" ]; then
-        echo "错误: 环境变量HOUMO_DEVICE_ID未设置. M30需要设置双卡运行14B模型，请设置HOUMO_DEVICE_ID=0,1"
-        exit 1
-    fi
-    # 检查是否包含多个ID（通常用逗号分隔）
-    if [[ "$HOUMO_DEVICE_ID" != *","* ]]; then
-        echo "错误: HOUMO_DEVICE_ID是单个ID，不允许使用单卡配置"
-        exit 1
-    fi
-fi
-
 # 构建启动命令
-launch_cmd=(
-    ./bin/llama-server
-    -m "$model_path"
-    -c 32000
-    --no-context-shift
-    --host 0.0.0.0
-    --jinja
-    --reasoning-format none
-    --log-prefix --log-timestamps
-)
+if [ -d "$model_path" ]; then
+    launch_cmd=(
+        ./bin/llama-server
+        --models-dir "$model_path"
+        -c 32000
+        --no-context-shift
+        --host 0.0.0.0
+        --jinja
+        --reasoning-format none
+        --log-prefix --log-timestamps
+    )
+else
+    launch_cmd=(
+        ./bin/llama-server
+        -m "$model_path"
+        -c 32000
+        --no-context-shift
+        --host 0.0.0.0
+        --jinja
+        --reasoning-format none
+        --log-prefix --log-timestamps
+    )
+fi
 
 # 如果是VL模型，添加mmproj参数
 if [ -n "${mmproj_model_path:-}" ]; then
