@@ -1946,10 +1946,18 @@ struct server_slot {
 
         auto previous_msg = chat_msg;
         SRV_DBG("Parsing chat message: %s\n", generated_text.c_str());
-        auto new_msg = common_chat_parse(
-            generated_text,
-            /* is_partial= */ stop != STOP_TYPE_EOS,
-            task->params.oaicompat_chat_syntax);
+        common_chat_msg new_msg;
+        try {
+            new_msg = common_chat_parse(generated_text, /* is_partial= */ stop != STOP_TYPE_EOS, task->params.oaicompat_chat_syntax);
+        } catch( const nlohmann::json::type_error& ex) {
+            auto valid = utf8_sanitize_safe(generated_text);
+            new_msg = common_chat_parse(generated_text, /* is_partial= */ stop != STOP_TYPE_EOS, task->params.oaicompat_chat_syntax);
+            LOG_ERR("failed to common_chat_parse, valid[%d], exception: %s\n", valid, ex.what());
+        } catch (const std::exception& ex) {
+            LOG_ERR("failed to common_chat_parse, exception: %s\n", ex.what());
+        } catch (...) {
+            LOG_ERR("failed to common_chat_parse, unexpected exception");
+        }
         if (!new_msg.empty()) {
             new_msg.set_tool_call_ids(generated_tool_call_ids, gen_tool_call_id);
             chat_msg = new_msg;
