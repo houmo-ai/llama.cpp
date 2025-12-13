@@ -31,7 +31,7 @@ class HouMoEmbed : public HouMoLLModel::Impl {
     }
 
   private:
-    tcim::Module embed_model_;
+    std::shared_ptr<tcim::Module> embed_model_;
     std::map<std::string, tcim::Tensor> input_map_;
     std::map<std::string, tcim::Tensor> output_map_;
     int n_embed_ = 1024;

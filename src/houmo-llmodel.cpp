@@ -18,7 +18,7 @@
 #include "nlohmann/json.hpp"
 using json = nlohmann::ordered_json;
 
-bool HouMoLLModel::Impl::create_infer_engine(bool prefill,
+std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(bool prefill,
                                              const std::vector<char> &raw_data,
                                              bool load_from_file) {
     if (wm_.GetInitStatus() != tcim::Status::OK) {
@@ -59,6 +59,7 @@ bool HouMoLLModel::Impl::create_infer_engine(bool prefill,
         wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
     }
     tcim::Status status;
+    auto infer_model = std::make_shared<tcim::Module>();
 
     if (prefill) {
         std::vector<std::string> dummy_tensor_names;
@@ -71,28 +72,27 @@ bool HouMoLLModel::Impl::create_infer_engine(bool prefill,
             dummy_tensor_names.push_back(k_cache_name);
             dummy_tensor_names.push_back(v_cache_name);
         }
-        prefill_model_ = std::make_shared<tcim::Module>();
         auto option = tcim::Module::Option(wm_);
         option.SetDummyTensors(dummy_tensor_names);
         if (!load_from_file)
-            status = prefill_model_->LoadModel(raw_data.data(), raw_data.size(),
+            status = infer_model->LoadModel(raw_data.data(), raw_data.size(),
                                               option);
         else
-            status = prefill_model_->LoadModel("./hmms/prefill.hmm", option);
+            status = infer_model->LoadModel("./hmms/prefill.hmm", option);
     } else {
         decode_model_ = std::make_shared<tcim::Module>();
         auto option = tcim::Module::Option(wm_);
         if (!load_from_file)
-            status = decode_model_->LoadModel(raw_data.data(), raw_data.size(),
+            status = infer_model->LoadModel(raw_data.data(), raw_data.size(),
                                               option);
         else
-            status = decode_model_->LoadModel("./hmms/decoder.hmm", option);
+            status = infer_model->LoadModel("./hmms/decoder.hmm", option);
     }
     if (status != tcim::Status::OK) {
         LLAMA_LOG_ERROR("LoadModel failed: prefill == %d\n", prefill);
-        return false;
+        return nullptr;
     }
-    return true;
+    return infer_model;
 }
 
 bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
@@ -112,7 +112,6 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
 
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
-    bool load_result = true;
     for (int i = 0; i < n_tensors; ++i) {
         const char *name = gguf_get_tensor_name(ctx, i);
         LLAMA_LOG_INFO("tensor[%d]: name = %s\n", i, name);
@@ -128,12 +127,12 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
             if (!load_from_file) {
                 std::vector<char> buffer(size);
                 read_tensor_to_buffer(file_name, offset, size, buffer);
-                load_result = create_infer_engine(true, buffer, false);
+                prefill_model_ = create_infer_engine(true, buffer, false);
             } else {
                 std::vector<char> buffer(0);
-                load_result = create_infer_engine(true, buffer, true);
+                prefill_model_ = create_infer_engine(true, buffer, true);
             }
-            if (!load_result) {
+            if (prefill_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load prefill.hmm\n", __func__);
                 return false;
             }
@@ -143,12 +142,12 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name) {
             if (!load_from_file) {
                 std::vector<char> buffer(size);
                 read_tensor_to_buffer(file_name, offset, size, buffer);
-                load_result = create_infer_engine(false, buffer, false);
+                decode_model_ = create_infer_engine(false, buffer, false);
             } else {
                 std::vector<char> buffer(0);
-                load_result = create_infer_engine(false, buffer, true);
+                decode_model_ = create_infer_engine(false, buffer, true);
             }
-            if (!load_result) {
+            if (decode_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load decode.hmm\n", __func__);
                 return false;
             }

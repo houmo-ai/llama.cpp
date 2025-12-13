@@ -8,6 +8,9 @@
 #include <fstream>
 #include <numeric>
 #include <array>
+#include "nlohmann/json.hpp"
+using json = nlohmann::ordered_json;
+
 #pragma pack(push, 1)
 struct CompactHeader {
     int16_t magic;      // 16位标识
@@ -94,15 +97,6 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
         patch_size_ = gguf_get_val_u32(ctx, key_id);
     }
     // 从gguf文件中加载hmmodels
-    const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
-    int device_id = 0;
-    if (device_id_str != nullptr) {
-        device_id = std::stoi(device_id_str);
-    }
-    auto wm = tcim::Module::WeightManager::CreateWeightManager(device_id);
-    auto option_decoder = tcim::Module::Option(wm);
-
-    auto option = tcim::Module::Option(wm);
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
@@ -113,6 +107,30 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         std::vector<char> buffer(size);
         read_tensor_to_buffer(file_name, offset, size, buffer);
+        std::string backend = "";
+        auto device_ids = parse_deviceids();
+        if (device_ids.size() != 1)
+            device_ids = {device_ids[0]};
+#ifdef XH2_ENABLED // v2.5.0 not support LoadModelInfo will removed later.
+        std::string model_info =
+            tcim::Module::LoadModelInfo(buffer.data(), buffer.size());
+        json model_info_json = json::parse(model_info);
+        if (model_info_json.contains("info")) {
+            auto info = model_info_json["info"];
+            if (info.contains("target") && info["target"].is_string()) {
+                auto target = info["target"].get<std::string>();
+                if (target == "xh2") {
+                    backend = "Xh2HalBackend";
+                }
+            }
+        }
+        backend ="Xh2HalBackend"; // v2.5.0 not support LoadModelInfo will removed later.
+#endif
+        tcim::DevManager dev_manager =
+            tcim::DevManager::Create(device_ids, backend);
+        auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
+        auto option = tcim::Module::Option(wm);
+
         module_ = std::make_shared<tcim::Module>();
         auto status = module_->LoadModel(buffer.data(), size, option);
         if (status != tcim::Status::OK) {
@@ -399,6 +417,34 @@ void HoumoVision::fill_header(std::vector<float>& output_data) {
     );
 }
 
+std::vector<int> HoumoVision::parse_deviceids(bool single_card) {
+    std::vector<int> deviceIds;
+    const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
+
+    if (device_id_str == nullptr) {
+        deviceIds.push_back(0);
+        if (!single_card)
+            deviceIds.push_back(1);
+        return deviceIds;
+    }
+
+    std::string deviceList(device_id_str);
+    std::istringstream iss(deviceList);
+    std::string token;
+
+    while (std::getline(iss, token, ',')) {
+        try {
+            // 转换为整数并添加到列表
+            deviceIds.push_back(std::stoi(token));
+        } catch (const std::invalid_argument &) {
+            LOG_ERR("Invalid device ID: %s", token.c_str());
+        } catch (const std::out_of_range &) {
+            LOG_ERR("Device ID out of range: %s", token.c_str());
+        }
+    }
+
+    return deviceIds;
+}
 
 void HoumoQwenVision::set_windows_attention() {
     // pw * ph = number of tokens output by ViT after apply patch merger

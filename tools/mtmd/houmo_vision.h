@@ -43,6 +43,7 @@ class HoumoVision {
                      int target_width, int target_height);
     void fill_header(std::vector<float> &output_data);
 
+    std::vector<int> parse_deviceids(bool single_card = true);
   protected:
     std::shared_ptr<tcim::Module> module_;
     std::map<std::string, tcim::Tensor> input_tensors_;
