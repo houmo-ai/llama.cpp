@@ -1860,7 +1860,7 @@ struct server_slot {
     }
 
     /**
-     * 完整 UTF-8 sanitize，非法字符替换为 U+FFFD（�）, 保证输出合法 UTF-8
+     * 完整 UTF-8 sanitize，非法字符替换为空字符串（""）, 保证输出合法 UTF-8
      *
      * @param s the input str
      * @return 返回 true 表示原始字符串完全合法 UTF-8，否则 false
@@ -1869,7 +1869,7 @@ struct server_slot {
         const char* src = s.data();
         const char* end = src + s.size();
         std::string out;
-        out.reserve(s.size());
+        out.reserve(s.size()); // 预分配空间，优化性能
 
         bool valid = true;
 
@@ -1877,66 +1877,61 @@ struct server_slot {
             auto c = static_cast<unsigned char>(*src);
 
             if (c <= 0x7F) {
-                // ASCII
+                // ASCII 字符：合法，直接保留
                 out.push_back(*src++);
             } else if ((c >> 5) == 0x6) {
-                // 2-byte sequence: C2-DF 80-BF
+                // 2-byte 序列：C2-DF 80-BF
                 if (src + 1 < end && c >= 0xC2 && c <= 0xDF && (src[1] & 0xC0) == 0x80) {
+                    // 合法的2字节UTF-8，保留
                     out.push_back(*src++);
                     out.push_back(*src++);
                 } else {
+                    // 非法序列：替换为空（不写入任何字符）
                     valid = false;
-                    out.push_back(char(0xEF));
-                    out.push_back(char(0xBF));
-                    out.push_back(char(0xBD));
-                    ++src;
+                    ++src; // 跳过当前非法首字节
                 }
             } else if ((c >> 4) == 0xE) {
-                // 3-byte sequence: E0 A0-BF 80-BF | E1-EC 80-BF 80-BF | ED 80-9F 80-BF | EE-EF 80-BF 80-BF
+                // 3-byte 序列：E0 A0-BF 80-BF | E1-EC 80-BF 80-BF | ED 80-9F 80-BF | EE-EF 80-BF 80-BF
                 if (src + 2 < end &&
                     ((c == 0xE0 && (unsigned char)src[1] >= 0xA0 && (unsigned char)src[1] <= 0xBF) ||
-                     ((c >= 0xE1 && c <= 0xEC) && (src[1] & 0xC0) == 0x80) ||
-                     (c == 0xED && (unsigned char)src[1] >= 0x80 && (unsigned char)src[1] <= 0x9F) ||
-                     ((c >= 0xEE && c <= 0xEF) && (src[1] & 0xC0) == 0x80)) &&
+                    ((c >= 0xE1 && c <= 0xEC) && (src[1] & 0xC0) == 0x80) ||
+                    (c == 0xED && (unsigned char)src[1] >= 0x80 && (unsigned char)src[1] <= 0x9F) ||
+                    ((c >= 0xEE && c <= 0xEF) && (src[1] & 0xC0) == 0x80)) &&
                     (src[2] & 0xC0) == 0x80) {
+                    // 合法的3字节UTF-8，保留
                     out.push_back(*src++);
                     out.push_back(*src++);
                     out.push_back(*src++);
                 } else {
+                    // 非法序列：替换为空（不写入任何字符）
                     valid = false;
-                    out.push_back(char(0xEF));
-                    out.push_back(char(0xBF));
-                    out.push_back(char(0xBD));
-                    ++src;
+                    ++src; // 跳过当前非法首字节
                 }
             } else if ((c >> 3) == 0x1E) {
-                // 4-byte sequence: F0 90-BF 80-BF 80-BF | F1-F3 80-BF 80-BF 80-BF | F4 80-8F 80-BF 80-BF
+                // 4-byte 序列：F0 90-BF 80-BF 80-BF | F1-F3 80-BF 80-BF 80-BF | F4 80-8F 80-BF 80-BF
                 if (src + 3 < end &&
                     ((c == 0xF0 && (unsigned char)src[1] >= 0x90 && (unsigned char)src[1] <= 0xBF) ||
-                     ((c >= 0xF1 && c <= 0xF3) && (src[1] & 0xC0) == 0x80) ||
-                     (c == 0xF4 && (unsigned char)src[1] >= 0x80 && (unsigned char)src[1] <= 0x8F)) &&
+                    ((c >= 0xF1 && c <= 0xF3) && (src[1] & 0xC0) == 0x80) ||
+                    (c == 0xF4 && (unsigned char)src[1] >= 0x80 && (unsigned char)src[1] <= 0x8F)) &&
                     (src[2] & 0xC0) == 0x80 && (src[3] & 0xC0) == 0x80) {
+                    // 合法的4字节UTF-8，保留
                     out.push_back(*src++);
                     out.push_back(*src++);
                     out.push_back(*src++);
                     out.push_back(*src++);
                 } else {
+                    // 非法序列：替换为空（不写入任何字符）
                     valid = false;
-                    out.push_back(char(0xEF));
-                    out.push_back(char(0xBF));
-                    out.push_back(char(0xBD));
-                    ++src;
+                    ++src; // 跳过当前非法首字节
                 }
             } else {
-                // 非法首字节
+                // 非法首字节（不属于任何合法UTF-8首字节范围）
                 valid = false;
-                out.push_back(char(0xEF));
-                out.push_back(char(0xBF));
-                out.push_back(char(0xBD));
-                ++src;
+                ++src; // 跳过非法字节，不写入任何字符
             }
         }
 
+        // 替换原字符串为处理后的结果（swap 效率更高）
         s.swap(out);
         return valid;
     }
@@ -1951,6 +1946,7 @@ struct server_slot {
             new_msg = common_chat_parse(generated_text, /* is_partial= */ stop != STOP_TYPE_EOS, task->params.oaicompat_chat_syntax);
         } catch( const nlohmann::json::type_error& ex) {
             auto valid = utf8_sanitize_safe(generated_text);
+            valid = utf8_sanitize_safe(previous_msg.content);
             new_msg = common_chat_parse(generated_text, /* is_partial= */ stop != STOP_TYPE_EOS, task->params.oaicompat_chat_syntax);
             LOG_ERR("failed to common_chat_parse, valid[%d], exception: %s\n", valid, ex.what());
         } catch (const std::exception& ex) {
@@ -1961,7 +1957,11 @@ struct server_slot {
         if (!new_msg.empty()) {
             new_msg.set_tool_call_ids(generated_tool_call_ids, gen_tool_call_id);
             chat_msg = new_msg;
-            diffs = common_chat_msg_diff::compute_diffs(previous_msg, new_msg.empty() ? previous_msg : new_msg);
+            try {
+                diffs = common_chat_msg_diff::compute_diffs(previous_msg, new_msg.empty() ? previous_msg : new_msg);
+            } catch (const std::exception& ex) {
+                LOG_ERR("failed to common_chat_msg_diff::compute_diffs, exception: %s\n", ex.what());
+            }
         }
         return chat_msg;
     }
