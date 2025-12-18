@@ -21,7 +21,7 @@ class HouMoLLModel {
     HouMoLLModel();
     ~HouMoLLModel();
 
-    bool houmo_load(const std::string &file_name);
+    bool houmo_load(const std::string &file_name, bool use_mmap);
     void houmo_init(int seq_max = 4);
     int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                       float *logits);
@@ -54,7 +54,7 @@ class HouMoLLModel::Impl {
 public:
   Impl() = default;
   virtual ~Impl() = default;
-  virtual bool houmo_load(const std::string &file_name);
+  virtual bool houmo_load(const std::string &file_name, bool use_mmap);
   virtual void houmo_init(int seq_max = 4) = 0;
   virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                             float *logits) = 0;
@@ -166,8 +166,11 @@ protected:
   void set_input_data(tcim::Tensor &tensor, std::vector<int32_t> &int32_vec,
                       size_t offset = 0);
   std::shared_ptr<tcim::Module>
-  create_infer_engine(bool prefill, const std::vector<char> &raw_data,
+  create_infer_engine(bool prefill, void *raw_data, int64_t size,
                       bool load_from_file = false);
+  std::shared_ptr<tcim::Module> create_infer_engine(const std::string &file_name,
+                                                    size_t offset,
+                                                    size_t size);
 
 protected:
   int prefill_length_ = 256;
@@ -178,7 +181,7 @@ protected:
   int64_t n_vocab_ = 30522;
   int n_prefill_batch_ = 1;
   int n_decode_batch_ = 1;
-  bool has_history_sum_ = false;
+  int n_split_count_ = 1;
 
   std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_;
   std::shared_ptr<tcim::Module> prefill_model_;
@@ -198,7 +201,10 @@ protected:
   std::string kGeneralArch = "general.architecture";
   std::string kEmbeddingLengthEx = ".embedding_length";
   std::string kBlockCountEx = ".block_count";
+  std::string kSpliteCount = "split.tensors.count";
+  std::string kHmmInfo = "hmm.info";
   int kSeqMax = 4; // maximum sequence number for single-card model
   std::string model_arch_ = "";
-  bool xh1_ = true;
+  bool xh1_ = false;
+  bool multi_device_model_ = false;
 };

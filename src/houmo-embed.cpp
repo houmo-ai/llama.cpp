@@ -12,7 +12,7 @@ HouMoEmbed::~HouMoEmbed() {
     // do nothing
 }
 
-bool HouMoEmbed::houmo_load(const std::string &file_name) {
+bool HouMoEmbed::houmo_load(const std::string &file_name, bool use_mmap) {
     struct ggml_context *ctx_data = NULL;
     struct gguf_init_params params = {
         /*.no_alloc = */ true,
@@ -29,14 +29,18 @@ bool HouMoEmbed::houmo_load(const std::string &file_name) {
         size_t offset =
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         if (strncmp(name, "embedding", strlen("embedding")) == 0) {
-            std::vector<char> buffer(size);
-            read_tensor_to_buffer(file_name, offset, size, buffer);
-            embed_model_ = create_infer_engine(false, buffer, false);
+            if (use_mmap) {
+                embed_model_ = create_infer_engine(file_name, offset, size);
+            } else {
+                std::vector<char> buffer_vec;
+                buffer_vec.resize(size);
+                read_tensor_to_buffer(file_name, offset, size, buffer_vec);
+                embed_model_ = create_infer_engine(false, buffer_vec.data(), size, false);
+            }
             if (embed_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load embed.hmm\n", __func__);
                 return false;
             }
-
         }
     }
     ggml_free(ctx_data);

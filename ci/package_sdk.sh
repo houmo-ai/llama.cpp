@@ -35,9 +35,9 @@ case "$PLATFORM" in
 esac
 
 # SDK URLs
-xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.5.0/2025/11/18/2140/ubuntu1804/houmo_tcim_runtime_xh1_ubuntu1804_x86_64-2.5.0.tar.gz"
-xh1_dadao_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.5.0/2025/11/18/2140/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_aarch64-2.5.0.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.6.0/2025/12/10/2033/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.6.0.tar.gz"
+xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/10/1457/ubuntu1804/houmo_tcim_runtime_xh1_ubuntu1804_x86_64-0.6.0.tar.gz"
+xh1_dadao_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/10/1457/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_aarch64-0.6.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.7.0/2025/12/18/1632/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.7.0.tar.gz"
 
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/hlaw_ollama.${ARCH}"
 # 下载文件并检查是否成功
@@ -147,6 +147,7 @@ package_llama() {
     sed -i "s/xh_type=.*/xh_type=$PLATFORM/" "$release_dir/run_llama_server.sh"
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
+    cp tools/readhmm "$release_dir/scripts/" || true
     cp requirements/requirements-convert_hm_to_gguf.txt "$release_dir/scripts/" || true
     cp -r gguf-py "$release_dir/scripts/"
 

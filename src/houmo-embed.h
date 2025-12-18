@@ -9,7 +9,7 @@ class HouMoEmbed : public HouMoLLModel::Impl {
   public:
     HouMoEmbed();
     ~HouMoEmbed();
-    bool houmo_load(const std::string &file_name) override;
+    bool houmo_load(const std::string &file_name, bool use_mmap) override;
     void houmo_init(int seq_max = 10) override;
     int
     houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,

@@ -28,7 +28,7 @@ from typing import (
 )
 from itertools import chain
 from transformers import AutoConfig
-import struct
+
 
 if "NO_LOCAL_GGUF" not in os.environ:
     sys.path.insert(1, str(Path(__file__).parent / "gguf-py"))
@@ -38,10 +38,10 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 import re
-
-# if "NO_LOCAL_GGUF" not in os.environ:
-#    sys.path.insert(1, str(Path(__file__).parent / "gguf-py"))
+import datetime
 import gguf
+import struct
+
 
 logger = logging.getLogger("hf-to-gguf")
 
@@ -62,6 +62,195 @@ class ModelType(IntEnum):
     TEXT = 1
     MMPROJ = 2
 
+class HmmInfo:
+    """HMM模型信息类，包含模型的目标平台、硬件配置、特性等信息"""
+    target: str
+    batch: int
+    core_num: int
+    device_num: int
+    context_length: int
+    name: str
+    size: str
+    flash_attention: bool
+    version: str
+    convert_time: str
+
+    def __init__(self):
+        # 初始化所有属性为默认值
+        self.target = ""
+        self.batch = 0
+        self.core_num = 0
+        self.device_num = 1
+        self.context_length = 0
+        self.name = ""
+        self.size = ""
+        self.flash_attention = False
+        self.version = ""
+        self.convert_time = ""
+
+    def __str__(self) -> str:
+        """友好的打印格式，便于阅读"""
+        return (
+            f"📊 HMM Model Information\n"
+            f"├───────────────────────────────────────\n"
+            f"│ Basic Info:\n"
+            f"│   Name:         {self.name or 'Unknown'}\n"
+            f"│   Size:         {self.size or 'Unknown'}\n"
+            f"│   Version:      {self.version or 'Unknown'}\n"
+            f"│   Target:       {self.target or 'Unknown'}\n"
+            f"│   Convert Time: {self.convert_time or 'Unknown'}\n"
+            f"│   Batch Size:       {self.batch}\n"
+            f"│   Core Number:      {self.core_num}\n"
+            f"│   Device Number:    {self.device_num}\n"
+            f"│   Context Length:   {self.context_length}\n"
+            f"│\n"
+            f"│ Features:\n"
+            f"│   Flash Attention:  {'✅ Enabled' if self.flash_attention else '❌ Disabled'}\n"
+            f"└───────────────────────────────────────"
+        )
+
+    def __repr__(self) -> str:
+        """调试用格式，包含所有属性"""
+        return (
+            f"HmmInfo(target='{self.target}', batch={self.batch}, core_num={self.core_num}, "
+            f"device_num={self.device_num}, context_length={self.context_length}, name='{self.name}', "
+            f"size='{self.size}', flash_attention={self.flash_attention}, version='{self.version}', "
+            f"convert_time='{self.convert_time}')"
+        )
+
+import subprocess
+
+def read_hmm_info(hmm_file: str) -> HmmInfo:
+    """
+    Read model info from hmm file using readhmm command
+
+    Args:
+        hmm_file: Path to hmm or hmms file
+
+    Returns:
+        HmmInfo object with model information
+    """
+    hmm_info = HmmInfo()
+    # Check if the file exists
+    if not os.path.exists(hmm_file):
+        raise FileNotFoundError(f"File not found: {hmm_file}")
+
+    # Determine file type and construct command
+    file_ext = os.path.splitext(hmm_file)[1].lower()
+    readhmm_exists = False
+    # Execute command and get output
+    script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    # 拼接readhmm的完整路径（脚本目录下的readhmm）
+    readhmm_path = os.path.join(script_dir, "readhmm")
+    if os.path.exists(readhmm_path):
+        readhmm_exists = True
+    else:
+        readhmm_exists = False
+
+    if readhmm_exists:
+        # Construct command
+        if file_ext == '.hmm':
+            cmd = [readhmm_path, '--info', hmm_file]
+        else:
+            cmd = [readhmm_path, '--info', '--models', hmm_file]
+
+        # Execute command and get output
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            output = result.stdout
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to execute readhmm command: {e.stderr}")
+
+        # Parse JSON output
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            raise ValueError(f"Failed to parse readhmm output as JSON: {output}")
+
+        # Extract info based on file type
+        if file_ext == '.hmm':
+            # For .hmm files, info is directly under 'info' field
+            info_data = data.get('info', {})
+            build_option = ast.literal_eval(info_data.get('build_option', '{}'))
+        else:
+            # For .hmms files, info is under 'models' -> first model -> 'info'
+            models = data.get('models', {})
+            if not models:
+                raise ValueError(f"No models found in {hmm_file}")
+
+            # Get the first model's info
+            first_model_key = next(iter(models.keys()))
+            info_data = models[first_model_key].get('info', {})
+            build_option = ast.literal_eval(info_data.get('build_option', '{}'))
+
+        # Extract basic info
+        hmm_info.target = info_data.get('target', '')
+        hmm_info.name = info_data.get('name', '')
+        hmm_info.version = info_data.get('version', '')
+        hmm_info.core_num = info_data.get('core_num', 0)
+
+        # Extract batch from build_option
+        hmm_info.batch = build_option.get('batch', 1)
+
+        # Extract device_num from build_option's ndevice, default to 1 if 0 or not present
+        hmm_info.device_num = build_option.get('ndevice', 0)
+        if hmm_info.device_num == 0:
+            hmm_info.device_num = 1
+
+        # Extract context-length from build_option's modify_llm
+        modify_llm = build_option.get('modify_llm', {})
+        hmm_info.context_length = modify_llm.get('context-length', 0)
+
+        # Extract flash_attention from build_option
+        hmm_info.flash_attention = bool(build_option.get('flash_attention', 0))
+    else:
+        # readhmm not found, fallback to embedding.pt
+        logger.info("readhmm command not found, falling back to embedding.pt detection")
+
+        # Find embedding.pt files in current directory
+        embedding_files = list(Path('.').glob('*embedding.pt'))
+        if embedding_files:
+            # Use the first embedding.pt file
+            embedding_file = embedding_files[0]
+            logger.info(f"Found embedding file: {embedding_file}")
+
+            # Load embedding file and check dtype
+            try:
+                embedding = torch.load(embedding_file, map_location='cpu')
+                if isinstance(embedding, dict):
+                    # If it's a dict, check the first tensor
+                    first_key = next(iter(embedding.keys()))
+                    dtype = embedding[first_key].dtype
+                else:
+                    # If it's a tensor directly
+                    dtype = embedding.dtype
+
+                # Set target based on dtype
+                if dtype == torch.int16:
+                    hmm_info.target = 'xh1'
+                elif dtype == torch.float16:
+                    hmm_info.target = 'xh2'
+                else:
+                    logger.warning(f"Unknown dtype {dtype} in embedding.pt, defaulting to xh2")
+                    hmm_info.target = 'xh2'
+            except Exception as e:
+                logger.error(f"Failed to load embedding.pt: {e}")
+                # Default to xh2 if we can't determine
+                hmm_info.target = 'xh2'
+        else:
+            hmm_info.target = 'xh2'
+        # Set default values
+        hmm_info.core_num = 2
+        hmm_info.batch = 1
+
+    # Check if it's a hmms file to set device_num=2
+    if file_ext == '.hmms':
+        hmm_info.device_num = 2
+    else:
+        hmm_info.device_num = 1
+
+    hmm_info.convert_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return hmm_info
 
 AnyModel = TypeVar("AnyModel", bound="type[ModelBase]")
 
@@ -627,59 +816,18 @@ class TextModel(ModelBase):
         if "model_arch" not in cls.__dict__:
             raise TypeError(f"Missing property 'model_arch' for {cls.__name__!r}")
 
-    # def conver_embedding(self, embedding_path: Path):
-    #     # 加载嵌入权重
-    #     torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
-    #     embedding_weight = torch.load(
-    #         embedding_path, map_location="cpu", weights_only=True
-    #     )
-    #     if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
-    #         embedding_weight = embedding_weight["weight"]
-    #     if isinstance(embedding_weight, torch.nn.Embedding):
-    #         embedding_weight = embedding_weight.weight
-    #     print(f"embedding_weight.dtype: {embedding_weight.dtype}")
-    #     if (
-    #         embedding_weight.dtype == torch.int16
-    #         or embedding_weight.dtype == torch.int64
-    #         or embedding_weight.dtype == torch.int32
-    #     ):
-    #         print(
-    #             "M30：convert weight to int16 for minimal memory usage. convert to float32 when using in C++"
-    #         )
-    #         embedding_weight = embedding_weight.to(torch.int16)
-    #     elif embedding_weight.dtype == torch.float16:
-    #         print("M50: keep embedding weight as float16")
-    #     elif embedding_weight.dtype == torch.bfloat16:
-    #         embedding_weight = embedding_weight.to(torch.float16)
-    #         print("M50: convert embedding weight to float16")
-    #     else:
-    #         print(f"convert embedding weight to float32 from {embedding_weight.dtype}")
-    #         embedding_weight = embedding_weight.to(torch.float32)
-    #     # 创建空模块并手动注册参数
-    #     m = nn.Module()
-    #     # par = nn.Parameter(embedding_weight)  # 注册为可训练参数
-    #     m.register_buffer("0", embedding_weight)  # 参数名称为"0"
-    #     scripted_model = torch.jit.script(m)
-    #     out_path = self.dir_model / "cpp_quant_embedding.pt"
-    #     scripted_model.save(out_path)
-    #     if isinstance(scripted_model, torch.jit.ScriptModule):
-    #         print("****scripted_model is torch.jit.ScriptModule")
-    #     return out_path
     def conver_embedding(self, embedding_path: Path):
         # ===================== 1. 保留原权重加载+类型转换逻辑 =====================
         torch.serialization.add_safe_globals([torch.nn.modules.sparse.Embedding])
         embedding_weight = torch.load(
             embedding_path, map_location="cpu", weights_only=True
         )
-
         # 提取核心权重张量
         if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
             embedding_weight = embedding_weight["weight"]
         if isinstance(embedding_weight, torch.nn.Embedding):
             embedding_weight = embedding_weight.weight
-
         print(f"embedding_weight.dtype: {embedding_weight.dtype}")
-
         # 数据类型转换（保留int16，仅调整日志注释）
         dtype_mapping = {torch.int16: 0, torch.float16: 1}  # 类型标识与C++端对齐
         final_dtype = None
@@ -700,32 +848,25 @@ class TextModel(ModelBase):
         else:
             print(f"both M30 & M50 not suuport ")
             sys.exit(1)
-
         # ===================== 2. 导出为通用二进制格式（保留原类型） =====================
         out_path = self.dir_model / "cpp_quant_embedding.bin"
         embedding_weight = embedding_weight.contiguous()  # 确保内存连续
-
         with open(out_path, "wb") as f:
             # 写入维度数
             dims = embedding_weight.shape
             f.write(struct.pack("I", len(dims)))  # I=uint32
-
             # 写入各维度值
             for d in dims:
                 f.write(struct.pack("I", d))
-
             # 写入数据类型标识
             f.write(struct.pack("I", dtype_mapping[final_dtype]))
-
             # 写入原始数据（保留原类型，不转换）
             if final_dtype == torch.int16:
                 f.write(embedding_weight.numpy().astype(np.int16).tobytes())
             elif final_dtype == torch.float16:
                 f.write(embedding_weight.numpy().astype(np.float16).tobytes())
-
         print(f"Embedding weight exported to binary file: {out_path}")
         print(f"Binary info - shape: {dims}, dtype: {final_dtype}")
-
         return out_path
 
     def get_tensors(self) -> Iterator[Tuple[str, torch.Tensor]]:
@@ -734,7 +875,7 @@ class TextModel(ModelBase):
         # 定义需要匹配的键名与模式映射
         # 分为"必须存在"和"可选存在"两组
         required_keys = {
-            "quant_embedding.pt": re.compile(r".*embedding\.pt$"),
+            "quant_embedding.bin": re.compile(r".*embedding\.pt$"),
             "prefill.hmm": re.compile(r".*prefill\.hmm(s)?$"),
             "decoder.hmm": re.compile(r".*decode(r)?\.hmm(s)?$"),
         }
@@ -798,9 +939,13 @@ class TextModel(ModelBase):
                 raise FileNotFoundError(f"File {file_path} missing")
 
             # 处理量化嵌入文件的特殊逻辑
-            if key == "quant_embedding.pt":
+            if key == "quant_embedding.bin":
                 file_path = self.conver_embedding(file_path)
-
+            if key == "decoder.hmm":
+                print(file_path)
+                hmm_info = read_hmm_info(file_path)
+                print(hmm_info)
+                self.hmm_info = json.dumps(hmm_info.__dict__)
             # 读取二进制数据并转换为Tensor
             with open(file_path, "rb") as file:
                 binary_data = np.frombuffer(file.read(), dtype=np.uint8)
@@ -808,7 +953,7 @@ class TextModel(ModelBase):
                 data = torch.from_numpy(binary_data.copy())
 
             # 移除转换后的临时文件
-            if key == "quant_embedding.pt":
+            if key == "quant_embedding.bin":
                 os.remove(file_path)
 
             # 以固定键名返回
@@ -928,8 +1073,8 @@ class TextModel(ModelBase):
         self.gguf_writer.add_file_type(self.ftype)
         logger.info(f"gguf: file type = {self.ftype}")
         self.gguf_writer.add_bool("is_hmm", True)
-        if self.model_description:
-            self.gguf_writer.add_string("model.description", self.model_description)
+        if self.hmm_info:
+            self.gguf_writer.add_string("hmm.info", self.hmm_info)
 
     def write_vocab(self):
         if len(self.gguf_writer.tensors) != 1:
@@ -1876,7 +2021,8 @@ class MmprojModel(ModelBase):
             if not file_path.is_file():
                 logger.warning(f".....{file_path} is not a file, skipping")
                 continue
-
+            hmm_info = read_hmm_info(file_path)
+            self.hmm_info = json.dumps(hmm_info.__dict__)
             try:
                 # 读取二进制数据并转换为 torch.Tensor
                 with open(file_path, "rb") as file:
@@ -2731,6 +2877,8 @@ class BertModel(TextModel):
             if not file_path.is_file():
                 logger.warning(f".....{file_path} not found")
                 continue
+            hmm_info = read_hmm_info(file_path)
+            self.hmm_info = json.dumps(hmm_info.__dict__)
             with open(file_path, "rb") as file:
                 binary_data = np.frombuffer(file.read(), dtype=np.uint8)
                 logger.info(f".....Tensor size: {binary_data.shape}")

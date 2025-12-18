@@ -3,6 +3,47 @@
 set -e  # 遇到错误立即退出
 set -u  # 使用未定义变量时退出
 set -o pipefail  # 管道命令中任何一个失败都算失败
+
+# ===================== 核心函数定义 =====================
+# 图案化打印警告信息（黄底黑字+方块边框）
+# 用法：print_warning [警告文字]
+# 参数：
+#   $1 - 自定义警告文字（可选，默认值：WARNING）
+print_warning() {
+    # 1. 参数处理：默认警告文字为 WARNING
+    local WARN_TEXT=${1:-WARNING}
+
+    # 2. 兼容性处理：终端不支持彩色则禁用颜色，不支持⚠️则替换为!
+    local YELLOW_BG=""
+    local RESET=""
+    local WARN_ICON="⚠️"
+
+    # 判断终端是否支持颜色（兼容无颜色终端）
+    if [ -t 1 ] && command -v tput >/dev/null && [ $(tput colors) -ge 8 ]; then
+        YELLOW_BG="\033[43;30m"  # 黄底黑字
+        RESET="\033[0m"          # 重置样式
+    fi
+
+    # 可选：终端不支持emoji时，替换⚠️为!
+    # WARN_ICON="!"
+
+    # 3. 构造警告字符串和边框
+    local WARNING_STR=" ${WARN_ICON}  ${WARN_TEXT} ${WARN_ICON}  "
+    local BORDER_LEN=${#WARNING_STR}
+    # 生成等长的方块边框（兼容bash/zsh，避免seq兼容性问题）
+    local BORDER=$(printf "■%.0s" $(seq 1 "${BORDER_LEN}"))
+
+    # 4. 打印图案（带颜色）
+    echo -e "${YELLOW_BG}${BORDER}${RESET}"
+    echo -e "${YELLOW_BG}${WARNING_STR}${RESET}"
+    echo -e "${YELLOW_BG}${BORDER}${RESET}"
+
+    # 可选：打印空行分隔，提升可读性
+    echo ""
+}
+
+print_warning  "不支持旧版本(0.7.0之前）模型，请下载0.7.0版本GGUF"
+
 show_help() {
     echo "usage: run_llama_server.sh [env] [--list|--download model_name] run model_name [extra_args...]"
     echo ""
@@ -24,24 +65,10 @@ extra_args=()
 default_port_args=("--port" "17701")  # 默认端口号
 # xh1 模型列表
 declare -A models_xh1=(
-    ["Qwen3-8b-8k-4core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/2.5.0/HiModel_xh1_qwen3_8b_256_8k_b1_1chip_4cores_v2.5.0_20251205.gguf"
-    ["Qwen3-8b-8k-2core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/2.5.0/HiModel_xh1_qwen3_8b_256_8k_b1_1chip_2cores_v2.5.0_20251205.gguf"
-    ["Deepseek-7b-8k-4core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/2.5.0/HiModel_xh1_deepseek_7b_256_8k_b1_1chip_4cores_v2.5.0_20251205.gguf"
-    ["Deepseek-7b-8k-2core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/2.5.0/HiModel_xh1_deepseek_7b_256_8k_b1_1chip_2cores_v2.5.0_20251205.gguf"
-    ["Qwenvl2.5-7b-2k-4core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/2.5.0/HiModel_xh1_qwen2.5-vl_7b_256_2k_b1_1chip_4cores_v2.5.0_20251205.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/2.5.0/mmproj_xh1_qwen2.5-vl_7b_4cores_vit_644x364_v2.5.0_20251205.gguf"
-    ["Qwenvl2.5-7b-2k-2core"]="http://10.10.1.53:8082/artifactory/application_software/models/general/2.5.0/HiModel_xh1_qwen2.5-vl_7b_256_2k_b1_1chip_2cores_v2.5.0_20251205.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/2.5.0/mmproj_xh1_qwen2.5-vl_7b_2cores_vit_644x364_v2.5.0_20251205.gguf"
 )
 
 # xh2 模型列表
 declare -A models_xh2=(
-    ["Qwen2.5-7b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/HiModel_xh2_qwen2.5_7b_256_8k_b1_1chip_2cores_v0.6.0_20251130.gguf"
-    ["Qwen3-8b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/HiModel_xh2_qwen3_8b_256_8k_b1_1chip_2cores_v0.6.0_20251203.gguf"
-    ["Qwen3-8b-8k-4batch-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/HiModel_xh2_qwen3_8b_256_8k_b4_1chip_2cores_v0.6.0_20251203.gguf"
-    ["Qwen3-14b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/HiModel_xh2_qwen3_14b_256_8k_b1_1chip_2cores_v0.6.0_20251130.gguf"
-    ["Deepseek-qwen3-8b-4k"]="http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/HiModel_xh2_deepseek_8b_256_4k_b1_1chip_2cores_v0.6.0_20251130.gguf"
-    ["Qwen3-30B-A3b-8K-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/HiModel_xh2_qwen3_30b-a3b_256_8k_b1_1chip_2cores_v0.6.0_20251130.gguf"
-    ["Qwenvl2.5-7b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/HiModel_xh2_qwen2.5-vl_7b_256_8k_b1_1chip_2cores_v0.6.0_20251202.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/mmproj_xh2_qwen2.5-vl_7b_vit_448x448_v0.6.0_20251202.gguf"
-    ["Qwen3vl-8b-8k-xh2"]="http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/HiModel_xh2_qwen3-vl_8b_256_8k_b1_1chip_2cores_v0.6.0_20251201.gguf http://10.10.1.53:8082/artifactory/application_software/models/general/0.6.0/mmproj_xh2_qwen3-vl_8b_vit_448_448_v0.6.0_20251201.gguf"
 )
 
 # 设置默认值

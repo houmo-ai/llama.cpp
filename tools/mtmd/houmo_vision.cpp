@@ -96,6 +96,11 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
     } else {
         patch_size_ = gguf_get_val_u32(ctx, key_id);
     }
+#ifdef XH2_ENABLED
+    std::string backend = "Xh2HalBackend";
+#else
+    std::string backend = "";
+#endif
     // 从gguf文件中加载hmmodels
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
@@ -107,25 +112,10 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         std::vector<char> buffer(size);
         read_tensor_to_buffer(file_name, offset, size, buffer);
-        std::string backend = "";
         auto device_ids = parse_deviceids();
         if (device_ids.size() != 1)
             device_ids = {device_ids[0]};
-#ifdef XH2_ENABLED // v2.5.0 not support LoadModelInfo will removed later.
-        std::string model_info =
-            tcim::Module::LoadModelInfo(buffer.data(), buffer.size());
-        json model_info_json = json::parse(model_info);
-        if (model_info_json.contains("info")) {
-            auto info = model_info_json["info"];
-            if (info.contains("target") && info["target"].is_string()) {
-                auto target = info["target"].get<std::string>();
-                if (target == "xh2") {
-                    backend = "Xh2HalBackend";
-                }
-            }
-        }
-        backend ="Xh2HalBackend"; // v2.5.0 not support LoadModelInfo will removed later.
-#endif
+
         tcim::DevManager dev_manager =
             tcim::DevManager::Create(device_ids, backend);
         auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);

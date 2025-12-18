@@ -28,18 +28,6 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int16_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
                                       static_cast<float>(prefill_length_));
     int32_t current_length = 0;
-    //[only for deepseek] clear kcache_history_sum before prefill.
-    auto &kv_item = kv_cache_[seq_id];
-    for (size_t idx = 0; idx < kv_item.names.size(); idx++) {
-        if (kv_item.names[idx].find("kcache_history_sum") == std::string::npos)
-            continue;
-        auto &input_data = kv_item.tensors[idx];
-        std::vector<int16_t> kcache_history_sum_init(input_data.MemSize() / 2,
-                                                     0);
-        input_data.Buffer().CopyFromHost(kcache_history_sum_init.data(),
-                                         input_data.MemSize());
-        decode_model_->SetInput(kv_item.names[idx], input_data);
-    }
 
     std::vector<llama_token> input_ids;
     int32_t valid_length = 0;
