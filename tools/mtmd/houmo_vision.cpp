@@ -102,11 +102,13 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
     std::string backend = "";
 #endif
     // 从gguf文件中加载hmmodels
-    // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
         const char *name = gguf_get_tensor_name(ctx, i);
         LOG_INF("tensor[%d]: name = %s\n", i, name);
+        if (std::string(name).find("visual.hmm") == std::string::npos) {
+            continue;
+        }
         const size_t size = gguf_get_tensor_size(ctx, i);
         size_t offset =
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);

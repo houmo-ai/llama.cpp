@@ -251,6 +251,11 @@ struct split_strategy {
         // process tensors one by one
         size_t curr_tensors_size = 0; // current size by counting only tensors size (without metadata)
         for (int i = 0; i < n_tensors; ++i) {
+            std::string tensor_name = gguf_get_tensor_name(ctx_gguf, i);
+            if (is_hmm && (tensor_name.find(".json") != std::string::npos ||
+                           tensor_name.find(".txt") != std::string::npos)) {
+                continue;
+            }
             struct ggml_tensor * t = ggml_get_tensor(ctx_meta, gguf_get_tensor_name(ctx_gguf, i));
             // calculate the "imaginary" size = the current size + next tensor size
             size_t n_bytes = GGML_PAD(ggml_nbytes(t), GGUF_DEFAULT_ALIGNMENT);

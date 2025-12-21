@@ -731,7 +731,6 @@ bool HouMoLLModel::houmo_load(const std::string &file_name, bool use_mmap) {
         /*.ctx      = */ &ctx_data,
     };
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
-    const int n_tensors = gguf_get_n_tensors(ctx);
     auto key_id = gguf_find_key(ctx, "general.architecture");
     if (key_id < 0) {
         return false;
@@ -743,11 +742,14 @@ bool HouMoLLModel::houmo_load(const std::string &file_name, bool use_mmap) {
             impl_ = new HouMoVLLModel();
         } else if (arch.find("gpt-oss") != std::string::npos) {
             impl_ = new HouMoGPTOSS();
-        } else if (n_tensors == 1 && arch.find("bert") != std::string::npos) {
+        } else if (arch.find("bert") != std::string::npos) {
             impl_ = new HouMoEmbed();
         } else if (arch.find("qwen") != std::string::npos) {
             impl_ = new HoumoQwenLLM();
         } else {
+            LLAMA_LOG_ERROR("%s: unknown architecture %s\n", __func__,
+                            arch.c_str());
+            exit(1);
             return false;
         }
     }

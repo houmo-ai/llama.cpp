@@ -35,7 +35,7 @@ add_library(llama
             unicode-data.cpp
             unicode.cpp
             unicode.h
-	    houmo-llmodel.cpp
+	        houmo-llmodel.cpp
             houmo-gptoss.cpp
             houmo-qwenllm.cpp
             houmo-vllmodel.cpp
@@ -147,7 +147,7 @@ target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include ../vendor ../common ${HOUMO_TCIM_RUNTIME_PATH}/include)
 target_compile_features   (llama PUBLIC cxx_std_17) # don't bump
 
-target_link_libraries(llama PUBLIC ggml  ${TORCH_LIBRARIES} ${HOUMO_RUNTIME_LIBRARIES})
+target_link_libraries(llama PUBLIC ggml ${HOUMO_RUNTIME_LIBRARIES})
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)

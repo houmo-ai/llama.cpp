@@ -28,7 +28,7 @@ from typing import (
 )
 from itertools import chain
 from transformers import AutoConfig
-
+import glob
 
 if "NO_LOCAL_GGUF" not in os.environ:
     sys.path.insert(1, str(Path(__file__).parent / "gguf-py"))
@@ -364,7 +364,7 @@ class ModelBase:
         self.metadata_override = metadata_override
         self.model_name = model_name
         self.dir_model_card = dir_model  # overridden in convert_lora_to_gguf.py
-        self.model_description = model_description
+        self.hmm_info = None
         self.hmm_vit_height = hmm_vit_height
         self.hmm_vit_width = hmm_vit_width
 
@@ -958,6 +958,19 @@ class TextModel(ModelBase):
 
             # 以固定键名返回
             yield key, data
+        # 遍历目录下所有的json文件，只返回不带路径的文件名
+        for json_file in glob.glob(os.path.join(self.dir_model, "*.json")):
+            with open(json_file, "rb") as file:
+                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                logger.info(f".....Tensor size: {binary_data.shape}")
+                data = torch.from_numpy(binary_data.copy())
+                yield os.path.basename(json_file), data
+        for json_file in glob.glob(os.path.join(self.dir_model, "*.txt")):
+            with open(json_file, "rb") as file:
+                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                logger.info(f".....Tensor size: {binary_data.shape}")
+                data = torch.from_numpy(binary_data.copy())
+                yield os.path.basename(json_file), data
 
     def set_vocab(self):
         self._set_vocab_gpt2()
@@ -1986,8 +1999,8 @@ class MmprojModel(ModelBase):
         if not self.has_vision_encoder and not self.has_audio_encoder:
             raise ValueError("MmprojModel must have either vision or audio encoder")
         self.gguf_writer.add_bool("is_hmm", True)
-        if self.model_description:
-            self.gguf_writer.add_string("model.description", self.model_description)
+        if self.hmm_info:
+            self.gguf_writer.add_string("hmm.info", self.hmm_info)
 
     def write_vocab(self):
         raise ValueError("MmprojModel does not support vocab writing")
@@ -2035,7 +2048,19 @@ class MmprojModel(ModelBase):
                     f".....Failed to load {file_path}: {str(e)}", exc_info=True
                 )
                 continue
-
+                # 遍历目录下所有的json文件，只返回不带路径的文件名
+        for json_file in glob.glob(os.path.join(self.dir_model, "*.json")):
+            with open(json_file, "rb") as file:
+                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                logger.info(f".....Tensor size: {binary_data.shape}")
+                data = torch.from_numpy(binary_data.copy())
+                yield os.path.basename(json_file), data
+        for json_file in glob.glob(os.path.join(self.dir_model, "*.txt")):
+            with open(json_file, "rb") as file:
+                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                logger.info(f".....Tensor size: {binary_data.shape}")
+                data = torch.from_numpy(binary_data.copy())
+                yield os.path.basename(json_file), data
     def prepare_tensors(self):
         # TODO: @guoxing.xu check & test this block
         # 自定义的tensor，不需要该函数
@@ -2515,7 +2540,6 @@ class Qwen3VLMoeTextModel(Qwen3MoeModel):
 
         return super().modify_tensors(data_torch, name, bid)
 
-
 @ModelBase.register("GPT2LMHeadModel")
 class GPT2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.GPT2
@@ -2863,8 +2887,8 @@ class BertModel(TextModel):
         if self.cls_out_labels:
             self.gguf_writer.add_classifier_output_labels([v for k, v in sorted(self.cls_out_labels.items())])
         self.gguf_writer.add_bool("is_hmm", True)
-        if self.model_description:
-            self.gguf_writer.add_string("model.description", self.model_description)
+        if self.hmm_info:
+            self.gguf_writer.add_string("hmm.info", self.hmm_info)
 
     def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
         # TODO: @guoxing.xu check & test this block
@@ -2884,6 +2908,19 @@ class BertModel(TextModel):
                 logger.info(f".....Tensor size: {binary_data.shape}")
                 data = torch.from_numpy(binary_data.copy())
                 yield "embedding", data
+                # 遍历目录下所有的json文件，只返回不带路径的文件名
+        for json_file in glob.glob(os.path.join(self.dir_model, "*.json")):
+            with open(json_file, "rb") as file:
+                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                logger.info(f".....Tensor size: {binary_data.shape}")
+                data = torch.from_numpy(binary_data.copy())
+                yield os.path.basename(json_file), data
+        for json_file in glob.glob(os.path.join(self.dir_model, "*.txt")):
+            with open(json_file, "rb") as file:
+                binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                logger.info(f".....Tensor size: {binary_data.shape}")
+                data = torch.from_numpy(binary_data.copy())
+                yield os.path.basename(json_file), data
 
     def prepare_tensors(self):
         # TODO: @guoxing.xu check & test this block
