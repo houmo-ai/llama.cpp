@@ -124,6 +124,7 @@ package_llama() {
     # 清理并创建目录结构
     rm -rf "$release_dir"/*
     mkdir -p "$release_dir/include" "$release_dir/lib" "$release_dir/bin" "$release_dir/scripts"
+    mkdir -p "$release_dir/include/server"
 
     # 复制头文件
     cp -r include/* "$release_dir/include/" || true
@@ -132,12 +133,13 @@ package_llama() {
     cp -r tools/mtmd/mtmd*.h "$release_dir/include/" || true
     cp -r vendor/nlohmann "$release_dir/include/" || true
     cp -r src/llama*.h* "$release_dir/include/" || true
-
+    cp -r tools/server/*.h* "$release_dir/include/server/" || true
     # 复制库文件
     cp build/src/Release/*.lib "$release_dir/lib/" || true
     cp build/common/Release/*.lib "$release_dir/lib/" || true
     cp build/tools/mtmd/Release/*.lib "$release_dir/lib/" || true
     cp build/ggml/src/Release/*.lib "$release_dir/lib/" || true
+    cp build/tools/server/Release/*.lib "$release_dir/lib/" || true
     cp build/bin/Release/*.dll "$release_dir/bin/" || true
 
     cp third_party/houmo/lib/*.dll "$release_dir/bin/" || true
@@ -147,13 +149,11 @@ package_llama() {
 
     # 复制可执行文件
     cp build/bin/Release/llama-server* "$release_dir/bin/" || true
+    cp build/bin/Release/llama-gguf-split* "$release_dir/bin/" || true
+    cp build/bin/Release/llama-cli* "$release_dir/bin/" || true
     cp tools/server/qwen3_nonthinking.jinja "$release_dir/bin/" || true
-    # cp build/bin/Release/llama-simple* "$release_dir/bin/" || true
-    # cp build/bin/Release/llama*-batched* "$release_dir/bin/" || true
     cp build/bin/Release/llama-gguf* "$release_dir/bin/" || true
-    # cp build/bin/Release/llama-cli* "$release_dir/bin/" || true
     cp build/bin/Release/llama-bench* "$release_dir/bin/" || true
-    # cp build/bin/Release/llama-mtmd-cli* "$release_dir/bin/" || true
     cp ci/run_llama_server_win.* "$release_dir/bin/" || true
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true

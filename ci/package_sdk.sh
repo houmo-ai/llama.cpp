@@ -115,6 +115,7 @@ package_llama() {
     # 清理并创建目录结构
     rm -rf "$release_dir"/*
     mkdir -p "$release_dir/include" "$release_dir/lib" "$release_dir/bin" "$release_dir/scripts"
+    mkdir -p "$release_dir/include/server"
 
     # 复制头文件
     cp -r include/* "$release_dir/include/" || true
@@ -123,10 +124,12 @@ package_llama() {
     cp -r common/*.h* "$release_dir/include/" || true
     cp -r tools/mtmd/mtmd*.h "$release_dir/include/" || true
     cp -r vendor/nlohmann "$release_dir/include/" || true
+    cp -r tools/server/*.h* "$release_dir/include/server/" || true
 
     # 复制库文件
     cp build/bin/*.so "$release_dir/lib/" || true
     cp build/common/libcommon.a "$release_dir/lib/"
+    cp build/tools/server/libserver-context.a "$release_dir/lib/" || true
     cp third_party/houmo/lib/*.so* "$release_dir/lib/" || true
     cp version.cfg "$release_dir/version.txt"
 
@@ -141,6 +144,8 @@ package_llama() {
     cp build/bin/llama-server "$release_dir/bin/" || true
     cp build/bin/llama-bench* "$release_dir/bin/" || true
     cp build/bin/llama-gguf "$release_dir/bin/" || true
+    cp build/bin/llama-gguf-split "$release_dir/bin/" || true
+    cp build/bin/llama-cli "$release_dir/bin/" || true
     cp tools/server/qwen3_nonthinking.jinja "$release_dir/bin/" || true
     cp ci/run_llama_server.sh "$release_dir/" || true
     # 设置run_llama_server.sh中xh_type参数
