@@ -6,7 +6,7 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
   public:
     HoumoQwenLLM() = default;
     ~HoumoQwenLLM() override = default;
-    virtual void houmo_init(int seq_max = 4) override;
+    virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4) override;
     virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                               float *logits) override;
     virtual int houmo_decode(std::vector<llama_token> &batches,

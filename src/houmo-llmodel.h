@@ -7,6 +7,7 @@
 #include "llama-batch.h"
 #include "tcim/tcim_runtime.h"
 #include "houmo-embedding_layer.h"
+#include "houmo-memory.h"
 // houmo llm model defination
 //
 // @guoxing.xu 2025-05-23
@@ -22,7 +23,7 @@ class HouMoLLModel {
     ~HouMoLLModel();
 
     bool houmo_load(const std::string &file_name, bool use_mmap);
-    void houmo_init(int seq_max = 4);
+    void houmo_init(houmo_memory_i *memory, int seq_max = 4);
     int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                       float *logits);
     int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
@@ -55,7 +56,7 @@ public:
   Impl() = default;
   virtual ~Impl() = default;
   virtual bool houmo_load(const std::string &file_name, bool use_mmap);
-  virtual void houmo_init(int seq_max = 4) = 0;
+  virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4) = 0;
   virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                             float *logits) = 0;
   virtual int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
@@ -207,4 +208,5 @@ protected:
   std::string model_arch_ = "";
   bool xh1_ = false;
   bool multi_device_model_ = false;
+  houmo_memory_i *memory_ = nullptr;
 };

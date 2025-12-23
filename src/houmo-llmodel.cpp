@@ -772,7 +772,9 @@ bool HouMoLLModel::houmo_load(const std::string &file_name, bool use_mmap) {
     return impl_->houmo_load(file_name, use_mmap);
 }
 
-void HouMoLLModel::houmo_init(int seq_max) { impl_->houmo_init(seq_max); }
+void HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max) {
+    impl_->houmo_init(memory, seq_max);
+}
 
 int HouMoLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                 float *logits) {

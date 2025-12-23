@@ -2,8 +2,9 @@
 #include <cstring>
 #include "llama-impl.h"
 
-void HoumoQwenLLM::houmo_init(int seq_max) {
+void HoumoQwenLLM::houmo_init(houmo_memory_i *memory, int seq_max) {
     model_inout_init(seq_max);
+    memory_= memory;
 }
 int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                 float *logits) {
@@ -30,7 +31,7 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t current_length = 0;
 
     std::vector<llama_token> input_ids;
-    int32_t valid_length = 0;
+    int32_t valid_length = memory_->seq_pos_min(seq_id);
     for (int round = 0; round < prefill_loop_round; round++) {
         valid_length = round * prefill_length_;
         if (round == prefill_loop_round - 1) {

@@ -16,11 +16,12 @@ HouMoVLLModel::HouMoVLLModel() : HouMoLLModel::Impl() {
     // do nothing
 }
 
-void HouMoVLLModel::houmo_init(int seq_max) {
+void HouMoVLLModel::houmo_init(houmo_memory_i *memory, int seq_max) {
     /**
      *  qwen2.5vl：input1, time_position_id, height_position_id, width_position_id, valid_length, current_length
      *  qwen3vl：..., deepstack_features_0, deepstack_features_1, deepstack_features_2
      */
+    (void)memory;
     int actual_seq_max = std::min(seq_max, kSeqMax);
     model_inout_init(actual_seq_max);
     // do init

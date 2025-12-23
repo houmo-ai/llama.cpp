@@ -45,7 +45,7 @@ enum stop_type {
 struct task_params {
     bool stream          = true;
     bool include_usage   = false;
-    bool cache_prompt    = false; // remember the prompt to avoid reprocessing all prompt
+    bool cache_prompt    = true; // remember the prompt to avoid reprocessing all prompt
     bool return_tokens   = false;
     bool return_progress = false;
 

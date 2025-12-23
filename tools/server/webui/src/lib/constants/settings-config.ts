@@ -5,9 +5,9 @@ export const SETTING_CONFIG_DEFAULT: Record<string, string | number | boolean> =
 	systemMessage: '',
 	showSystemMessage: true,
 	theme: 'system',
-	showThoughtInProgress: false,
+	showThoughtInProgress: true,
 	showToolCalls: false,
-	disableReasoningFormat: true,
+	disableReasoningFormat: false,
 	keepStatsVisible: true,
 	showMessageStats: true,
 	askForTitleConfirmation: false,
@@ -40,7 +40,7 @@ export const SETTING_CONFIG_DEFAULT: Record<string, string | number | boolean> =
 	// experimental features
 	pyInterpreterEnabled: false,
 	enableContinueGeneration: false,
-	max_history: 0,
+	max_history: 10,
 	enable_thinking: true
 };
 
@@ -104,6 +104,6 @@ export const SETTING_CONFIG_INFO: Record<string, string> = {
 		'Enable Python interpreter using Pyodide. Allows running Python code in markdown code blocks.',
 	enableContinueGeneration:
 		'Enable "Continue" button for assistant messages. Currently works only with non-reasoning models.',
-	max_history: 'Maximum number of messages to keep in the message history. Set to 0 to disable message history.',
+	max_history: 'Maximum number of messages to keep in the message history default 10 pairs. Set to 0 to disable message history.',
 	enable_thinking: 'Enable thinking mode for the model like qwen3.'
 };

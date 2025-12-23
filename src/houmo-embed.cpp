@@ -49,7 +49,8 @@ bool HouMoEmbed::houmo_load(const std::string &file_name, bool use_mmap) {
     return true;
 }
 
-void HouMoEmbed::houmo_init(int seq_max) {
+void HouMoEmbed::houmo_init(houmo_memory_i *memory, int seq_max) {
+    (void)memory;
     size_t input_num = embed_model_->GetInputNum();
     for (size_t idx = 0; idx < input_num; idx++) {
         auto input_name = embed_model_->GetInputName(idx);

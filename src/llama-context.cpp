@@ -17,7 +17,7 @@
 
 void llama_context::houmo_init(int32_t seq_max) {
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
-    hm_llmodel->houmo_init(seq_max);
+    hm_llmodel->houmo_init(dynamic_cast<houmo_memory_i*>(memory.get()), seq_max);
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
     // graph outputs buffer
     {

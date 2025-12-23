@@ -82,7 +82,7 @@ std::vector<uint16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
     return mask_tensor;
 }
 
-void HouMoGPTOSS::houmo_init(int seq_max) {
+void HouMoGPTOSS::houmo_init(houmo_memory_i *memory, int seq_max) {
     model_inout_init(seq_max);
     int sum = decode_model_->GetInputNum();
     for (int i = 0; i < sum; i++) {
@@ -93,6 +93,7 @@ void HouMoGPTOSS::houmo_init(int seq_max) {
             global_attention_names_.push_back(name);
         }
     }
+    memory_ = memory;
 }
 int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                            float *logits) {
@@ -118,7 +119,7 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t current_length = 0;
 
     std::vector<llama_token> input_ids;
-    int32_t valid_length = 0;
+    int32_t valid_length = memory_->seq_pos_min(seq_id);
     for (int round = 0; round < prefill_loop_round; round++) {
         valid_length = round * prefill_length_;
         if (round == prefill_loop_round - 1) {

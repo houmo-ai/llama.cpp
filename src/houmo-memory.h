@@ -57,6 +57,7 @@ class houmo_memory_i : public llama_memory_i {
         (void) seq_id;
         (void) p0;
         (void) p1;
+        seq_pos_map[seq_id] = p0;
         return true;
     }
     virtual void seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst,
@@ -90,7 +91,11 @@ class houmo_memory_i : public llama_memory_i {
 
     virtual llama_pos seq_pos_min(llama_seq_id seq_id) const override {
         (void) seq_id;
-        return 0;
+        auto it = seq_pos_map.find(seq_id);
+        if (it == seq_pos_map.end()) {
+            return 0;
+        }
+        return it->second;
     }
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const override {
         (void) seq_id;
@@ -119,4 +124,6 @@ class houmo_memory_i : public llama_memory_i {
         (void)flags;
         return;
     }
+  private:
+    std::map<llama_seq_id, llama_pos> seq_pos_map;
 };

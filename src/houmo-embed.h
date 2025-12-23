@@ -10,7 +10,7 @@ class HouMoEmbed : public HouMoLLModel::Impl {
     HouMoEmbed();
     ~HouMoEmbed();
     bool houmo_load(const std::string &file_name, bool use_mmap) override;
-    void houmo_init(int seq_max = 10) override;
+    void houmo_init(houmo_memory_i *memory, int seq_max = 10) override;
     int
     houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                     std::map<int, float *> &embeddings) override;
