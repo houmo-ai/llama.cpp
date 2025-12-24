@@ -200,9 +200,8 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
             }
             LLAMA_LOG_INFO("%s: succeed to load decode.hmm\n", __func__);
         } else {
-            LLAMA_LOG_INFO("tensor[%d]: name = %s, size = %zu\n", i, name,
+            LLAMA_LOG_INFO("tensor[%d]: name = %s, size = %zu, skipped\n", i, name,
                            size);
-            return false;
         }
     }
     if (n_split_count_ == 3) {
@@ -215,11 +214,11 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
     }
     ggml_free(ctx_data);
     gguf_free(ctx);
-    if (prefill_model_ == nullptr || decode_model_ == nullptr) {
+    if (prefill_model_ == nullptr || embedding_layer_ == nullptr) {
         LLAMA_LOG_ERROR("%s: failed to load model. load "
                         "prefill=%d,load decode=%d\n",
                         __func__, (prefill_model_ == nullptr),
-                        (decode_model_ == nullptr));
+                        (embedding_layer_ == nullptr));
         return false;
     }
 
@@ -257,6 +256,9 @@ void HouMoLLModel::Impl::model_inout_init(int seq_max) {
 }
 
 void HouMoLLModel::Impl::prefill_input_init() {
+    if (prefill_model_ == nullptr) {
+        return;
+    }
     for (size_t idx = 0; idx < prefill_model_->GetInputNum(); idx++) {
         auto input_name = prefill_model_->GetInputName(idx);
         LLAMA_LOG_DEBUG("%s: prefill input_name: %s\n", __func__,
@@ -286,6 +288,9 @@ void HouMoLLModel::Impl::prefill_input_init() {
 }
 
 void HouMoLLModel::Impl::prefill_output_init() {
+    if (prefill_model_ == nullptr) {
+        return;
+    }
     int output_num = prefill_model_->GetOutputNum();
     for (int idx = 0; idx < output_num; idx++) {
         auto output_name = prefill_model_->GetOutputName(idx);
@@ -302,6 +307,9 @@ void HouMoLLModel::Impl::prefill_output_init() {
 }
 
 void HouMoLLModel::Impl::decode_input_init() {
+    if (decode_model_ == nullptr) {
+        return;
+    }
     size_t input_num_decode = decode_model_->GetInputNum();
     for (size_t idx = 0; idx < input_num_decode; idx++) {
         auto input_name = decode_model_->GetInputName(idx);
@@ -337,6 +345,9 @@ void HouMoLLModel::Impl::decode_input_init() {
 
 void HouMoLLModel::Impl::decode_output_init() {
     // 填充decode 的output
+    if (decode_model_ == nullptr) {
+        return;
+    }
     int output_num_decode = decode_model_->GetOutputNum();
     for (int idx = 0; idx < output_num_decode; idx++) {
         auto output_name = decode_model_->GetOutputName(idx);
@@ -361,7 +372,7 @@ void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx) {
     std::string key = model_arch_ + kBlockCountEx;
     key_id = gguf_find_key(ctx, key.c_str());
     if (key_id < 0) {
-        LLAMA_LOG_INFO("%s: failed to find key %s in gguf file\n", __func__,
+        LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
                         key.c_str());
     } else {
         n_blocks_ = gguf_get_val_u32(ctx, key_id);
@@ -369,14 +380,14 @@ void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx) {
     key = model_arch_ + kEmbeddingLengthEx;
     key_id = gguf_find_key(ctx, key.c_str());
     if (key_id < 0) {
-        LLAMA_LOG_INFO("%s: failed to find key %s in gguf file\n", __func__,
+        LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
                         key.c_str());
     } else {
         n_embd_ = gguf_get_val_u32(ctx, key_id);
     }
     auto key_n_split = gguf_find_key(ctx, kSpliteCount.c_str());
     if (key_n_split < 0) {
-        LLAMA_LOG_INFO("%s: failed to find key %s in gguf file\n", __func__,
+        LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
                        kSpliteCount.c_str());
     } else {
         n_split_count_ = gguf_get_val_i32(ctx, key_n_split);
@@ -384,7 +395,7 @@ void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx) {
     // 解析hmm.info
     key_id = gguf_find_key(ctx, kHmmInfo.c_str());
     if (key_id < 0) {
-        LLAMA_LOG_INFO("%s: failed to find key %s in gguf file\n", __func__,
+        LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
                         kHmmInfo.c_str());
         return;
     }
@@ -524,7 +535,9 @@ void HouMoLLModel::Impl::set_input_data(tcim::Tensor &tensor,
     }
 }
 void HouMoLLModel::Impl::initialize_kv_cache(int size) {
-
+    if (decode_model_ == nullptr) {
+        return;
+    }
     // FIXME: M30 QWENVL 的命名和M50 不一致, 量化后续会统一后移除
     std::string kv_prefix_name = "model_layers_";
     for (size_t i = 0; i < prefill_model_->GetInputNum(); i++) {
@@ -581,8 +594,10 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
 }
 
 void HouMoLLModel::Impl::set_kv_cache_for_prefill(int seq_id) {
+    if (kv_cache_.find(seq_id) == kv_cache_.end()) {
+        return;
+    }
     auto &item = kv_cache_[seq_id];
-    assert(item.seq_id == seq_id);
     for (size_t idx = 0; idx < item.tensors.size(); idx++) {
         std::string name = item.names[idx];
         auto tensor = item.tensors[idx];

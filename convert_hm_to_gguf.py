@@ -62,8 +62,10 @@ class ModelType(IntEnum):
     TEXT = 1
     MMPROJ = 2
 
+
 class HmmInfo:
     """HMM模型信息类，包含模型的目标平台、硬件配置、特性等信息"""
+
     target: str
     batch: int
     core_num: int
@@ -118,7 +120,9 @@ class HmmInfo:
             f"convert_time='{self.convert_time}')"
         )
 
+
 import subprocess
+
 
 def read_hmm_info(hmm_file: str) -> HmmInfo:
     """
@@ -149,10 +153,10 @@ def read_hmm_info(hmm_file: str) -> HmmInfo:
 
     if readhmm_exists:
         # Construct command
-        if file_ext == '.hmm':
-            cmd = [readhmm_path, '--info', hmm_file]
+        if file_ext == ".hmm":
+            cmd = [readhmm_path, "--info", hmm_file]
         else:
-            cmd = [readhmm_path, '--info', '--models', hmm_file]
+            cmd = [readhmm_path, "--info", "--models", hmm_file]
 
         # Execute command and get output
         try:
@@ -168,47 +172,47 @@ def read_hmm_info(hmm_file: str) -> HmmInfo:
             raise ValueError(f"Failed to parse readhmm output as JSON: {output}")
 
         # Extract info based on file type
-        if file_ext == '.hmm':
+        if file_ext == ".hmm":
             # For .hmm files, info is directly under 'info' field
-            info_data = data.get('info', {})
-            build_option = ast.literal_eval(info_data.get('build_option', '{}'))
+            info_data = data.get("info", {})
+            build_option = ast.literal_eval(info_data.get("build_option", "{}"))
         else:
             # For .hmms files, info is under 'models' -> first model -> 'info'
-            models = data.get('models', {})
+            models = data.get("models", {})
             if not models:
                 raise ValueError(f"No models found in {hmm_file}")
 
             # Get the first model's info
             first_model_key = next(iter(models.keys()))
-            info_data = models[first_model_key].get('info', {})
-            build_option = ast.literal_eval(info_data.get('build_option', '{}'))
+            info_data = models[first_model_key].get("info", {})
+            build_option = ast.literal_eval(info_data.get("build_option", "{}"))
 
         # Extract basic info
-        hmm_info.target = info_data.get('target', '')
-        hmm_info.name = info_data.get('name', '')
-        hmm_info.version = info_data.get('version', '')
-        hmm_info.core_num = info_data.get('core_num', 0)
+        hmm_info.target = info_data.get("target", "")
+        hmm_info.name = info_data.get("name", "")
+        hmm_info.version = info_data.get("version", "")
+        hmm_info.core_num = info_data.get("core_num", 0)
 
         # Extract batch from build_option
-        hmm_info.batch = build_option.get('batch', 1)
+        hmm_info.batch = build_option.get("batch", 1)
 
         # Extract device_num from build_option's ndevice, default to 1 if 0 or not present
-        hmm_info.device_num = build_option.get('ndevice', 0)
+        hmm_info.device_num = build_option.get("ndevice", 0)
         if hmm_info.device_num == 0:
             hmm_info.device_num = 1
 
         # Extract context-length from build_option's modify_llm
-        modify_llm = build_option.get('modify_llm', {})
-        hmm_info.context_length = modify_llm.get('context-length', 0)
+        modify_llm = build_option.get("modify_llm", {})
+        hmm_info.context_length = modify_llm.get("context-length", 0)
 
         # Extract flash_attention from build_option
-        hmm_info.flash_attention = bool(build_option.get('flash_attention', 0))
+        hmm_info.flash_attention = bool(build_option.get("flash_attention", 0))
     else:
         # readhmm not found, fallback to embedding.pt
         logger.info("readhmm command not found, falling back to embedding.pt detection")
 
         # Find embedding.pt files in current directory
-        embedding_files = list(Path('.').glob('*embedding.pt'))
+        embedding_files = list(Path(".").glob("*embedding.pt"))
         if embedding_files:
             # Use the first embedding.pt file
             embedding_file = embedding_files[0]
@@ -216,7 +220,7 @@ def read_hmm_info(hmm_file: str) -> HmmInfo:
 
             # Load embedding file and check dtype
             try:
-                embedding = torch.load(embedding_file, map_location='cpu')
+                embedding = torch.load(embedding_file, map_location="cpu")
                 if isinstance(embedding, dict):
                     # If it's a dict, check the first tensor
                     first_key = next(iter(embedding.keys()))
@@ -227,30 +231,33 @@ def read_hmm_info(hmm_file: str) -> HmmInfo:
 
                 # Set target based on dtype
                 if dtype == torch.int16:
-                    hmm_info.target = 'xh1'
+                    hmm_info.target = "xh1"
                 elif dtype == torch.float16:
-                    hmm_info.target = 'xh2'
+                    hmm_info.target = "xh2"
                 else:
-                    logger.warning(f"Unknown dtype {dtype} in embedding.pt, defaulting to xh2")
-                    hmm_info.target = 'xh2'
+                    logger.warning(
+                        f"Unknown dtype {dtype} in embedding.pt, defaulting to xh2"
+                    )
+                    hmm_info.target = "xh2"
             except Exception as e:
                 logger.error(f"Failed to load embedding.pt: {e}")
                 # Default to xh2 if we can't determine
-                hmm_info.target = 'xh2'
+                hmm_info.target = "xh2"
         else:
-            hmm_info.target = 'xh2'
+            hmm_info.target = "xh2"
         # Set default values
         hmm_info.core_num = 2
         hmm_info.batch = 1
 
     # Check if it's a hmms file to set device_num=2
-    if file_ext == '.hmms':
+    if file_ext == ".hmms":
         hmm_info.device_num = 2
     else:
         hmm_info.device_num = 1
 
     hmm_info.convert_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return hmm_info
+
 
 AnyModel = TypeVar("AnyModel", bound="type[ModelBase]")
 
@@ -877,13 +884,9 @@ class TextModel(ModelBase):
         required_keys = {
             "quant_embedding.bin": re.compile(r".*embedding\.pt$"),
             "prefill.hmm": re.compile(r".*prefill\.hmm(s)?$"),
-            "decoder.hmm": re.compile(r".*decode(r)?\.hmm(s)?$"),
         }
         optional_keys = {
-            "prefill_0.hmm": re.compile(r".*prefill_0\.hmm(s)?$"),
-            "prefill_1.hmm": re.compile(r".*prefill_1\.hmm(s)?$"),
-            "decoder_0.hmm": re.compile(r".*decoder_0\.hmm(s)?$"),
-            "decoder_1.hmm": re.compile(r".*decoder_1\.hmm(s)?$"),
+            "decoder.hmm": re.compile(r".*decode(r)?\.hmm(s)?$"),
         }
 
         # 检查模型目录是否存在
@@ -2061,6 +2064,7 @@ class MmprojModel(ModelBase):
                 logger.info(f".....Tensor size: {binary_data.shape}")
                 data = torch.from_numpy(binary_data.copy())
                 yield os.path.basename(json_file), data
+
     def prepare_tensors(self):
         # TODO: @guoxing.xu check & test this block
         # 自定义的tensor，不需要该函数
@@ -2540,6 +2544,7 @@ class Qwen3VLMoeTextModel(Qwen3MoeModel):
 
         return super().modify_tensors(data_torch, name, bid)
 
+
 @ModelBase.register("GPT2LMHeadModel")
 class GPT2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.GPT2
@@ -2865,7 +2870,9 @@ class WhisperEncoderModel(MmprojModel):
         return [(self.map_tensor_name(name), data_torch)]
 
 
-@ModelBase.register("BertModel", "BertForMaskedLM", "CamembertModel", "BertForSequenceClassification")
+@ModelBase.register(
+    "BertModel", "BertForMaskedLM", "CamembertModel", "BertForSequenceClassification"
+)
 class BertModel(TextModel):
     model_arch = gguf.MODEL_ARCH.BERT
 
@@ -2885,7 +2892,9 @@ class BertModel(TextModel):
         self._try_set_pooling_type()
 
         if self.cls_out_labels:
-            self.gguf_writer.add_classifier_output_labels([v for k, v in sorted(self.cls_out_labels.items())])
+            self.gguf_writer.add_classifier_output_labels(
+                [v for k, v in sorted(self.cls_out_labels.items())]
+            )
         self.gguf_writer.add_bool("is_hmm", True)
         if self.hmm_info:
             self.gguf_writer.add_string("hmm.info", self.hmm_info)
@@ -2936,6 +2945,7 @@ class BertModel(TextModel):
             self.gguf_writer.add_tensor(
                 name, data_torch.numpy(), raw_dtype=gguf.GGMLQuantizationType.I8
             )
+
     def set_vocab(self):
         tokens, toktypes, tokpre = self.get_vocab_base()
         self.vocab_size = len(tokens)
@@ -2952,6 +2962,7 @@ class BertModel(TextModel):
             if tok.startswith("##"):
                 return tok[2:]
             return "\u2581" + tok
+
         tokens = list(map(phantom, tokens))
 
         # add vocab to gguf
@@ -2980,19 +2991,20 @@ class BertModel(TextModel):
         from sentencepiece import SentencePieceProcessor
         from sentencepiece import sentencepiece_model_pb2 as model
 
-        tokenizer_path = self.dir_model / 'sentencepiece.bpe.model'
+        tokenizer_path = self.dir_model / "sentencepiece.bpe.model"
 
         tokenizer_json = {}
         tokenizer_config_json = {}
         if not tokenizer_path.is_file():
-            tokenizer_path = self.dir_model / 'tokenizer.json'
-            tokenizer_config_path = self.dir_model / 'tokenizer_config.json'
+            tokenizer_path = self.dir_model / "tokenizer.json"
+            tokenizer_config_path = self.dir_model / "tokenizer_config.json"
 
             if not tokenizer_path.is_file():
                 raise FileNotFoundError(f"File not found: {tokenizer_path}")
 
             from base64 import b64decode
             from transformers import AutoTokenizer
+
             tokenizer = AutoTokenizer.from_pretrained(self.dir_model)
 
             with open(tokenizer_path, "r", encoding="utf-8") as fp:
@@ -3004,17 +3016,25 @@ class BertModel(TextModel):
 
             add_prefix = tokenizer.add_prefix_space
             remove_whitespaces = tokenizer.clean_up_tokenization_spaces
-            precompiled_charsmap = b64decode(tokenizer_json["normalizer"]["precompiled_charsmap"])
+            precompiled_charsmap = b64decode(
+                tokenizer_json["normalizer"]["precompiled_charsmap"]
+            )
 
             vocab_size = max(self.hparams.get("vocab_size", 0), tokenizer.vocab_size)
         else:
-            sentencepiece_model = model.ModelProto()  # pyright: ignore[reportAttributeAccessIssue]
+            sentencepiece_model = (
+                model.ModelProto()
+            )  # pyright: ignore[reportAttributeAccessIssue]
             sentencepiece_model.ParseFromString(open(tokenizer_path, "rb").read())
             assert sentencepiece_model.trainer_spec.model_type == 1  # UNIGRAM
 
             add_prefix = sentencepiece_model.normalizer_spec.add_dummy_prefix
-            remove_whitespaces = sentencepiece_model.normalizer_spec.remove_extra_whitespaces
-            precompiled_charsmap = sentencepiece_model.normalizer_spec.precompiled_charsmap
+            remove_whitespaces = (
+                sentencepiece_model.normalizer_spec.remove_extra_whitespaces
+            )
+            precompiled_charsmap = (
+                sentencepiece_model.normalizer_spec.precompiled_charsmap
+            )
 
             tokenizer = SentencePieceProcessor()
             tokenizer.LoadFromFile(str(tokenizer_path))
@@ -3047,7 +3067,9 @@ class BertModel(TextModel):
         else:
             added_vocab = tokenizer.get_added_vocab()
             unk_token = tokenizer_config_json.get("unk_token")
-            unk_token_id = added_vocab.get(unk_token, tokenizer_json["model"].get("unk_id", 3))
+            unk_token_id = added_vocab.get(
+                unk_token, tokenizer_json["model"].get("unk_id", 3)
+            )
 
             for token_id in range(tokenizer.vocab_size):
                 piece = tokenizer._convert_id_to_token(token_id)
@@ -3072,7 +3094,7 @@ class BertModel(TextModel):
 
         if isinstance(tokenizer, SentencePieceProcessor):
             # realign tokens (see HF tokenizer code)
-            tokens = [b'<s>', b'<pad>', b'</s>', b'<unk>'] + tokens[3:-1]
+            tokens = [b"<s>", b"<pad>", b"</s>", b"<unk>"] + tokens[3:-1]
             scores = [0.0, 0.0, 0.0, 0.0] + scores[3:-1]
             toktypes = [
                 SentencePieceTokenTypes.CONTROL,
@@ -3083,7 +3105,7 @@ class BertModel(TextModel):
 
             if self.model_arch == gguf.MODEL_ARCH.NOMIC_BERT_MOE:
                 # Add mask token missing from sentencepiece.bpe.model
-                tokens[250001] = b'<mask>'
+                tokens[250001] = b"<mask>"
                 scores[250001] = 0.0
                 toktypes[250001] = SentencePieceTokenTypes.CONTROL
 
@@ -3108,7 +3130,9 @@ class XLMRobertaModel(BertModel):
     _lora_files = {}
     _lora_names = []
 
-    def __init__(self, dir_model: Path, ftype: gguf.LlamaFileType, fname_out: Path, **kwargs: Any):
+    def __init__(
+        self, dir_model: Path, ftype: gguf.LlamaFileType, fname_out: Path, **kwargs: Any
+    ):
         hparams = kwargs.pop("hparams", None)
         if hparams is None:
             hparams = ModelBase.load_hparams(dir_model)
@@ -3124,7 +3148,13 @@ class XLMRobertaModel(BertModel):
         if self._lora_names:
             for name in self._lora_names:
                 fname = self.add_prefix_to_filename(self.fname_out, f"lora-{name}-")
-                self._lora_files[name] = gguf.GGUFWriter(fname, arch=gguf.MODEL_ARCH_NAMES[self.model_arch], endianess=self.endianess, use_temp_file=self.use_temp_file, dry_run=self.dry_run)
+                self._lora_files[name] = gguf.GGUFWriter(
+                    fname,
+                    arch=gguf.MODEL_ARCH_NAMES[self.model_arch],
+                    endianess=self.endianess,
+                    use_temp_file=self.use_temp_file,
+                    dry_run=self.dry_run,
+                )
 
         return super().generate_extra_tensors()
 
@@ -3137,7 +3167,9 @@ class XLMRobertaModel(BertModel):
     def set_vocab(self):
         self._xlmroberta_set_vocab()
 
-    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+    def modify_tensors(
+        self, data_torch: Tensor, name: str, bid: int | None
+    ) -> Iterable[tuple[str, Tensor]]:
         # if name starts with "roberta.", remove the prefix
         # e.g. https://huggingface.co/BAAI/bge-reranker-v2-m3/tree/main
         if name.startswith("roberta."):
@@ -3152,7 +3184,7 @@ class XLMRobertaModel(BertModel):
         # position embeddings start at pad_token_id + 1, so just chop down the weight tensor
         if name == "embeddings.position_embeddings.weight":
             if self._position_offset is not None:
-                data_torch = data_torch[self._position_offset:,:]
+                data_torch = data_torch[self._position_offset :, :]
 
         if name.endswith(".0.lora_A") or name.endswith(".0.lora_B"):
             if name.startswith("pooler.dense"):
@@ -3170,7 +3202,11 @@ class XLMRobertaModel(BertModel):
                     data = data.T
                 elif new_name.startswith("token_types.weight."):
                     new_name = new_name[:-1] + ("a" if new_name[-1:] == "b" else "b")
-                lora_writer.add_tensor(new_name, data.float().numpy(), raw_dtype=gguf.GGMLQuantizationType.F32)
+                lora_writer.add_tensor(
+                    new_name,
+                    data.float().numpy(),
+                    raw_dtype=gguf.GGMLQuantizationType.F32,
+                )
 
             return []
 
@@ -3184,12 +3220,21 @@ class XLMRobertaModel(BertModel):
             self.gguf_writer.add_rope_freq_base(rotary_emb_base)
         lora_alpha = self.hparams.get("lora_alpha")
         if lora_prompt_prefixes := self.hparams.get("task_instructions"):
-            assert self._lora_files and all(lora_name in lora_prompt_prefixes for lora_name in self._lora_files.keys())
+            assert self._lora_files and all(
+                lora_name in lora_prompt_prefixes
+                for lora_name in self._lora_files.keys()
+            )
         for lora_name, lora_writer in self._lora_files.items():
-            lora_writer.add_float32(gguf.Keys.Adapter.LORA_ALPHA, lora_alpha if lora_alpha is not None else 1.0)
+            lora_writer.add_float32(
+                gguf.Keys.Adapter.LORA_ALPHA,
+                lora_alpha if lora_alpha is not None else 1.0,
+            )
             lora_writer.add_string(gguf.Keys.Adapter.LORA_TASK_NAME, lora_name)
             if lora_prompt_prefixes:
-                lora_writer.add_string(gguf.Keys.Adapter.LORA_PROMPT_PREFIX, lora_prompt_prefixes[lora_name])
+                lora_writer.add_string(
+                    gguf.Keys.Adapter.LORA_PROMPT_PREFIX,
+                    lora_prompt_prefixes[lora_name],
+                )
 
     def write(self):
         super().write()
@@ -3198,7 +3243,6 @@ class XLMRobertaModel(BertModel):
             lora_writer.write_kv_data_to_file()
             lora_writer.write_tensors_to_file(progress=True)
             lora_writer.close()
-
 
 
 ###### CONVERSION LOGIC ######

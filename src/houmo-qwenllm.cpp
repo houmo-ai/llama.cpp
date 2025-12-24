@@ -139,3 +139,32 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
     }
     return 0;
 }
+
+int HoumoQwenLLM::houmo_embedding(
+    const std::map<int32_t, std::vector<llama_token>> &batches,
+    std::map<int, float *> &embeddings) {
+    // 处理每个批次
+    for (auto &[seq_id, tokens] : batches) {
+        // 跳过空tokens
+        if (tokens.empty()) {
+            continue;
+        }
+        
+        auto &embedding = embeddings[seq_id];
+        
+        // 验证embedding指针
+        if (embedding == nullptr) {
+            LLAMA_LOG_ERROR("%s: null embedding pointer for seq_id %d\n", __func__, seq_id);
+            return -1;
+        }
+        
+        // 调用houmo_prefill并检查返回值
+        int ret = houmo_prefill(const_cast<std::vector<llama_token>&>(tokens), seq_id, embedding);
+        if (ret != 0) {
+            LLAMA_LOG_ERROR("%s: houmo_prefill failed for seq_id %d with error code %d\n", 
+                           __func__, seq_id, ret);
+            return -1;
+        }
+    }
+    return 0;
+}

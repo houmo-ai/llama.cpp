@@ -1226,7 +1226,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     const bool output_all = cparams.embeddings;
 
     if (model.hparams.is_hmm) {
-        if (cparams.embeddings)
+        if (cparams.embeddings && cparams.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED)
             return houmo_embedding(batch_inp);
         else
             return houmo_decode(batch_inp);
