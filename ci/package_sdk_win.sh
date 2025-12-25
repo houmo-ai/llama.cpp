@@ -134,6 +134,7 @@ package_llama() {
     cp -r vendor/nlohmann "$release_dir/include/" || true
     cp -r src/llama*.h* "$release_dir/include/" || true
     cp -r tools/server/*.h* "$release_dir/include/server/" || true
+    cp -r build/tools/server/*.hpp "$release_dir/include/server/" || true
     # 复制库文件
     cp build/src/Release/*.lib "$release_dir/lib/" || true
     cp build/common/Release/*.lib "$release_dir/lib/" || true

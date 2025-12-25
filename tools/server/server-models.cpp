@@ -724,38 +724,6 @@ void server_models_routes::init_routes() {
         return models.proxy_request(req, method, name, true); // update last usage for POST request only
     };
 
-    this->get_router_models = [this](const server_http_req &) {
-        auto res = std::make_unique<server_http_res>();
-        json models_json = json::array();
-        auto all_models = models.get_all_meta();
-        std::time_t t = std::time(0);
-        for (const auto & meta : all_models) {
-            json status {
-                {"value", server_model_status_to_string(meta.status)},
-                {"args",  meta.args},
-            };
-            if (meta.is_failed()) {
-                status["exit_code"] = meta.exit_code;
-                status["failed"]    = true;
-            }
-            models_json.push_back(json {
-                {"id",       meta.name},
-                {"object",   "model"},    // for OAI-compat
-                {"owned_by", "llamacpp"}, // for OAI-compat
-                {"created",  t},          // for OAI-compat
-                {"in_cache", meta.in_cache},
-                {"path",     meta.path},
-                {"status",   status},
-                // TODO: add other fields, may require reading GGUF metadata
-            });
-        }
-        res_ok(res, {
-            {"data", models_json},
-            {"object", "list"},
-        });
-        return res;
-    };
-
     this->post_router_models_load = [this](const server_http_req & req) {
         auto res = std::make_unique<server_http_res>();
         json body = json::parse(req.body);
