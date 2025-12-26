@@ -42,142 +42,41 @@ print_warning() {
     echo ""
 }
 
-print_warning  "不支持旧版本(0.7.0之前）模型，请下载0.7.0版本GGUF"
+print_warning  "不支持旧版本(0.7.0之前）模型，请下载0.7.0版本GGUF, 本脚本后续版本废弃，直接./bin/llama-server运行"
 
 show_help() {
-    echo "usage: run_llama_server.sh [env] [--list|--download model_name] run model_name [extra_args...]"
+    echo "usage: run_llama_server.sh [env] run model_path [extra_args...]"
     echo ""
     echo "usage 示例0: <多卡环境绑卡操作>：export HOUMO_DEVICE_ID=0 或者双卡export HOUMO_DEVICE_ID=0,1"
     echo ""
-    echo "usage 示例1: <指定端口号>: run_llama_server.sh run model_name --port 18080"
+    echo "usage 示例1: <指定端口号>: run_llama_server.sh run model_path --port 17701"
     echo ""
-    echo "usage 示例2: <关闭Qwen3的Think机制>: run_llama_server.sh run model_name --reasoning-budget 0"
+    echo "usage 示例2: <关闭Qwen3的Think机制>: run_llama_server.sh run model_path --reasoning-budget 0"
     echo ""
-    echo "usage 示例3: <非多batch模型性能会下降，且受限显存大小，最大4>: run_llama_server.sh run model_name -np 2"
+    echo "usage 示例3: <非多batch模型性能会下降，且受限显存大小，最大4>: run_llama_server.sh run model_path -np 2"
     echo ""
-    echo "usage 示例4: <后台运行>: run_llama_server.sh rund  model_name --port 18080"
+    echo "usage 示例4: <后台运行>: run_llama_server.sh rund  model_path --port 17701"
     echo ""
-    echo "usage 示例5: <多模态模型>: run_llama_server.sh run model_name --mmproj mmproj_name.gguf"
-    echo "更多参数，参考llama-server的帮助文档"
+    echo "usage 示例5: <多模态模型>: run_llama_server.sh run model_path --mmproj mmproj_name.gguf"
+    echo ""
+    echo "usage 示例6: <指定模型目录>: run_llama_server.sh run /path/to/ 可以配合model_cli 工具使用"
+    echo ""
+    echo "更多参数，执行 ./bin/llama-server --help 查看"
 }
 # 初始化额外参数数组（避免未定义错误）
 extra_args=()
 default_port_args=("--port" "17701")  # 默认端口号
-# xh1 模型列表
-declare -A models_xh1=(
-)
-
-# xh2 模型列表
-declare -A models_xh2=(
-)
-
-# 设置默认值
-xh_type="xh1"  # 可通过参数--xh-type修改（如需要）
-export LD_LIBRARY_PATH=$(pwd)/lib
-rund=false  # 是否后台运行
-# 设置xh2特定环境变量
-if [ "$xh_type" == "xh2" ]; then
-    export TCIM_BACKEND=Xh2HalBackend
-    if [ -n "${HOUMO_SDK_PATH:-}" ] && [ -f "${HOUMO_SDK_PATH}/hal/lib/libhal_xh2a.so" ]; then
-        echo "使用HOUMO_SDK_PATH中的so文件, 确保与驱动匹配"
-        export LD_LIBRARY_PATH="${HOUMO_SDK_PATH}/hal/lib:$LD_LIBRARY_PATH"
-    elif [ -f "/usr/local/houmo-sdk/hal/lib/libhal_xh2a.so" ]; then
-        echo "使用HOUMO_SDK_PATH中的so文件, 确保与驱动匹配"
-        export LD_LIBRARY_PATH="/usr/local/houmo-sdk/hal/lib:$LD_LIBRARY_PATH"
-    else
-        echo "警告: driver/hal/lib 目录不存在"
-        echo "使llama.cpp携带的默认so文件, 如果失败请安装匹配的驱动版本。"
-    fi
-elif [ "$xh_type" == "xh1" ]; then
-    # 判断目录是否存在
-    if [ -n "${HOUMO_SDK_PATH:-}" ] && [ -d "${HOUMO_SDK_PATH}/hal/lib" ]; then
-        echo "使用HOUMO_SDK_PATH中的so文件"
-        export LD_LIBRARY_PATH="${HOUMO_SDK_PATH}/hal/lib:$LD_LIBRARY_PATH"
-    elif [ -d "/usr/local/houmo-sdk/hal/lib" ]; then
-        echo "使用/usr/local/houmo-sdk/hal/lib中的so文件"
-        export LD_LIBRARY_PATH="/usr/local/houmo-sdk/hal/lib:$LD_LIBRARY_PATH"
-    else
-        echo "警告: driver/hal/lib 目录不存在"
-        echo "使llama.cpp携带的默认so文件, 如果失败请安装匹配的驱动版本。"
-    fi
-fi
 
 
-# 构建模型列表（修复关联数组赋值错误）
-declare -A models=()
-if [ "$xh_type" == "xh1" ]; then
-    for key in "${!models_xh1[@]}"; do
-        models["$key"]="${models_xh1[$key]}"
-    done
-elif [ "$xh_type" == "xh2" ]; then
-    for key in "${!models_xh2[@]}"; do
-        models["$key"]="${models_xh2[$key]}"
-    done
-fi
 # 检查是否没有提供任何参数
 if [[ "$#" -eq 0 ]]; then
     show_help
     exit 1
 fi
+rund=false
 # 解析命令行参数
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --list) 
-            echo "支持的模型列表（设备类型：$xh_type）："
-            # 遍历模型列表，检查本地文件是否存在
-            for model in "${!models[@]}"; do
-                # 获取模型所有关联文件的URL
-                urls=(${models[$model]})
-                all_exist=true  # 标记是否所有文件都已下载
-
-                # 检查每个文件是否存在
-                for url in "${urls[@]}"; do
-                    filename=$(basename "$url")
-                    filepath="models/$filename"
-                    if [ ! -f "$filepath" ]; then
-                        all_exist=false
-                        break  # 只要有一个文件不存在，就标记为未下载
-                    fi
-                done
-
-                # 输出模型名称及状态
-                if [ "$all_exist" = true ]; then
-                    echo "  - $model [已下载]"
-                else
-                    echo "  - $model [未下载]"
-                fi
-            done
-            exit 0
-            ;;
-        --download)
-            if [ -z "$2" ]; then
-                echo "错误: 请指定要下载的模型名称"
-                exit 1
-            fi
-            model_name=$2
-            if [ -z "${models[$model_name]}" ]; then
-                echo "错误: 模型 $model_name 不存在"
-                exit 1
-            fi
-            # 确保models目录存在
-            mkdir -p models
-            model_urls=(${models[$model_name]})
-            echo "正在下载模型 $model_name ..."
-            for url in "${model_urls[@]}"; do
-                wget -O "models/$(basename "$url")" "$url"
-            done
-            echo "模型 $model_name 下载完成"
-            exit 0
-            ;;
-        env)
-            echo "设置运行时环境变量..."
-            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-            if [ "$xh_type" == "xh2" ]; then
-                echo "TCIM_BACKEND=$TCIM_BACKEND"
-                echo "TCIM_RUNTIME_PATH=$TCIM_RUNTIME_PATH"
-            fi
-            exit 0
-            ;;
         run | rund)
             if [ "$1" == "rund" ]; then
                 rund=true
@@ -192,26 +91,8 @@ while [[ "$#" -gt 0 ]]; do
             elif [ -d $model_name ]; then
                 model_path=$model_name
             else
-                if [ -z "${models[$model_name]}" ]; then
-                    echo "错误: 模型 $model_name 不存在"
-                    exit 1
-                fi
-                model_urls=(${models[$model_name]})
-                model_path="models/$(basename "${model_urls[0]}")"
-                mmproj_model_path=""
-                if [ ${#model_urls[@]} -gt 1 ]; then
-                    mmproj_model_path="models/$(basename "${model_urls[1]}")"
-                    echo "检测到VL模型，mmproj路径: $mmproj_model_path"
-                fi
-
-                # 检查所有模型文件是否存在
-                for url in "${model_urls[@]}"; do
-                    filepath="models/$(basename "$url")"
-                    if [ ! -f "$filepath" ]; then
-                        echo "错误: 模型文件 $filepath 不存在，请先使用 --download $model_name 下载"
-                        exit 1
-                    fi
-                done
+                echo "错误: 模型 $model_name 不存在"
+                exit 1
             fi
 
             # 收集剩余参数作为透传参数
@@ -226,13 +107,6 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
-# 检查模型文件是否存在
-if [ ! -e "$model_path" ]; then
-    echo "错误: 模型文件 $model_path 不存在，请先使用 --download $model_name 下载"
-    exit 1
-fi
-
-# 构建启动命令
 if [ -d "$model_path" ]; then
     launch_cmd=(
         ./bin/llama-server

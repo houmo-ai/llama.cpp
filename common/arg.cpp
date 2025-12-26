@@ -1005,6 +1005,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_KV_UNIFIED"));
     add_opt(common_arg(
+        {"--no-cache-prompt"},
+        string_format("disables caching of prompt (default: %s)", params.cache_prompt ? "disabled" : "enabled"),
+        [](common_params & params) {
+            params.cache_prompt = false;
+        }
+    ));
+    add_opt(common_arg(
         {"--no-context-shift"},
         string_format("disables context shift on infinite text generation (default: %s)", params.ctx_shift ? "disabled" : "enabled"),
         [](common_params & params) {
@@ -2577,7 +2584,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "- none: leaves thoughts unparsed in `message.content`\n"
         "- deepseek: puts thoughts in `message.reasoning_content`\n"
         "- deepseek-legacy: keeps `<think>` tags in `message.content` while also populating `message.reasoning_content`\n"
-        "(default: auto)",
+        "(default: none)",
         [](common_params & params, const std::string & value) {
             params.reasoning_format = common_reasoning_format_from_name(value);
         }

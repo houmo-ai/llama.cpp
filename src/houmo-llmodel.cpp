@@ -536,6 +536,12 @@ void HouMoLLModel::Impl::set_input_data(tcim::Tensor &tensor,
 }
 void HouMoLLModel::Impl::initialize_kv_cache(int size) {
     if (decode_model_ == nullptr) {
+        // 非decode模型, 无需初始化kv_cache
+        std::string name =
+            prefill_model_->GetInputName(prefill_input_map_.size());
+        context_length_ =
+            std::max(prefill_model_->GetInputInfo(name).Shape()[2],
+                     prefill_model_->GetInputInfo(name).Shape()[3]);
         return;
     }
     // FIXME: M30 QWENVL 的命名和M50 不一致, 量化后续会统一后移除

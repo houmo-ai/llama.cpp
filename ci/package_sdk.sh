@@ -35,11 +35,12 @@ case "$PLATFORM" in
 esac
 
 # SDK URLs
-xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/10/1457/ubuntu1804/houmo_tcim_runtime_xh1_ubuntu1804_x86_64-0.6.0.tar.gz"
-xh1_dadao_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/10/1457/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_aarch64-0.6.0.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.7.0/2025/12/18/1632/ubuntu2004/houmo_tcim_runtime_xh2_ubuntu2004_${ARCH}-0.7.0.tar.gz"
+xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/ubuntu1804/houmo_tcim_runtime_xh1_ubuntu1804_x86_64-2.6.0.tar.gz"
+xh1_dadao_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_aarch64-2.6.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.7.0/2025/12/26/2226/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-0.7.0.tar.gz"
 
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/daily/hlaw_ollama.${ARCH}"
+modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.${ARCH}"
 # 下载文件并检查是否成功
 download_file() {
     local url=$1
@@ -115,7 +116,7 @@ package_llama() {
     # 清理并创建目录结构
     rm -rf "$release_dir"/*
     mkdir -p "$release_dir/include" "$release_dir/lib" "$release_dir/bin" "$release_dir/scripts"
-    mkdir -p "$release_dir/include/server"
+    mkdir -p "$release_dir/include/server" "$release_dir/service" "$release_dir/models"
 
     # 复制头文件
     cp -r include/* "$release_dir/include/" || true
@@ -146,8 +147,21 @@ package_llama() {
     cp build/bin/llama-gguf "$release_dir/bin/" || true
     cp build/bin/llama-gguf-split "$release_dir/bin/" || true
     cp build/bin/llama-cli "$release_dir/bin/" || true
+    for file in "$release_dir/bin/"*; do
+        patchelf --set-rpath '$ORIGIN/../lib' "$file"
+    done
+    for so_file in "$release_dir"/lib/*.so; do
+        if [ -f "$so_file" ]; then
+            patchelf --set-rpath '$ORIGIN' "$so_file"
+        fi
+    done
+
     cp tools/server/qwen3_nonthinking.jinja "$release_dir/bin/" || true
     cp ci/run_llama_server.sh "$release_dir/" || true
+    cp ci/install_*.sh "$release_dir/service/" || true
+    cp ci/uninstall_*.sh "$release_dir/service/" || true
+
+
     # 设置run_llama_server.sh中xh_type参数
     sed -i "s/xh_type=.*/xh_type=$PLATFORM/" "$release_dir/run_llama_server.sh"
     # 复制脚本
@@ -218,8 +232,11 @@ main() {
     build_llama
     package_llama
 
+    download_file "$modelcli_url" "release/$PLATFORM/$ARCH/bin/model_cli"
     download_file "$ollama_url" "release/$PLATFORM/$ARCH/bin/hlaw_ollama"
+    patchelf --set-rpath '$ORIGIN/../lib' release/$PLATFORM/$ARCH/bin/hlaw_ollama
     chmod 755 release/$PLATFORM/$ARCH/bin/hlaw_ollama
+    chmod 755 release/$PLATFORM/$ARCH/bin/model_cli
     echo "LLAMA build and packaging completed for $PLATFORM/$ARCH."
 }
 # 执行主函数

@@ -304,8 +304,8 @@ struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
 
 struct common_params {
     int32_t n_predict             =    -1; // new tokens to predict
-    int32_t n_ctx                 =  4096; // context size
-    int32_t n_batch               =  2048; // logical batch size for prompt processing (must be >=32 to use BLAS)
+    int32_t n_ctx                 =     0; // context size
+    int32_t n_batch               =  8192; // logical batch size for prompt processing (must be >=32 to use BLAS)
     int32_t n_ubatch              =   512; // physical batch size for prompt processing (must be >=32 to use BLAS)
     int32_t n_keep                =     0; // number of tokens to keep from initial prompt
     int32_t n_chunks              =    -1; // max number of chunks to process (-1 = unlimited)
@@ -411,6 +411,7 @@ struct common_params {
     bool ctx_shift         = false; // context shift on infinite text generation
     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
     bool kv_unified        = false; // enable unified KV cache
+    bool cache_prompt      = true;  // cache prompt
 
     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
     bool use_mmap          = true;  // use mmap for faster loads
@@ -452,7 +453,7 @@ struct common_params {
     std::string cls_sep    = "\t";  // separator of classification sequences
 
     // server params
-    int32_t port              = 8080;         // server listens on this network port
+    int32_t port              = 17701;         // server listens on this network port
     int32_t timeout_read      = 600;          // http read timeout in seconds
     int32_t timeout_write     = timeout_read; // http write timeout in seconds
     int32_t n_threads_http    = -1;           // number of threads to process HTTP requests (TODO: support threadpool)
@@ -460,13 +461,13 @@ struct common_params {
     int32_t n_ctx_checkpoints = 8;            // max number of context checkpoints per slot
     int32_t cache_ram_mib     = 8192;         // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
 
-    std::string hostname      = "127.0.0.1";
+    std::string hostname      = "0.0.0.0";
     std::string public_path   = "";                                                                         // NOLINT
     std::string api_prefix    = "";                                                                         // NOLINT
     std::string chat_template = "";                                                                         // NOLINT
-    bool use_jinja = false;                                                                                 // NOLINT
+    bool use_jinja = true;                                                                                 // NOLINT
     bool enable_chat_template = true;
-    common_reasoning_format reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+    common_reasoning_format reasoning_format = COMMON_REASONING_FORMAT_NONE;
     int reasoning_budget = -1;
     bool prefill_assistant = true;                                                                          // if true, any trailing assistant message will be prefilled into the response
 
