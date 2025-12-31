@@ -119,9 +119,9 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t current_length = 0;
 
     std::vector<llama_token> input_ids;
-    int32_t valid_length = memory_->seq_pos_min(seq_id);
+    int kv_offset = memory_->seq_pos_min(seq_id);
+    int32_t valid_length = kv_offset;
     for (int round = 0; round < prefill_loop_round; round++) {
-        valid_length = round * prefill_length_;
         if (round == prefill_loop_round - 1) {
             current_length = input_echo_len - round * prefill_length_;
             auto first = prefill_tokens_.begin() + round * prefill_length_;
@@ -152,12 +152,13 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                  prefill_valid_length);
         prefill_model_->SetInput(prefill_model_->GetInputName(2),
                                  prefill_current_length);
-        set_attentions_for_prefill(current_length, valid_length);
+        set_attentions_for_prefill(current_length, valid_length - kv_offset);
         set_kv_cache_for_prefill(seq_id);
         prefill_model_->Run();
         prefill_model_->Sync();
+        valid_length += prefill_length_;
     }
-    decode_valid_length_[seq_id] = input_echo_len;
+    decode_valid_length_[seq_id] = input_echo_len + kv_offset;
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
     // 转浮点
@@ -165,6 +166,7 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     prefill_output_data.CastTo(prefill_output_float);
     memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
     prefill_tokens_.resize(0);
+    memory_->seq_add(seq_id, 0, 0, input_echo_len);
     return 0;
 }
 
@@ -221,6 +223,7 @@ int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
         float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
                             batch_id * n_vocab;
         memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+        memory_->seq_add(batch_id, 0, 0, 1);
     }
     return 0;
 }

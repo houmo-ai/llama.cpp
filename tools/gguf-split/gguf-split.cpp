@@ -196,7 +196,7 @@ struct split_strategy {
     std::ifstream & f_input;
     struct gguf_context * ctx_gguf;
     struct ggml_context * ctx_meta = NULL;
-    const int n_tensors;
+    int n_tensors;
     bool is_hmm = false;
     // one ctx_out per one output file
     std::vector<struct gguf_context *> ctx_outs;
@@ -217,6 +217,17 @@ struct split_strategy {
         if (is_hmm) {
             this->params.n_split_tensors = 1;
             this->params.mode = MODE_TENSOR;
+            // 跳过json和txt文件
+            int skip_count = 0;
+            for (int i = 0; i < n_tensors; ++i) {
+                std::string tensor_name = gguf_get_tensor_name(ctx_gguf, i);
+                if (is_hmm && (tensor_name.find(".json") != std::string::npos ||
+                            tensor_name.find(".txt") != std::string::npos ||
+                            tensor_name.find(".jinja") != std::string::npos)) {
+                    skip_count++;
+                }
+            }
+            n_tensors -= skip_count;
         }
         // because we need to know list of tensors for each file in advance, we will build all the ctx_out for all output splits
         int i_split = -1;
@@ -252,10 +263,6 @@ struct split_strategy {
         size_t curr_tensors_size = 0; // current size by counting only tensors size (without metadata)
         for (int i = 0; i < n_tensors; ++i) {
             std::string tensor_name = gguf_get_tensor_name(ctx_gguf, i);
-            if (is_hmm && (tensor_name.find(".json") != std::string::npos ||
-                           tensor_name.find(".txt") != std::string::npos)) {
-                continue;
-            }
             struct ggml_tensor * t = ggml_get_tensor(ctx_meta, gguf_get_tensor_name(ctx_gguf, i));
             // calculate the "imaginary" size = the current size + next tensor size
             size_t n_bytes = GGML_PAD(ggml_nbytes(t), GGUF_DEFAULT_ALIGNMENT);

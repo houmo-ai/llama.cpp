@@ -57,7 +57,7 @@ class houmo_memory_i : public llama_memory_i {
         (void) seq_id;
         (void) p0;
         (void) p1;
-        seq_pos_map[seq_id] = p0;
+        seq_pos_map[seq_id] = std::min(seq_pos_map[seq_id], p0);
         return true;
     }
     virtual void seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst,
@@ -78,6 +78,7 @@ class houmo_memory_i : public llama_memory_i {
         (void) p0;
         (void) p1;
         (void) shift;
+        seq_pos_map[seq_id] += shift;
         return;
     }
     virtual void seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1,

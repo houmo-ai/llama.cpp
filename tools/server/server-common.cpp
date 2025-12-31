@@ -250,10 +250,11 @@ llama_pos server_tokens::pos_next() const {
 
     llama_pos res = tokens.size();
 
-    for (auto it = map_idx_to_media.begin(); it != map_idx_to_media.end(); ++it) {
-        const auto & chunk = it->second;
-        res += mtmd_input_chunk_get_n_pos(chunk.get()) - mtmd_input_chunk_get_n_tokens(chunk.get());
-    }
+    //FIXME: commented by guoxing.xu. check again...
+    // for (auto it = map_idx_to_media.begin(); it != map_idx_to_media.end(); ++it) {
+    //     const auto & chunk = it->second;
+    //     res += mtmd_input_chunk_get_n_pos(chunk.get()) - mtmd_input_chunk_get_n_tokens(chunk.get());
+    // }
 
     return res;
 }

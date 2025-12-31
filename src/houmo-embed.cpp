@@ -119,7 +119,7 @@ int HouMoEmbed::houmo_embedding(
 
         auto &token_vec = seqid_map.at(i);
         for (size_t j = 0; j < token_vec.size(); j++) {
-            LLAMA_LOG_INFO("Putting token %d at batch %d, position %lu\n",
+            LLAMA_LOG_DEBUG("Putting token %d at batch %d, position %lu\n",
                            token_vec[j], i, i * n_context_length_ + j);
             input_ptr[i * n_context_length_ + j] = token_vec[j];
             attention_mask_vec[i * n_context_length_ + j] = 1;

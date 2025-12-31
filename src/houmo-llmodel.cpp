@@ -29,7 +29,8 @@ static bool string_replace_once(std::string &str, const std::string &from,
 }
 std::shared_ptr<tcim::Module>
 HouMoLLModel::Impl::create_infer_engine(bool prefill, void *raw_data,
-                                        int64_t size, bool load_from_file) {
+                                        int64_t size, bool load_from_file,
+                                        std::vector<std::string> dummy_tensor_names) {
     if (wm_.GetInitStatus() != tcim::Status::OK) {
         auto device_ids = parse_deviceids();
         std::string backend = "";
@@ -53,10 +54,10 @@ HouMoLLModel::Impl::create_infer_engine(bool prefill, void *raw_data,
     }
     tcim::Status status;
     auto infer_model = std::make_shared<tcim::Module>();
-
+    auto option = tcim::Module::Option(wm_);
+    option.SetDummyTensors(dummy_tensor_names);
+    option.EnableLazyMode(enable_lazy_mode_);
     if (prefill) {
-        auto option = tcim::Module::Option(wm_);
-        option.EnableLazyMode(true);
         if (!load_from_file)
             status = infer_model->LoadModel(raw_data, size, option);
         else {
@@ -67,8 +68,6 @@ HouMoLLModel::Impl::create_infer_engine(bool prefill, void *raw_data,
             status = infer_model->LoadModel(prefill_name, option);
         }
     } else {
-        auto option = tcim::Module::Option(wm_);
-        option.EnableLazyMode(true);
         if (!load_from_file)
             status = infer_model->LoadModel(raw_data, size, option);
         else {
@@ -86,9 +85,9 @@ HouMoLLModel::Impl::create_infer_engine(bool prefill, void *raw_data,
     return infer_model;
 }
 
-std::shared_ptr<tcim::Module>
-HouMoLLModel::Impl::create_infer_engine(const std::string &file_name,
-                                        size_t offset, size_t size) {
+std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
+    const std::string &file_name, size_t offset, size_t size,
+    std::vector<std::string> dummy_tensor_names) {
     if (wm_.GetInitStatus() != tcim::Status::OK) {
         std::string backend = "";
 #ifdef XH2_ENABLED
@@ -112,9 +111,9 @@ HouMoLLModel::Impl::create_infer_engine(const std::string &file_name,
     }
     tcim::Status status;
     auto infer_model = std::make_shared<tcim::Module>();
-
     auto option = tcim::Module::Option(wm_);
-    option.EnableLazyMode(true);
+    option.SetDummyTensors(dummy_tensor_names);
+    option.EnableLazyMode(enable_lazy_mode_);
 #ifdef XH2_ENABLED
     option.SetModelOffset(offset, size);
 #else
@@ -142,7 +141,22 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
     // 从gguf文件中加载hmmodels
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
     const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
-
+    // 环境变量中是否开启了LLAMA_ENABLE_LAZY_MODE
+    enable_lazy_mode_ = false;
+    if (const char *env = std::getenv("LLAMA_ENABLE_LAZY_MODE")) {
+        enable_lazy_mode_ = (std::string(env) == "1");
+    }
+    LLAMA_LOG_INFO("LLAMA_ENABLE_LAZY_MODE: %d\n", enable_lazy_mode_);
+    std::vector<std::string> dummy_tensor_names;
+    // 防止更高效使用内存，这个将prefill 设置为dummy_tensor_names
+    for (int idx = 0; idx < n_blocks_; idx++) {
+        std::string k_cache_name = "model_layers_" + std::to_string(idx) +
+                                    "_self_attn_kcache_input";
+        std::string v_cache_name = "model_layers_" + std::to_string(idx) +
+                                    "_self_attn_vcache_input";
+        dummy_tensor_names.push_back(k_cache_name);
+        dummy_tensor_names.push_back(v_cache_name);
+    }
 #ifndef XH2_ENABLED
     use_mmap = false;
 #endif
@@ -166,15 +180,13 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
         } else if (std::regex_match(name, kPrefillPattern)) {
             // load prefill
             if (use_mmap) {
-#ifdef XH2_ENABLED
-                prefill_model_ = create_infer_engine(file_name, offset, size);
-#endif
+                prefill_model_ = create_infer_engine(file_name, offset, size, dummy_tensor_names);
             } else {
                 std::vector<char> buffer_vec;
                 buffer_vec.resize(size);
                 read_tensor_to_buffer(file_name, offset, size, buffer_vec);
                 prefill_model_ =
-                    create_infer_engine(true, buffer_vec.data(), size, false);
+                    create_infer_engine(true, buffer_vec.data(), size, false, dummy_tensor_names);
             }
             if (prefill_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load prefill.hmm\n", __func__);
@@ -184,9 +196,7 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
         } else if (std::regex_match(name, kDecodePattern)) {
             // load decode
             if (use_mmap) {
-    #ifdef XH2_ENABLED
-            decode_model_ = create_infer_engine(file_name, offset, size);
-    #endif
+                decode_model_ = create_infer_engine(file_name, offset, size);
             } else {
                 std::vector<char> buffer_vec;
                 buffer_vec.resize(size);
@@ -516,6 +526,9 @@ void HouMoLLModel::Impl::set_input_data(tcim::Tensor &tensor,
                                         std::vector<int32_t> &int32_vec,
                                         size_t offset) {
     if (offset >= int32_vec.size()) {
+        LLAMA_LOG_ERROR(
+            "%s: offset is out of range, offset: %zu, int32_vec.size(): %zu\n",
+            __func__, offset, int32_vec.size());
         throw std::out_of_range("Offset is out of range");
     }
     if (tensor.Info().DataType() == tcim::DataType::INT16) {
@@ -808,4 +821,7 @@ int HouMoLLModel::houmo_embedding(
     const std::map<int32_t, std::vector<llama_token>> &batches,
     std::map<int, float *> &embeddings) {
     return impl_->houmo_embedding(batches, embeddings);
+}
+bool HouMoLLModel::is_embedding() {
+    return impl_->is_embedding();
 }

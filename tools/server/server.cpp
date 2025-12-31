@@ -76,12 +76,12 @@ int main(int argc, char ** argv, char ** envp) {
     //       https://github.com/ggml-org/llama.cpp/pull/16736#discussion_r2483763177
     // TODO: this is a common configuration that is suitable for most local use cases
     //       however, overriding the parameters is a bit confusing - figure out something more intuitive
-    // if (params.n_parallel == 1 && params.kv_unified == false && !params.has_speculative()) {
-    //     LOG_WRN("%s: setting n_parallel = 4 and kv_unified = true (add -kvu to disable this)\n", __func__);
+    if (params.n_parallel == 1 && params.kv_unified == false && !params.has_speculative()) {
+        LOG_WRN("%s: setting n_parallel = 4 and kv_unified = true (add -kvu to disable this)\n", __func__);
 
-    //     params.n_parallel = 4;
-    //     params.kv_unified = true;
-    // }
+        params.n_parallel = 1;
+        params.kv_unified = true;
+    }
 
     // for consistency between server router mode and single-model mode, we set the same model name as alias
     if (params.model_alias.empty() && !params.model.name.empty()) {

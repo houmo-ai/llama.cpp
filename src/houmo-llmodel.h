@@ -32,6 +32,7 @@ class HouMoLLModel {
                      std::vector<int> &seq_ids, std::vector<float *> logits);
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings);
+    bool is_embedding();
     int n_decode_batch();
     int n_prefill_batch();
     uint32_t n_context_length();
@@ -77,7 +78,9 @@ public:
   virtual int houmo_decode(std::vector<llama_token> &batches,
                            std::vector<int> &seq_ids,
                            std::vector<float *> logits) = 0;
-
+  virtual bool is_embedding() {
+    return false;
+  }
   int n_decode_batch() const { return n_decode_batch_; }
   int n_prefill_batch() const { return n_prefill_batch_; }
   uint32_t n_context_length() const { return context_length_;}
@@ -168,10 +171,11 @@ protected:
                       size_t offset = 0);
   std::shared_ptr<tcim::Module>
   create_infer_engine(bool prefill, void *raw_data, int64_t size,
-                      bool load_from_file = false);
-  std::shared_ptr<tcim::Module> create_infer_engine(const std::string &file_name,
-                                                    size_t offset,
-                                                    size_t size);
+                      bool load_from_file = false,
+                      std::vector<std::string> dummy_tensor_names = {});
+  std::shared_ptr<tcim::Module>
+  create_infer_engine(const std::string &file_name, size_t offset, size_t size,
+                      std::vector<std::string> dummy_tensor_names = {});
 
 protected:
   int prefill_length_ = 256;
@@ -208,5 +212,6 @@ protected:
   std::string model_arch_ = "";
   bool xh1_ = false;
   bool multi_device_model_ = false;
+  bool enable_lazy_mode_ = false;
   houmo_memory_i *memory_ = nullptr;
 };

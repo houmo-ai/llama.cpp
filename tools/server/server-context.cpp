@@ -567,6 +567,7 @@ struct server_context_impl {
     llama_batch batch {};
 
     bool add_bos_token  = true;
+    bool is_hmm = false;
 
     int32_t n_ctx; // total context for all clients / slots
 
@@ -731,6 +732,10 @@ struct server_context_impl {
         info_printer.print_process_memory_info();
         auto model_info = model_meta();
         info_printer.print_model_info(model_info);
+        char hmmstr[16] = {0};
+        if (llama_model_meta_val_str(model,"is_hmm", hmmstr, sizeof(hmmstr)/sizeof(char)) > 0) {
+            is_hmm = true;
+        }
         return true;
     }
 
@@ -1977,15 +1982,36 @@ struct server_context_impl {
                                 slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
 
                         // print prompt tokens (for debugging)
-                        /*if (1) {
+                        /**
+                        if (1) {
                             // first 16 tokens (avoid flooding logs)
                             for (int i = 0; i < std::min<int>(16, input_tokens.size()); i++) {
                                 SLT_DBG(slot, "prompt token %3d: %6d '%s'\n", i, input_tokens[i], common_token_to_piece(ctx, input_tokens[i]).c_str());
                             }
                         } else {
                             // all
+                            bool printstr = true;
                             for (int i = 0; i < (int) input_tokens.size(); i++) {
-                                SLT_DBG(slot, "prompt token %3d: %6d '%s'\n", i, input_tokens[i], common_token_to_piece(ctx, input_tokens[i]).c_str());
+                                if (printstr)
+                                SLT_INF(slot, "prompt token %3d: %6d '%s'\n", i, input_tokens[i], common_token_to_piece(ctx, input_tokens[i]).c_str());
+                                else
+                                SLT_INF(slot, "prompt token %3d: %6d\n", i, input_tokens[i]);
+
+                                if (input_tokens[i] ==151652)
+                                printstr= false;
+                                if (input_tokens[i]==151653)
+                                printstr= true;
+                            }
+                            printstr = true;
+                            for (int i = 0; i < (int) slot.prompt.tokens.size(); i++) {
+                                if (printstr)
+                                SLT_INF(slot, "slot.prompt.tokens token %3d: %6d '%s'\n", i, slot.prompt.tokens[i], common_token_to_piece(ctx, slot.prompt.tokens[i]).c_str());
+                                else
+                                SLT_INF(slot, "slot.prompt.tokens token %3d: %6d\n", i, slot.prompt.tokens[i]);
+                                if (slot.prompt.tokens[i] == 151652)
+                                printstr= false;
+                                if (slot.prompt.tokens[i] == 151653)
+                                printstr= true;
                             }
                         }*/
 
@@ -2111,7 +2137,7 @@ struct server_context_impl {
 
                             // note: disallow with mtmd contexts for now
                             //       https://github.com/ggml-org/llama.cpp/issues/17043
-                            if (!mctx && n_past > 0 && n_past < slot.prompt.n_tokens()) {
+                            if (!is_hmm && !mctx && n_past > 0 && n_past < slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx), slot.id);
                                 if (pos_min == -1) {
                                     SLT_ERR(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min);

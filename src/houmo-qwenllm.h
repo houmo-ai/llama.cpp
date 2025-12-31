@@ -14,6 +14,7 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
                              std::vector<float *> logits) override;
     virtual int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings) override;
+    virtual bool is_embedding() override;
   private:
     std::vector<llama_token> prefill_tokens_;
 };

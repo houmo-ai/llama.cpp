@@ -98,6 +98,9 @@ llama_context::llama_context(
     if (cparams.pooling_type == LLAMA_POOLING_TYPE_UNSPECIFIED) {
         if (hparams.pooling_type == LLAMA_POOLING_TYPE_UNSPECIFIED) {
             cparams.pooling_type = LLAMA_POOLING_TYPE_NONE;
+            if (hparams.is_hmm) {
+                cparams.pooling_type = LLAMA_POOLING_TYPE_LAST;
+            }
         } else {
             cparams.pooling_type = hparams.pooling_type;
         }
@@ -1226,7 +1229,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     const bool output_all = cparams.embeddings;
 
     if (model.hparams.is_hmm) {
-        if (cparams.embeddings && cparams.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED)
+        if (cparams.embeddings && model.hm_llmodel->is_embedding())
             return houmo_embedding(batch_inp);
         else
             return houmo_decode(batch_inp);

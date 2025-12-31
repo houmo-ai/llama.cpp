@@ -31,9 +31,10 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t current_length = 0;
 
     std::vector<llama_token> input_ids;
-    int32_t valid_length = memory_->seq_pos_min(seq_id);
+    int32_t kv_offset = memory_->seq_pos_min(seq_id);
+    int32_t valid_length = kv_offset;
+    LLAMA_LOG_INFO("%s: seq_id = %d, kv_offset = %d\n", __func__, seq_id, kv_offset);
     for (int round = 0; round < prefill_loop_round; round++) {
-        valid_length = round * prefill_length_;
         if (round == prefill_loop_round - 1) {
             current_length = input_echo_len - round * prefill_length_;
             auto first = prefill_tokens_.begin() + round * prefill_length_;
@@ -79,8 +80,9 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         set_kv_cache_for_prefill(seq_id);
         prefill_model_->Run();
         prefill_model_->Sync();
+        valid_length += prefill_length_;
     }
-    decode_valid_length_[seq_id] = input_echo_len;
+    decode_valid_length_[seq_id] = input_echo_len + kv_offset;
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
     // 转浮点
@@ -88,6 +90,7 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     prefill_output_data.CastTo(prefill_output_float);
     memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
     prefill_tokens_.resize(0);
+    memory_->seq_add(seq_id, 0, 0, input_echo_len);
     return 0;
 }
 
@@ -137,6 +140,7 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
         float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
                             batch_id * n_vocab;
         memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+        memory_->seq_add(batch_id, 0, 0, 1);
     }
     return 0;
 }
@@ -158,14 +162,20 @@ int HoumoQwenLLM::houmo_embedding(
             LLAMA_LOG_ERROR("%s: null embedding pointer for seq_id %d\n", __func__, seq_id);
             return -1;
         }
-        
+
         // 调用houmo_prefill并检查返回值
         int ret = houmo_prefill(const_cast<std::vector<llama_token>&>(tokens), seq_id, embedding);
         if (ret != 0) {
-            LLAMA_LOG_ERROR("%s: houmo_prefill failed for seq_id %d with error code %d\n", 
+            LLAMA_LOG_ERROR("%s: houmo_prefill failed for seq_id %d with error code %d\n",
                            __func__, seq_id, ret);
             return -1;
         }
     }
     return 0;
+}
+bool HoumoQwenLLM::is_embedding() {
+    if (decode_model_ == nullptr) {
+        return true;
+    }
+    return false;
 }
