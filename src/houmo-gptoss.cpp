@@ -99,14 +99,17 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                            float *logits) {
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
-    prefill_tokens_.insert(prefill_tokens_.end(), tokens.begin(), tokens.end());
-    if (prefill_tokens_.size() >= (uint32_t)context_length_) {
+    int kv_offset = memory_->seq_pos_min(seq_id);
+    if ((prefill_tokens_.size() + tokens.size() + kv_offset) >=
+        (uint32_t)context_length_) {
         LLAMA_LOG_ERROR("%s: prefill_tokens_ size %zu > context_length_%d, "
                         "reset to 0\n",
                         __func__, prefill_tokens_.size(), context_length_);
         prefill_tokens_.resize(0);
         return 1;
     }
+    prefill_tokens_.insert(prefill_tokens_.end(), tokens.begin(), tokens.end());
+
     if (logits == nullptr) {
         LLAMA_LOG_INFO(
             "%s: logits is null, just cache return, total size = %zu\n",
@@ -119,7 +122,6 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t current_length = 0;
 
     std::vector<llama_token> input_ids;
-    int kv_offset = memory_->seq_pos_min(seq_id);
     int32_t valid_length = kv_offset;
     for (int round = 0; round < prefill_loop_round; round++) {
         if (round == prefill_loop_round - 1) {

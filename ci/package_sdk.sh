@@ -37,7 +37,7 @@ esac
 # SDK URLs
 xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/ubuntu1804/houmo_tcim_runtime_xh1_ubuntu1804_x86_64-2.6.0.tar.gz"
 xh1_dadao_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_aarch64-2.6.0.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.7.0/2025/12/29/2121/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-0.7.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.7.0/2026/01/04/1914/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-0.7.0.tar.gz"
 
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/hlaw_ollama.${ARCH}"
 modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.${ARCH}"

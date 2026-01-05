@@ -12,7 +12,8 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
     prefill_tokens_.insert(prefill_tokens_.end(), tokens.begin(), tokens.end());
-    if (prefill_tokens_.size() >= (uint32_t)context_length_) {
+    int32_t kv_offset = memory_->seq_pos_min(seq_id);
+    if ((prefill_tokens_.size() + kv_offset) >= (uint32_t)context_length_) {
         LLAMA_LOG_ERROR("%s: prefill_tokens_ size %zu > context_length_%d, "
                         "reset to 0\n",
                         __func__, prefill_tokens_.size(), context_length_);
@@ -31,7 +32,6 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t current_length = 0;
 
     std::vector<llama_token> input_ids;
-    int32_t kv_offset = memory_->seq_pos_min(seq_id);
     int32_t valid_length = kv_offset;
     LLAMA_LOG_INFO("%s: seq_id = %d, kv_offset = %d\n", __func__, seq_id, kv_offset);
     for (int round = 0; round < prefill_loop_round; round++) {
@@ -68,6 +68,9 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             prefill_model_->SetInput(prefill_model_->GetInputName(3),
                                      prefill_position_ids);
         }
+        LLAMA_LOG_INFO(
+            "%s: valid_length = %d, current_length = %d, kv_offset = %d\n",
+            __func__, valid_length, current_length, kv_offset);
         set_input_data(prefill_valid_length, n_prefill_batch_, valid_length);
         set_input_data(prefill_current_length, n_prefill_batch_,
                        current_length);

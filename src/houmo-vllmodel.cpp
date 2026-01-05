@@ -64,8 +64,12 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                     seq_id, tokens.size());
-    if ((offset_embedding_ids_[seq_id] + tokens.size()) >= (size_t) context_length_) {
-        LLAMA_LOG_WARN("excceed context length, reset offset_embedding_id_ to 0\n");
+    int32_t kv_offset = memory_->seq_pos_min(seq_id);
+
+    if ((offset_embedding_ids_[seq_id] + tokens.size() + kv_offset) >=
+        (size_t)context_length_) {
+        LLAMA_LOG_WARN(
+            "excceed context length, reset offset_embedding_id_ to 0\n");
         reset_position_ids(seq_id);
         return 1;
     }
@@ -96,7 +100,6 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     high_position_ids.resize(prefill_loop_round * prefill_length_);
     width_position_ids.resize(prefill_loop_round * prefill_length_);
 
-    int32_t kv_offset = memory_->seq_pos_min(seq_id);
     int valid_length = kv_offset;
     LLAMA_LOG_INFO("%s: valid_length = %d, current_length = %d\n", __func__, valid_length, current_length);
     // 计算prefill输出
