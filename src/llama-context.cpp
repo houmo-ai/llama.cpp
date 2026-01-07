@@ -35,6 +35,7 @@ void llama_context::houmo_init(int32_t seq_max) {
                         ? cparams.n_ctx
                         : hm_llmodel->n_context_length();
     cparams.n_ctx_seq = cparams.n_ctx;
+    cparams.n_batch = cparams.n_ctx_seq;
     cparams.kv_unified = true;
 }
 
@@ -140,8 +141,11 @@ llama_context::llama_context(
     }
 
     // ref: https://github.com/ggml-org/llama.cpp/pull/17046#discussion_r2503085732
-    if (!hparams.is_hmm)
+    if (!hparams.is_hmm) {
         cparams.n_ctx = GGML_PAD(cparams.n_ctx, 256);
+    } else {
+        cparams.n_batch = 32768;
+    }
 
     if (cparams.kv_unified || hparams.is_hmm) {
         cparams.n_ctx_seq = cparams.n_ctx;
