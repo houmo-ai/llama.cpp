@@ -42,7 +42,7 @@ echo Starting server in the background...
 start "" /b llama-server.exe ^
     -m "%MODEL_PATH%" ^
     -np 1 ^
-    -c 32000 ^
+    -c 0 ^
     --no-context-shift  ^
     --jinja ^
     --reasoning-format none ^

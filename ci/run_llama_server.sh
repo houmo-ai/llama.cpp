@@ -111,7 +111,7 @@ if [ -d "$model_path" ]; then
     launch_cmd=(
         ./bin/llama-server
         --models-dir "$model_path"
-        -c 32000
+        -c 0
         --no-context-shift
         --host 0.0.0.0
         --jinja
@@ -122,7 +122,7 @@ else
     launch_cmd=(
         ./bin/llama-server
         -m "$model_path"
-        -c 32000
+        -c 0
         --no-context-shift
         --host 0.0.0.0
         --jinja
