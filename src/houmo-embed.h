@@ -38,5 +38,4 @@ class HouMoEmbed : public HouMoLLModel::Impl {
     std::map<std::string, tcim::Tensor> output_map_;
     int n_embed_ = 1024;
     int n_embedding_batch_ = 1;
-    int n_context_length_ = 512;
 };

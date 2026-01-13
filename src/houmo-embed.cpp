@@ -62,7 +62,7 @@ void HouMoEmbed::houmo_init(houmo_memory_i *memory, int seq_max) {
         }
         if (idx == 0) {
             n_embedding_batch_ = shape[0];
-            n_context_length_ = shape[1];
+            context_length_ = shape[1];
         }
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
         input_map_.insert(
@@ -92,8 +92,8 @@ void HouMoEmbed::houmo_init(houmo_memory_i *memory, int seq_max) {
                        seq_max, n_embedding_batch_);
     }
     LLAMA_LOG_INFO("embedding init finished. n_embedding_batch= %d, "
-                   "n_context_lenght = %d, n_embed_=%d\n",
-                   n_embedding_batch_, n_context_length_, n_embed_);
+                   "context_length_ = %d, n_embed_=%d\n",
+                   n_embedding_batch_, context_length_, n_embed_);
 }
 
 int HouMoEmbed::houmo_embedding(
@@ -103,6 +103,12 @@ int HouMoEmbed::houmo_embedding(
     if (seqid_map.size() == 0 || embeddings.size() == 0) {
         LLAMA_LOG_WARN("houmo_embedding: seqid_map is empty\n");
         return 0;
+    }
+    if (seqid_map.size() == 1 &&
+        seqid_map.begin()->second.size() > (size_t) context_length_) {
+        LLAMA_LOG_INFO("houmo_embedding: exceed context length %d\n",
+                       context_length_);
+        return 1;
     }
     auto input = input_map_.at(embed_model_->GetInputName(0));
     auto input_ptr = static_cast<int32_t *>(input.Data());
@@ -120,9 +126,9 @@ int HouMoEmbed::houmo_embedding(
         auto &token_vec = seqid_map.at(i);
         for (size_t j = 0; j < token_vec.size(); j++) {
             LLAMA_LOG_DEBUG("Putting token %d at batch %d, position %lu\n",
-                           token_vec[j], i, i * n_context_length_ + j);
-            input_ptr[i * n_context_length_ + j] = token_vec[j];
-            attention_mask_vec[i * n_context_length_ + j] = 1;
+                           token_vec[j], i, i * context_length_ + j);
+            input_ptr[i * context_length_ + j] = token_vec[j];
+            attention_mask_vec[i * context_length_ + j] = 1;
         }
     }
     attention_mask.Buffer().CopyFromHost(attention_mask_vec.data(),

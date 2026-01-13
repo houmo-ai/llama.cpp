@@ -4,7 +4,11 @@
 
 void HoumoQwenLLM::houmo_init(houmo_memory_i *memory, int seq_max) {
     model_inout_init(seq_max);
-    memory_= memory;
+    if (is_embedding()) {
+        memory_= nullptr;
+    } else {
+        memory_= memory;
+    }
 }
 int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                 float *logits) {
@@ -12,7 +16,9 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
     prefill_tokens_.insert(prefill_tokens_.end(), tokens.begin(), tokens.end());
-    int32_t kv_offset = memory_->seq_pos_min(seq_id);
+    int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
+    LLAMA_LOG_INFO("%s: memory==nullptr %d, kv_offset = %d\n", __func__,
+                   memory_ == nullptr, kv_offset);
     if ((prefill_tokens_.size() + kv_offset) >= (uint32_t)context_length_) {
         LLAMA_LOG_ERROR("%s: prefill_tokens_ size %zu > context_length_%d, "
                         "reset to 0\n",
@@ -93,7 +99,9 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     prefill_output_data.CastTo(prefill_output_float);
     memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
     prefill_tokens_.resize(0);
-    memory_->seq_add(seq_id, 0, 0, input_echo_len);
+    if (memory_) {
+        memory_->seq_add(seq_id, 0, 0, input_echo_len);
+    }
     return 0;
 }
 
@@ -143,7 +151,9 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
         float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
                             batch_id * n_vocab;
         memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
-        memory_->seq_add(batch_id, 0, 0, 1);
+        if (memory_) {
+            memory_->seq_add(batch_id, 0, 0, 1);
+        }
     }
     return 0;
 }

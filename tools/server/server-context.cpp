@@ -2037,7 +2037,7 @@ struct server_context_impl {
                         }
 
                         if (!slot.can_split()) {
-                            if (slot.task->n_tokens() > n_ubatch) {
+                            if (!is_hmm && slot.task->n_tokens() > n_ubatch) {
                                 send_error(slot, "input is too large to process. increase the physical batch size", ERROR_TYPE_SERVER);
                                 slot.release();
                                 continue;

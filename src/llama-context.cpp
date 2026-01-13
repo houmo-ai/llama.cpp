@@ -36,7 +36,11 @@ void llama_context::houmo_init(int32_t seq_max) {
                         : hm_llmodel->n_context_length();
     cparams.n_ctx_seq = cparams.n_ctx;
     cparams.n_batch = cparams.n_ctx_seq;
+    cparams.n_ubatch = cparams.n_ctx_seq;
     cparams.kv_unified = true;
+    if (hm_llmodel->is_embedding()) {
+        memory = nullptr;
+    }
 }
 
 llama_context::llama_context(
@@ -1164,9 +1168,10 @@ int llama_context::houmo_embedding(const llama_batch &batch) {
     }
 
     // 1. 首先生成token的embedding
-    if (model.hm_llmodel->houmo_embedding(seqid_token_map, seqid_embd_map) != 0) {
+    auto ret = model.hm_llmodel->houmo_embedding(seqid_token_map, seqid_embd_map);
+    if (ret != 0) {
         LLAMA_LOG_ERROR("%s: houmo embedding failed\n", __func__);
-        return -1;
+        return ret;
     }
     // 2. 然后根据pooling_type进行pooling. bge模型的embedding输出是pooling后的结果
     if (n_outputs > 0) {
