@@ -253,16 +253,23 @@ void HouMoLLModel::Impl::model_inout_init(int seq_max) {
     int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
     size = std::max(size, n_decode_batch_);
     initialize_kv_cache(size);
-
+    auto lora_mask_ = false;
+    if (prefill_input_map_.count("lora_mask") > 0 && decode_input_map_.count("lora_mask") > 0) {
+        auto lora_mask = prefill_input_map_["lora_mask"];
+        set_input_data(lora_mask, 1, 0);
+        lora_mask = decode_input_map_["lora_mask"];
+        set_input_data(lora_mask, 1, 0);
+        lora_mask_ = true;
+    }
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
     LLAMA_LOG_INFO("prefill_length_ = %d\n context_length_ = %d\n "
                    "n_blocks_ = %d\n n_embd_ = %ld\n n_prefill_batch_ = %d\n "
                    "n_decode_batch_ = "
                    "%d\n kv_cache_size = %zu\n need_set_kv_cache_ = "
-                   "%d\n seq_max = %d\n",
+                   "%d\n seq_max = %d lora_mask = %d.\n",
                    prefill_length_, context_length_, n_blocks_, n_embd_,
                    n_prefill_batch_, n_decode_batch_, kv_cache_.size(),
-                   need_set_kv_cache_, seq_max);
+                   need_set_kv_cache_, seq_max, lora_mask_);
 }
 
 void HouMoLLModel::Impl::prefill_input_init() {
@@ -519,6 +526,14 @@ void HouMoLLModel::Impl::set_input_data(tcim::Tensor &tensor, int batch_size,
     } else if (tensor.Info().DataType() == tcim::DataType::INT32) {
         std::vector<int32_t> data_vec(batch_size, value);
         tensor.Buffer().CopyFromHost(data_vec.data(), tensor.MemSize());
+    } else if (tensor.Info().DataType() == tcim::DataType::INT8) {
+        std::vector<int8_t> data_vec(batch_size, value);
+        tensor.Buffer().CopyFromHost(data_vec.data(), tensor.MemSize());
+    } else if (tensor.Info().DataType() == tcim::DataType::FLOAT16) {
+        std::vector<uint16_t> data_vec(batch_size, value);
+        tensor.Buffer().CopyFromHost(data_vec.data(), tensor.MemSize());
+    } else {
+        throw std::invalid_argument("Unsupported tensor data type");
     }
 }
 
