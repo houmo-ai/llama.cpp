@@ -1,6 +1,5 @@
 #include "houmo-llmodel.h"
 #include "ggml-hmutils.h"
-#include "ggml.h"
 #include "gguf.h"
 #include "houmo-embed.h"
 #include "houmo-gptoss.h"
@@ -37,17 +36,6 @@ HouMoLLModel::Impl::create_infer_engine(bool prefill, void *raw_data,
 #ifdef XH2_ENABLED
         backend = "Xh2HalBackend";
 #endif
-        if (device_ids.size() == 1 && multi_device_model_) {
-            // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
-            device_ids = {0, 1};
-            LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
-        } else if (device_ids.size() == 2 && !multi_device_model_) {
-            // 模型是单卡模型，需要将device_ids 缩小为{0}
-            device_ids = {0};
-            LLAMA_LOG_WARN(
-                "single card model, set device_ids size is 2, need to "
-                "resize device_ids to {0}");
-        }
         tcim::DevManager dev_manager =
             tcim::DevManager::Create(device_ids, backend);
         wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
@@ -93,20 +81,8 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
 #ifdef XH2_ENABLED
         backend = "Xh2HalBackend";
 #endif
-        auto device_ids = parse_deviceids();
-        if (device_ids.size() == 1 && multi_device_model_) {
-            // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
-            device_ids = {0, 1};
-            LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
-        } else if (device_ids.size() == 2 && !multi_device_model_) {
-            // 模型是单卡模型，需要将device_ids 缩小为{0}
-            device_ids = {0};
-            LLAMA_LOG_WARN(
-                "single card model, set device_ids size is 2, need to "
-                "resize device_ids to {0}");
-        }
         tcim::DevManager dev_manager =
-            tcim::DevManager::Create(device_ids, backend);
+            tcim::DevManager::Create(device_ids_, backend);
         wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
     }
     tcim::Status status;
@@ -156,6 +132,25 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
                                     "_self_attn_vcache_input";
         dummy_tensor_names.push_back(k_cache_name);
         dummy_tensor_names.push_back(v_cache_name);
+    }
+    device_ids_ = parse_deviceids();
+    if (device_num_ == 2 && device_ids_.size() == 1) {
+        // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
+        device_ids_ = {0, 1};
+        LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
+    } else if (device_num_ == 1 && device_ids_.size() > 1) {
+        // 模型是单卡模型，需要将device_ids 缩小为{0}
+        device_ids_ = {0};
+        LLAMA_LOG_WARN(
+            "single card model, set device_ids size > 1, need to "
+            "resize device_ids to {0}");
+    } else if ( device_num_ == 4 && device_ids_.size() == 1) {
+        // 模型是四卡模型，需要将device_ids 扩展为{0,1,2,3}
+        device_ids_ = {0, 1, 2, 3};
+        LLAMA_LOG_WARN(
+            "4 card model, need to set device_ids to {0,1,2,3}");
+    } else {
+        LLAMA_LOG_INFO("run models in %zu cards", device_ids_.size());
     }
 #ifndef XH2_ENABLED
     use_mmap = false;
@@ -427,9 +422,7 @@ void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx) {
             }
         }
         if (hmm_info.contains("device_num")) {
-            if (hmm_info["device_num"] > 1) {
-                multi_device_model_ = true;
-            }
+            device_num_ = hmm_info["device_num"];
         }
 
     } catch (const json::parse_error &e) {
@@ -466,15 +459,15 @@ void HouMoLLModel::Impl::read_tensor_to_buffer(const std::string &file_name,
 
     std::ifstream input_file(file_name, std::ios::binary);
     if (!input_file.is_open()) {
-        std::cerr << "##Failed to open file: " << file_name << std::endl;
+        LLAMA_LOG_ERROR("Failed to open file: %s\n", file_name.c_str());
         return;
     }
 
     // 移动到偏移位置
     input_file.seekg(offset, std::ios::beg);
     if (input_file.fail()) {
-        std::cerr << "Failed to seek to offset: " << offset
-                  << " in file: " << file_name << std::endl;
+        LLAMA_LOG_ERROR("Failed to seek to offset: %zu in file: %s\n", offset,
+                        file_name.c_str());
         input_file.close();
         return;
     }
@@ -482,8 +475,8 @@ void HouMoLLModel::Impl::read_tensor_to_buffer(const std::string &file_name,
     // 读取数据
     input_file.read(buffer.data(), size);
     if (input_file.fail()) {
-        std::cerr << "Failed to read " << size
-                  << " bytes from file: " << file_name << std::endl;
+        LLAMA_LOG_ERROR("Failed to read %zu bytes from file: %s\n", size,
+                        file_name.c_str());
         input_file.close();
         return;
     }
@@ -492,13 +485,13 @@ void HouMoLLModel::Impl::read_tensor_to_buffer(const std::string &file_name,
 std::vector<int> HouMoLLModel::Impl::parse_deviceids(bool single_card) {
     std::vector<int> deviceIds;
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
-
     if (device_id_str == nullptr) {
         deviceIds.push_back(0);
         if (!single_card)
             deviceIds.push_back(1);
         return deviceIds;
     }
+    LLAMA_LOG_INFO("HOUMO_DEVICE_ID: %s\n", device_id_str);
 
     std::string deviceList(device_id_str);
     std::istringstream iss(deviceList);
@@ -509,9 +502,9 @@ std::vector<int> HouMoLLModel::Impl::parse_deviceids(bool single_card) {
             // 转换为整数并添加到列表
             deviceIds.push_back(std::stoi(token));
         } catch (const std::invalid_argument &) {
-            std::cerr << "Invalid device ID: " << token << std::endl;
+            LLAMA_LOG_ERROR("Invalid device ID: %s\n", token.c_str());
         } catch (const std::out_of_range &) {
-            std::cerr << "Device ID out of range: " << token << std::endl;
+            LLAMA_LOG_ERROR("Device ID out of range: %s\n", token.c_str());
         }
     }
 

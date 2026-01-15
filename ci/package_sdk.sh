@@ -157,13 +157,10 @@ package_llama() {
     done
 
     cp tools/server/qwen3_nonthinking.jinja "$release_dir/bin/" || true
-    cp ci/run_llama_server.sh "$release_dir/" || true
     cp ci/install_*.sh "$release_dir/service/" || true
     cp ci/uninstall_*.sh "$release_dir/service/" || true
 
 
-    # 设置run_llama_server.sh中xh_type参数
-    sed -i "s/xh_type=.*/xh_type=$PLATFORM/" "$release_dir/run_llama_server.sh"
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
     cp tools/readhmm "$release_dir/scripts/" || true

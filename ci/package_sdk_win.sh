@@ -13,6 +13,8 @@ xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1
 xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v0.7.0/2026/01/04/1914/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-0.7.0.tar.gz"
 xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/windows11/houmo_drv_xh1_v2.6.0_windows11_x86_64.zip"
 xh2_sw_sdk_url=""
+modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.exe"
+
 # 下载文件并检查是否成功
 download_file() {
     local url=$1
@@ -176,7 +178,7 @@ main() {
     # 编译和打包
     build_llama
     package_llama
-
+    download_file "$modelcli_url" "release/$PLATFORM/$ARCH/bin/model_cli"
     echo "LLAMA build and packaging completed for $PLATFORM/$ARCH."
 }
 # 执行主函数
