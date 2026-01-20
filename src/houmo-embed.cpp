@@ -28,7 +28,8 @@ bool HouMoEmbed::houmo_load(const std::string &file_name, bool use_mmap) {
         const size_t size = gguf_get_tensor_size(ctx, i);
         size_t offset =
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
-        if (strncmp(name, "embedding", strlen("embedding")) == 0) {
+        if (strncmp(name, "embedding", strlen("embedding")) == 0 ||
+            strncmp(name, "reranker", strlen("reranker")) == 0) {
             if (use_mmap) {
                 embed_model_ = create_infer_engine(file_name, offset, size);
             } else {
@@ -111,13 +112,10 @@ int HouMoEmbed::houmo_embedding(
         return 1;
     }
     auto input = input_map_.at(embed_model_->GetInputName(0));
-    auto input_ptr = static_cast<int32_t *>(input.Data());
-    memset(input_ptr, 0, input.MemSize());
-
+    std::vector<int32_t> input_data(input.MemSize() / sizeof(int32_t), 0);
     auto attention_mask = input_map_.at(embed_model_->GetInputName(2));
     std::vector<int16_t> attention_mask_vec(
         attention_mask.MemSize() / sizeof(int16_t), 0);
-
     for (int32_t i = 0; i < n_embedding_batch_; i++) {
         if (seqid_map.count(i) == 0) {
             continue;
@@ -127,10 +125,11 @@ int HouMoEmbed::houmo_embedding(
         for (size_t j = 0; j < token_vec.size(); j++) {
             LLAMA_LOG_DEBUG("Putting token %d at batch %d, position %lu\n",
                            token_vec[j], i, i * context_length_ + j);
-            input_ptr[i * context_length_ + j] = token_vec[j];
+            input_data[i * context_length_ + j] = token_vec[j];
             attention_mask_vec[i * context_length_ + j] = 1;
         }
     }
+    input.Buffer().CopyFromHost(input_data.data(), input.MemSize());
     attention_mask.Buffer().CopyFromHost(attention_mask_vec.data(),
                                          attention_mask.MemSize());
     auto token_type_ids = input_map_.at(embed_model_->GetInputName(1));
@@ -156,7 +155,7 @@ int HouMoEmbed::houmo_embedding(
         }
         LLAMA_LOG_INFO("houmo_embedding: get embedding for seq_id=%d\n", i);
         float *embedding_addr = embeddings[i];
-        memcpy(embedding_addr, output_ptr + i * n_embed_,
+        memcpy(embedding_addr, output_ptr + i * n_embed_ * context_length_,
                n_embed_ * sizeof(float));
     }
 

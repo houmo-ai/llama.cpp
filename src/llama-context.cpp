@@ -17,19 +17,10 @@
 
 void llama_context::houmo_init(int32_t seq_max) {
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
+    memory = std::make_unique<houmo_memory_i>();
     hm_llmodel->houmo_init(dynamic_cast<houmo_memory_i*>(memory.get()), seq_max);
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
-    // graph outputs buffer
-    {
-        // resized during inference when a batch uses more outputs
-        if (output_reserve(seq_max) < (uint32_t )seq_max) {
-            throw std::runtime_error("failed to reserve initial output buffer");
-        }
 
-        LLAMA_LOG_INFO("%s: %10s  output buffer size = %8.2f MiB\n", __func__,
-                ggml_backend_buffer_name    (buf_output.get()),
-                ggml_backend_buffer_get_size(buf_output.get()) / 1024.0 / 1024.0);
-    }
     // 修正n_ctx
     cparams.n_ctx = cparams.n_ctx < hm_llmodel->n_context_length()
                         ? cparams.n_ctx
@@ -40,6 +31,17 @@ void llama_context::houmo_init(int32_t seq_max) {
     cparams.kv_unified = true;
     if (hm_llmodel->is_embedding()) {
         memory = nullptr;
+    }
+    // graph outputs buffer
+    {
+        // resized during inference when a batch uses more outputs
+        if (output_reserve(seq_max) < (uint32_t )seq_max) {
+            throw std::runtime_error("failed to reserve initial output buffer");
+        }
+
+        LLAMA_LOG_INFO("%s: %10s  output buffer size = %8.2f MiB\n", __func__,
+                ggml_backend_buffer_name    (buf_output.get()),
+                ggml_backend_buffer_get_size(buf_output.get()) / 1024.0 / 1024.0);
     }
 }
 
@@ -145,11 +147,7 @@ llama_context::llama_context(
     }
 
     // ref: https://github.com/ggml-org/llama.cpp/pull/17046#discussion_r2503085732
-    if (!hparams.is_hmm) {
-        cparams.n_ctx = GGML_PAD(cparams.n_ctx, 256);
-    } else {
-        cparams.n_batch = 32768;
-    }
+    cparams.n_ctx = GGML_PAD(cparams.n_ctx, 256);
 
     if (cparams.kv_unified || hparams.is_hmm) {
         cparams.n_ctx_seq = cparams.n_ctx;
@@ -165,6 +163,10 @@ llama_context::llama_context(
             cparams.n_ctx =  cparams.n_ctx_seq * cparams.n_seq_max;
             LLAMA_LOG_WARN("%s: n_ctx is not divisible by n_seq_max - rounding down to %u\n", __func__, cparams.n_ctx);
         }
+    }
+
+    if (hparams.is_hmm) {
+        houmo_init(cparams.n_seq_max);
     }
 
     LLAMA_LOG_INFO("%s: n_seq_max     = %u\n",   __func__, cparams.n_seq_max);
@@ -253,10 +255,6 @@ llama_context::llama_context(
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
-    }
-    if (hparams.is_hmm) {
-        // FIXME: @guoxing.xu. 空实现
-        memory = std::make_unique<houmo_memory_i>();
     }
 
     // init backends
@@ -457,10 +455,6 @@ llama_context::llama_context(
         } else {
             LLAMA_LOG_INFO("%s: graph splits = %d (with bs=%d), %d (with bs=1)\n", __func__, n_splits_pp, n_tokens, n_splits_tg);
         }
-    }
-
-    if (hparams.is_hmm) {
-        houmo_init(cparams.n_seq_max);
     }
 }
 

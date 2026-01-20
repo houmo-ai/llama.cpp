@@ -251,9 +251,9 @@ void HouMoLLModel::Impl::model_inout_init(int seq_max) {
     auto lora_mask_ = false;
     if (prefill_input_map_.count("lora_mask") > 0 && decode_input_map_.count("lora_mask") > 0) {
         auto lora_mask = prefill_input_map_["lora_mask"];
-        set_input_data(lora_mask, 1, 0);
+        set_input_data(lora_mask, 1, 1);
         lora_mask = decode_input_map_["lora_mask"];
-        set_input_data(lora_mask, 1, 0);
+        set_input_data(lora_mask, 1, 1);
         lora_mask_ = true;
     }
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
