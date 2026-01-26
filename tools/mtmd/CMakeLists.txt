@@ -11,8 +11,8 @@ add_library(mtmd
             clip-impl.h
             mtmd-helper.cpp
             mtmd-helper.h
-            houmo_vision.cpp
-            houmo_vision.h
+            houmo-vision.cpp
+            houmo-vision.h
             )
 # set_target_properties(mtmd PROPERTIES
 #     VERSION ${LLAMA_INSTALL_VERSION}

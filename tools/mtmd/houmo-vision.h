@@ -12,7 +12,7 @@ class HoumoVision {
     virtual ~HoumoVision() = default;
     virtual bool init(const std::string &model_path) = 0;
     virtual bool encoding(const std::vector<float> &input_data,
-                          std::vector<float> &output_data) = 0;
+                          std::vector<float> &output_data, int out_offset = 0) = 0;
     int16_t image_width() const  {
         return image_width_;
     }
@@ -67,7 +67,7 @@ class HoumoQwenVision : public HoumoVision {
     ~HoumoQwenVision() override = default;
     virtual bool init(const std::string &model_path) override;
     virtual bool encoding(const std::vector<float> &input_data,
-                          std::vector<float> &output_data) override;
+                          std::vector<float> &output_data, int out_offset = 0) override;
 
   private:
     /**
@@ -87,5 +87,27 @@ class HoumoMinicpmVision : public HoumoVision {
     ~HoumoMinicpmVision() override = default;
     virtual bool init(const std::string &model_path) override;
     virtual bool encoding(const std::vector<float> &input_data,
-                          std::vector<float> &output_data) override;
+                          std::vector<float> &output_data, int out_offset = 0) override;
+  private:
+    /**
+     * set resampler for minicpmv
+     * 否则需要根据分辨率计算
+     * porting from clip.cpp
+     */
+    void set_attention_resampler();
+    // ---------------------------------------------------------
+    // 核心算法辅助函数
+    // ---------------------------------------------------------
+    void precompute_global_pos_embed();
+    void compute_1d_sincos(float* out, int length, int dim);
+    void reorder_hwc_to_target(const float* input_hwc, float* output_buffer);
+    // ---------------------------------------------------------
+    // 成员变量
+    // ---------------------------------------------------------
+    // 预计算的 70x70 全局位置编码表 (FP32)
+    std::vector<float> global_pos_embed_table_;
+    // 常量定义
+    const int MAX_GRID_H = 70;
+    const int MAX_GRID_W = 70;
+    int32_t n_embedding_ = 3584;
 };

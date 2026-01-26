@@ -4014,6 +4014,9 @@ struct llava_uhd {
         // no pinpoints, dynamically calculate the grid size (e.g. minicpmv)
 
         auto best_size    = get_best_resize(original_size, slice_size, patch_size, !has_slices);
+        if (clip_is_hmm(ctx)) {
+            best_size = clip_image_size{slice_size, slice_size};
+        }
         res.overview_size = best_size;
 
         {
@@ -4024,6 +4027,9 @@ struct llava_uhd {
 
             auto best_grid   = get_best_grid(max_slice_nums, multiple, log_ratio);
             auto refine_size = get_refine_size(original_size, best_grid, slice_size, patch_size, true);
+            if (clip_is_hmm(ctx)) {
+                refine_size = clip_image_size{slice_size * best_grid.width, slice_size * best_grid.height};
+            }
             res.grid_size    = best_grid;
             res.refined_size = refine_size;
 
@@ -4236,6 +4242,15 @@ bool clip_image_preprocess(struct clip_ctx * ctx, const clip_image_u8 * img, str
                 for (size_t i = 0; i < imgs.size(); ++i) {
                     // clip_image_save_to_bmp(*imgs[i], "slice_" + std::to_string(i) + ".bmp");
                     clip_image_f32_ptr res(clip_image_f32_init());
+                    if (clip_is_hmm(ctx)) {
+                        // hmm，not mean & std
+                        params.image_mean [0] = 0.0f;
+                        params.image_mean [1] = 0.0f;
+                        params.image_mean [2] = 0.0f;
+                        params.image_std [0] = 1.0f;
+                        params.image_std [1] = 1.0f;
+                        params.image_std [2] = 1.0f;
+                    } 
                     normalize_image_u8_to_f32(*imgs[i], *res, params.image_mean, params.image_std);
                     res_imgs->entries.push_back(std::move(res));
                 }
@@ -5035,6 +5050,9 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
         case PROJECTOR_TYPE_MLP_NORM:
             return ctx->model.mm_3_b->ne[0];
         case PROJECTOR_TYPE_MINICPMV:
+            if (clip_is_hmm(ctx)) {
+                return ctx->model.hparams.projection_dim;
+            }
             return ctx->model.mm_model_proj->ne[0];
         case PROJECTOR_TYPE_GLM_EDGE:
             return ctx->model.mm_model_mlp_3_w->ne[1];

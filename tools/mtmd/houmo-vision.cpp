@@ -1,4 +1,4 @@
-#include "houmo_vision.h"
+#include "houmo-vision.h"
 #include "ggml.h"
 #include "gguf.h"
 #include <algorithm>
@@ -10,7 +10,7 @@
 #include <array>
 #include "nlohmann/json.hpp"
 using json = nlohmann::ordered_json;
-
+void reorder_hwc_to_target(const float* input_hwc, float* output_buffer);
 #pragma pack(push, 1)
 struct CompactHeader {
     int16_t magic;      // 16位标识
@@ -520,14 +520,14 @@ bool HoumoQwenVision::init(const std::string &model_path) {
         auto input_name = module_->GetInputName(i);
         LOG_INF("%s: input_name: %s\n", __func__, input_name.c_str());
         auto input_info = module_->GetInputInfo(input_name).AsContiguous();
-        if (input_info.Shape().size() == 4) {
+        if (input_info.Shape().size() == 4 && i == 0) {
             image_width_ = static_cast<uint16_t>(input_info.Shape()[3]);
             image_height_ = static_cast<uint16_t>(input_info.Shape()[2]);
             image_channels_ = static_cast<uint16_t>(input_info.Shape()[1]);
             batch_size_ = static_cast<uint16_t>(input_info.Shape()[0]);
             image_frames_ = 1;
             input_name_ = input_name;
-        } else if (input_info.Shape().size() == 5) {
+        } else if (input_info.Shape().size() == 5 && i == 0) {
             image_width_ = static_cast<uint16_t>(input_info.Shape()[4]);
             image_height_ = static_cast<uint16_t>(input_info.Shape()[3]);
             image_frames_ = static_cast<uint16_t>(input_info.Shape()[2]);
@@ -553,7 +553,8 @@ bool HoumoQwenVision::init(const std::string &model_path) {
 }
 
 bool HoumoQwenVision::encoding(const std::vector<float> &input_data,
-                           std::vector<float> &output_data) {
+                           std::vector<float> &output_data, int out_offset) {
+    (void)out_offset;
     auto input_tensor = input_tensors_[input_name_];
     if (input_tensor.Info().DataType() == tcim::DataType::UINT8 ||
         input_tensor.Info().DataType() == tcim::DataType::INT8) {
@@ -604,19 +605,198 @@ bool HoumoMinicpmVision::init(const std::string &model_path) {
         input_tensors_.insert(
             std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
     }
+    image_width_ = 560;
+    image_height_ = 560;
+    image_channels_ = 3;
+    batch_size_ = 1;
+    image_frames_ = 1;
     int out_size = module_->GetOutputNum();
     for (auto i = 0; i < out_size; ++i) {
         auto output_name = module_->GetOutputName(i);
         LOG_INF("%s: output_name: %s\n", __func__, output_name.c_str());
         output_names_.push_back(output_name);
     }
+
+    this->precompute_global_pos_embed();
+    this->set_attention_resampler();
     return true;
 }
+// ----------------------------------------------------------
+// 辅助算法实现
+// ----------------------------------------------------------
 
+void HoumoMinicpmVision::precompute_global_pos_embed() {
+    int dim_per_axis = n_embedding_ / 2; // 3584 / 2 = 1792
+
+    // 分配内存
+    global_pos_embed_table_.resize(MAX_GRID_H * MAX_GRID_W * n_embedding_);
+
+    std::vector<float> embed_h(MAX_GRID_H * dim_per_axis);
+    std::vector<float> embed_w(MAX_GRID_W * dim_per_axis);
+
+    compute_1d_sincos(embed_h.data(), MAX_GRID_H, dim_per_axis);
+    compute_1d_sincos(embed_w.data(), MAX_GRID_W, dim_per_axis);
+
+    // 组合成 2D 表 [70, 70, 3584]
+    for (int h = 0; h < MAX_GRID_H; ++h) {
+        for (int w = 0; w < MAX_GRID_W; ++w) {
+            long long offset = ((long long)h * MAX_GRID_W + w) * n_embedding_;
+            float* dst = global_pos_embed_table_.data() + offset;
+
+            // H (前一半)
+            std::memcpy(dst, embed_h.data() + h * dim_per_axis, dim_per_axis * sizeof(float));
+            // W (后一半)
+            std::memcpy(dst + dim_per_axis, embed_w.data() + w * dim_per_axis, dim_per_axis * sizeof(float));
+        }
+    }
+}
+
+void HoumoMinicpmVision::compute_1d_sincos(float* out_ptr, int length, int dim) {
+    int half_dim = dim / 2;
+    std::vector<float> omega(half_dim);
+
+    // Omega
+    for (int i = 0; i < half_dim; ++i) {
+        float exponent = (float)i / (float)half_dim;
+        omega[i] = 1.0f / std::pow(10000.0f, exponent);
+    }
+
+    // Sin/Cos
+    for (int pos = 0; pos < length; ++pos) {
+        float* cur_vec = out_ptr + pos * dim;
+        for (int i = 0; i < half_dim; ++i) {
+            float val = (float)pos * omega[i];
+            cur_vec[i]            = std::sin(val);
+            cur_vec[i + half_dim] = std::cos(val);
+        }
+    }
+}
+void HoumoMinicpmVision::set_attention_resampler() {
+    int32_t pos_h = image_height_ / patch_size_;
+    int32_t pos_w = image_width_ / patch_size_;
+    std::vector<int32_t> positions(pos_h * pos_w);
+    int bucket_coords_h[1024];
+    int bucket_coords_w[1024];
+    for (int i = 0; i < pos_h; i++) {
+        bucket_coords_h[i] = std::floor(70.0 * i / pos_h);
+    }
+    for (int i = 0; i < pos_w; i++) {
+        bucket_coords_w[i] = std::floor(70.0 * i / pos_w);
+    }
+    for (int i = 0, id = 0; i < pos_h; i++) {
+        for (int j = 0; j < pos_w; j++) {
+            positions[id++] = bucket_coords_h[i] * 70 + bucket_coords_w[j];
+        }
+    }
+    auto &tensor = input_tensors_[module_->GetInputName(1)];
+    tensor.Buffer().CopyFromHost(positions.data(), tensor.MemSize());
+    module_->SetInput(module_->GetInputName(1), tensor);
+    // set attention_mask
+    auto &mask_tensor = input_tensors_[module_->GetInputName(2)];
+    memset(mask_tensor.Buffer().Data(), 0, mask_tensor.MemSize());
+    module_->SetInput(module_->GetInputName(2), mask_tensor);
+
+    // set global_pos_embed
+    auto &pos_embed_tensor = input_tensors_[module_->GetInputName(3)];
+    tcim::Tensor input_fp32_tensor = tcim::Tensor::CreateHostTensor(
+        pos_embed_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    //input_fp32_tensor.Buffer().CopyFromHost(global_pos_embed_table_.data(), input_fp32_tensor.MemSize());
+    float* dst_ptr = (float*)input_fp32_tensor.Buffer().Data();
+    const float* src_ptr = global_pos_embed_table_.data();
+
+    int src_stride = 70 * n_embedding_; // 全局表的宽度 (70)
+    int copy_bytes = 40 * n_embedding_ * sizeof(float); // 目标每行拷贝的字节数 (40)
+
+    for (int h = 0; h < 40; ++h) {
+        // 每一行只拷贝前 40 个 Patch 的 Embedding
+        memcpy(dst_ptr + h * 40 * n_embedding_,
+            src_ptr + h * src_stride,
+            copy_bytes);
+    }
+    input_fp32_tensor.CastTo(pos_embed_tensor);
+    module_->SetInput(module_->GetInputName(3), pos_embed_tensor);
+
+    // resampler_key_padding_mask
+    auto &resampler_mask_tensor = input_tensors_[module_->GetInputName(4)];
+    memset(resampler_mask_tensor.Buffer().Data(), 0, resampler_mask_tensor.MemSize());
+    module_->SetInput(module_->GetInputName(4), resampler_mask_tensor);
+}
+
+/**
+ * @brief 输入 HWC 格式的 Normalized Float，输出 Unfold+Permute 后的数据
+ * * 输入: [560, 560, 3] (HWC)
+ * 输出: [3, 14, 22400] (对应 Python: 3, 14, -1)
+ */
+void HoumoMinicpmVision::reorder_hwc_to_target(const float *input_hwc,
+                                               float *output_buffer) {
+    int out_idx = 0;
+    // 派生常量
+    int GRID_W = image_width_ / patch_size_; // 40
+    int NUM_PATCHES =
+        (image_height_ / patch_size_) * (image_width_ / patch_size_); // 1600
+    // 目标内存顺序 (3, 14, 1600, 14) -> (C, PH, P_IDX, PW)
+    for (uint16_t c = 0; c < image_channels_; ++c) {    // Dim 0: Channel (3)
+        for (size_t ph = 0; ph < patch_size_; ++ph) { // Dim 1: Patch Height (14)
+            for (int p_idx = 0; p_idx < NUM_PATCHES;
+                 ++p_idx) {
+                for (size_t pw = 0; pw < patch_size_; ++pw) {
+                    // --- 坐标映射计算 ---
+
+                    // 1. 当前 Patch 在 Grid 中的坐标 (行, 列)
+                    int grid_y = p_idx / GRID_W;
+                    int grid_x = p_idx % GRID_W;
+
+                    // 2. 还原到原图的 (h, w)
+                    int h = grid_y * patch_size_ + ph;
+                    int w = grid_x * patch_size_ + pw;
+
+                    // 3. 计算 HWC 输入的偏移量
+                    // Input Layout: [H][W][C] -> index = (h * Width + w) *
+                    // Channels + c
+                    int in_offset =
+                        (h * image_width_ + w) * image_channels_ + c;
+
+                    // 4. 赋值 (纯拷贝)
+                    output_buffer[out_idx++] = input_hwc[in_offset];
+                }
+            }
+        }
+    }
+}
 bool HoumoMinicpmVision::encoding(const std::vector<float> &input_data,
-                                  std::vector<float> &output_data) {
-    // TODO: not implemented
-    (void)input_data;
-    (void)output_data;
-    return false;
+                                  std::vector<float> &output_data,
+                                  int out_offset) {
+    LOG_DBG("houmo_minicpm_vision: encoding image slice... %d,%d\n", out_offset,
+            input_data.size());
+    // input_data 强制转化为int8 保存为图片
+    std::vector<int8_t> input_int8_data(input_data.size());
+    for (size_t i = 0; i < input_data.size(); i++) {
+        input_int8_data[i] = static_cast<int8_t>(input_data[i]);
+    }
+    // 保存为图片, stdc++ 11 实现
+    std::ofstream image_file("input_image.png", std::ios::binary);
+    image_file.write(reinterpret_cast<const char *>(input_int8_data.data()),
+                     input_int8_data.size());
+    image_file.close();
+    // set image input.
+    auto input_tensor = input_tensors_[module_->GetInputName(0)];
+    // rgb_to_nchw(input_data);
+    const size_t expected_size = image_width_ * image_height_ *
+                                 image_channels_ * batch_size_ * image_frames_;
+    nchw_data_.resize(expected_size);
+    reorder_hwc_to_target(input_data.data(), nchw_data_.data());
+    tcim::Tensor input_fp32_tensor = tcim::Tensor::CreateHostTensor(
+        input_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    input_fp32_tensor.Buffer().CopyFromHost(nchw_data_.data(),
+                                            input_fp32_tensor.MemSize());
+    input_fp32_tensor.CastTo(input_tensor);
+    module_->SetInput(module_->GetInputName(0), input_tensor);
+    module_->Run();
+    module_->Sync();
+    for (auto &name : output_names_) {
+        tcim::Tensor output_tensor = module_->GetOutput(name);
+        memcpy(output_data.data() + out_offset, output_tensor.Buffer().Data(),
+               output_tensor.MemSize());
+    }
+    return true;
 }

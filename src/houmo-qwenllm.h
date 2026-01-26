@@ -9,6 +9,8 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
     virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4) override;
     virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                               float *logits) override;
+    virtual int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
+                            float *logits);
     virtual int houmo_decode(std::vector<llama_token> &batches,
                              std::vector<int> &seq_ids,
                              std::vector<float *> logits) override;
@@ -16,5 +18,5 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
                         std::map<int, float *> &embeddings) override;
     virtual bool is_embedding() override;
   private:
-    std::vector<llama_token> prefill_tokens_;
+    std::map<int32_t, uint32_t> valid_prefill_tokens_;
 };

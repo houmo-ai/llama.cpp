@@ -15,49 +15,38 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
-    prefill_tokens_.insert(prefill_tokens_.end(), tokens.begin(), tokens.end());
     int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
-    LLAMA_LOG_INFO("%s: memory==nullptr %d, kv_offset = %d\n", __func__,
-                   memory_ == nullptr, kv_offset);
-    if ((prefill_tokens_.size() + kv_offset) >= (uint32_t)context_length_) {
-        LLAMA_LOG_ERROR("%s: prefill_tokens_ size %zu > context_length_%d, "
+    if ((valid_prefill_tokens_[seq_id] + kv_offset) >= (uint32_t)context_length_) {
+        LLAMA_LOG_ERROR("%s: valid_prefill_tokens_ size %u > context_length_%d, "
                         "reset to 0\n",
-                        __func__, prefill_tokens_.size(), context_length_);
-        prefill_tokens_.resize(0);
+                        __func__, valid_prefill_tokens_[seq_id], context_length_);
+        valid_prefill_tokens_[seq_id] = 0;
         return 1;
     }
+    auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
+    uint16_t *input_data_ptr = (uint16_t *)input_data.Data();
+    embedding_layer_->get_embedding_batch(
+        tokens, input_data_ptr + valid_prefill_tokens_[seq_id] * n_embd_);
+    valid_prefill_tokens_[seq_id] += tokens.size();
     if (logits == nullptr) {
         LLAMA_LOG_INFO(
-            "%s: logits is null, just cache return, total size = %zu\n",
-            __func__, prefill_tokens_.size());
+            "%s: logits is null, just cache return, total size = %d\n",
+            __func__, valid_prefill_tokens_[seq_id]);
         return 0;
     }
-    size_t input_echo_len = prefill_tokens_.size();
+
+    size_t input_echo_len = valid_prefill_tokens_[seq_id];
     int16_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
                                       static_cast<float>(prefill_length_));
     int32_t current_length = 0;
-
-    std::vector<llama_token> input_ids;
     int32_t valid_length = kv_offset;
     LLAMA_LOG_INFO("%s: seq_id = %d, kv_offset = %d\n", __func__, seq_id, kv_offset);
     for (int round = 0; round < prefill_loop_round; round++) {
         if (round == prefill_loop_round - 1) {
             current_length = input_echo_len - round * prefill_length_;
-            auto first = prefill_tokens_.begin() + round * prefill_length_;
-            auto last = prefill_tokens_.begin() + input_echo_len;
-            std::vector<llama_token> round_tokens(first, last);
-            input_ids = round_tokens;
         } else {
             current_length = prefill_length_;
-            auto first = prefill_tokens_.begin() + round * prefill_length_;
-            auto last = prefill_tokens_.begin() + (round + 1) * prefill_length_;
-            std::vector<llama_token> round_tokens(first, last);
-            input_ids = round_tokens;
         }
-        auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
-        memset(input_data.Data(), 0, input_data.MemSize());
-        embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
-
         auto prefill_valid_length =
             prefill_input_map_.at(prefill_model_->GetInputName(1));
         auto prefill_current_length =
@@ -98,10 +87,21 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
     prefill_output_data.CastTo(prefill_output_float);
     memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
-    prefill_tokens_.resize(0);
+    valid_prefill_tokens_[seq_id] = 0;
     if (memory_) {
         memory_->seq_add(seq_id, 0, 0, input_echo_len);
     }
+    return 0;
+}
+
+int HoumoQwenLLM::houmo_prefill(const float *embeddings, int n_tokens,
+                                int seq_id, float *logits) {
+    (void) logits;
+    auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
+    uint16_t *input_data_ptr = (uint16_t *)input_data.Data();
+    std::memcpy(input_data_ptr + valid_prefill_tokens_[seq_id] * n_embd_, embeddings,
+                n_tokens * n_embd_ * sizeof(uint16_t));
+    valid_prefill_tokens_[seq_id] += n_tokens;
     return 0;
 }
 

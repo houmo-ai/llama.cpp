@@ -2,7 +2,7 @@
 #include "clip-impl.h"
 #include "mtmd.h"
 #include "mtmd-audio.h"
-#include "houmo_vision.h"
+#include "houmo-vision.h"
 #include "llama.h"
 
 // fix problem with std::min and std::max
@@ -540,52 +540,21 @@ struct mtmd_tokenizer {
             img_u8->ny = bitmap->ny;
             img_u8->buf.resize(bitmap->data.size());
             std::memcpy(img_u8->buf.data(), bitmap->data.data(), img_u8->nx * img_u8->ny * 3);
-
-            // TODO: @guoxing.xu 修改成后摩逻辑,后摩的图片预处理在模型中做。
-            if (clip_is_hmm(ctx->ctx_v)) {
-                // just resize.
-                clip_image_f32_ptr img_f32(clip_image_f32_init());
-                ctx->hm_vision->image_resize(img_u8, img_f32);
-
-                mtmd_image_tokens_ptr image_tokens(new mtmd_image_tokens);
-                if (ctx->use_mrope) {
-                    // for Qwen2VL, we need this information for M-RoPE decoding positions
-                    image_tokens->nx = clip_n_output_tokens_x(ctx->ctx_v, img_f32.get());
-                    image_tokens->ny = clip_n_output_tokens_y(ctx->ctx_v, img_f32.get());
-                    image_tokens->use_mrope_pos = true;
-                } else {
-                  // FIXME: other models not support yet.
-                    LOG_ERR("HMM model not support yet.\n");
-                    return 2;
-                }
-                image_tokens->batch_f32.entries.push_back(std::move(img_f32));
-                image_tokens->id = bitmap->id; // optional
-
-                LOG_DBG("image_tokens->nx = %d\n", image_tokens->nx);
-                LOG_DBG("image_tokens->ny = %d\n", image_tokens->ny);
-                LOG_DBG("batch_f32 size = %d\n", (int)image_tokens->batch_f32.entries.size());
-
-                mtmd_input_chunk chunk{
-                    MTMD_INPUT_CHUNK_TYPE_IMAGE,
-                    {}, // text tokens
-                    std::move(image_tokens),
-                    nullptr, // audio tokens
-                };
-                cur.entries.emplace_back(std::move(chunk));
-
-                if (!ctx->img_end.empty()) {
-                    add_text(ctx->img_end, true); // add image end token
-                }
-                return 0;
-            }
+            LOG_DBG("%s:==== image size: %d x %d\n", __func__, img_u8->nx, img_u8->ny);
             // preprocess image
             clip_image_f32_batch batch_f32;
-            bool ok = clip_image_preprocess(ctx->ctx_v, img_u8.get(), &batch_f32);
-            if (!ok) {
-                LOG_ERR("Unable to preprocess image\n");
-                return 2;
+            if (clip_is_hmm(ctx->ctx_v) && clip_is_qwen2vl(ctx->ctx_v)) {
+                LOG_DBG("%s: image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
+                clip_image_f32_ptr img_f32(clip_image_f32_init());
+                ctx->hm_vision->image_resize(img_u8, img_f32);
+                batch_f32.entries.push_back(std::move(img_f32));
+            } else {
+                bool ok = clip_image_preprocess(ctx->ctx_v, img_u8.get(), &batch_f32);
+                if (!ok) {
+                    LOG_ERR("Unable to preprocess image\n");
+                    return 2;
+                }
             }
-
             // handle llava-uhd style preprocessing
             if (
                 ctx->slice_tmpl == MTMD_SLICE_TMPL_MINICPMV_2_5
@@ -865,8 +834,16 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
         || clip_is_glm(ctx_clip)) {
         // TODO @ngxson : llava does not support batched encoding ; this should be fixed inside clip_image_batch_encode()
         const auto & entries = image_tokens->batch_f32.entries;
+        LOG_DBG("%s: entries.size(): %d\n", __func__, entries.size());
         for (size_t i = 0; i < entries.size(); i++) {
             int n_tokens_per_image = clip_n_output_tokens(ctx_clip, entries[i].get());
+            if (clip_is_minicpmv(ctx_clip)) {
+                return ctx->hm_vision->encoding(
+                           entries[i]->buf, ctx->image_embd_v,
+                           i * n_mmproj_embd * n_tokens_per_image)
+                           ? 0
+                           : 1;
+            }
             ok = clip_image_encode(
                 ctx_clip,
                 ctx->n_threads,
@@ -874,7 +851,7 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
                 ctx->image_embd_v.data() + i*n_mmproj_embd*n_tokens_per_image);
         }
     } else {
-        if (clip_is_hmm(ctx->ctx_v)) {
+        if (clip_is_hmm(ctx->ctx_v) && clip_is_qwen2vl(ctx->ctx_v)) {
             // FIXME: 只处理第一张图片
             const clip_image_f32_ptr & imgs = image_tokens->batch_f32.entries[0];
             return ctx->hm_vision->encoding(imgs->buf, ctx->image_embd_v) ? 0
