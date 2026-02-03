@@ -760,6 +760,9 @@ void llama_context::set_adapter_lora(
     LLAMA_LOG_DEBUG("%s: adapter = %p, scale = %f\n", __func__, (void *) adapter, scale);
 
     loras[adapter] = scale;
+    if (model.hparams.is_hmm) {
+        model.hm_llmodel->lora_set_scale(adapter, scale);
+    }
 }
 
 bool llama_context::rm_adapter_lora(
@@ -769,6 +772,9 @@ bool llama_context::rm_adapter_lora(
     auto pos = loras.find(adapter);
     if (pos != loras.end()) {
         loras.erase(pos);
+        if (model.hparams.is_hmm) {
+            model.hm_llmodel->lora_set_scale(adapter, 0.0);
+        }
         return true;
     }
 
@@ -777,7 +783,9 @@ bool llama_context::rm_adapter_lora(
 
 void llama_context::clear_adapter_lora() {
     LLAMA_LOG_DEBUG("%s: call\n", __func__);
-
+    if (model.hparams.is_hmm) {
+        model.hm_llmodel->lora_clear();
+    }
     loras.clear();
 }
 

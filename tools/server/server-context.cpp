@@ -21,7 +21,7 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 #include "info_printer.h"
-
+#include "time-perf.h"
 #include <cstddef>
 #include <cinttypes>
 #include <memory>
@@ -379,6 +379,7 @@ struct server_slot {
         const double t_gen        =       t_token_generation / n_decoded;
         const double n_gen_second = 1e3 / t_token_generation * n_decoded;
         const double percent_used = (n_prompt_tokens_processed + n_decoded) / (double)n_ctx * 100.0;
+        PerfRegistry::Instance().PrintAll();
         if (n_image_tokens > 0 && n_images > 0) {
             double t_prompt_processing_no_image = t_prompt_processing - t_image_processing;
             t_prompt        = t_prompt_processing_no_image / n_prompt_tokens_processed;

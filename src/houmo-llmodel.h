@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <chrono>
+#include <iomanip>
 #include "llama-batch.h"
 #include "tcim/tcim_runtime.h"
 #include "houmo-embedding_layer.h"
@@ -36,6 +38,9 @@ class HouMoLLModel {
     int n_decode_batch();
     int n_prefill_batch();
     uint32_t n_context_length();
+    void lora_init(std::string file_name, void *adapter);
+    void lora_set_scale(void *adapter, float scale);
+    void lora_clear();
     class Impl;  // Forward declaration of the implementation class
   private:
     Impl *impl_; // Pointer to the implementation
@@ -45,6 +50,10 @@ struct kv_cache_item {
   std::vector<tcim::Tensor> tensors;
   std::vector<std::string> names;
   int seq_id = 0;
+};
+struct lora_item {
+    void * adapter; //记录上层lora contex指针
+    float scale;  // scale 0.0 表示disable， 1.0 表示enable
 };
 /**
 * @brief HouMoLLModel is the base class for HouMo model.
@@ -84,7 +93,9 @@ public:
   int n_decode_batch() const { return n_decode_batch_; }
   int n_prefill_batch() const { return n_prefill_batch_; }
   uint32_t n_context_length() const { return context_length_;}
-
+  void lora_init(std::string file_name, void *adapter);
+  void lora_set_scale(void *adapter, float scale);
+  void lora_clear();
 protected:
   /**
    * @brief Initialize the model input and output.
@@ -215,4 +226,7 @@ protected:
   std::vector<int> device_ids_ = {0};
   bool enable_lazy_mode_ = false;
   houmo_memory_i *memory_ = nullptr;
+  std::map<std::string, lora_item> lora_map;
+  tcim::Tensor lora_mask_float_;
+  std::vector<std::string> input_names_;
 };

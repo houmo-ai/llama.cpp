@@ -774,10 +774,10 @@ bool HoumoMinicpmVision::encoding(const std::vector<float> &input_data,
         input_int8_data[i] = static_cast<int8_t>(input_data[i]);
     }
     // 保存为图片, stdc++ 11 实现
-    std::ofstream image_file("input_image.png", std::ios::binary);
-    image_file.write(reinterpret_cast<const char *>(input_int8_data.data()),
-                     input_int8_data.size());
-    image_file.close();
+    // std::ofstream image_file("input_image.png", std::ios::binary);
+    // image_file.write(reinterpret_cast<const char *>(input_int8_data.data()),
+    //                  input_int8_data.size());
+    // image_file.close();
     // set image input.
     auto input_tensor = input_tensors_[module_->GetInputName(0)];
     // rgb_to_nchw(input_data);

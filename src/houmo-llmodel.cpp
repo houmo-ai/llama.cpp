@@ -248,23 +248,15 @@ void HouMoLLModel::Impl::model_inout_init(int seq_max) {
     int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
     size = std::max(size, n_decode_batch_);
     initialize_kv_cache(size);
-    auto lora_mask_ = false;
-    if (prefill_input_map_.count("lora_mask") > 0 && decode_input_map_.count("lora_mask") > 0) {
-        auto lora_mask = prefill_input_map_["lora_mask"];
-        set_input_data(lora_mask, 1, 1);
-        lora_mask = decode_input_map_["lora_mask"];
-        set_input_data(lora_mask, 1, 1);
-        lora_mask_ = true;
-    }
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
     LLAMA_LOG_INFO("prefill_length_ = %d\n context_length_ = %d\n "
                    "n_blocks_ = %d\n n_embd_ = %ld\n n_prefill_batch_ = %d\n "
                    "n_decode_batch_ = "
                    "%d\n kv_cache_size = %zu\n need_set_kv_cache_ = "
-                   "%d\n seq_max = %d lora_mask = %d.\n",
+                   "%d\n seq_max = %d\n",
                    prefill_length_, context_length_, n_blocks_, n_embd_,
                    n_prefill_batch_, n_decode_batch_, kv_cache_.size(),
-                   need_set_kv_cache_, seq_max, lora_mask_);
+                   need_set_kv_cache_, seq_max);
 }
 
 void HouMoLLModel::Impl::prefill_input_init() {
@@ -280,6 +272,7 @@ void HouMoLLModel::Impl::prefill_input_init() {
             input_name.find("_self_attn_kcache") != std::string::npos) {
             continue;
         }
+        input_names_.push_back(input_name);
         auto input_info =
             prefill_model_->GetInputInfo(input_name).AsContiguous();
         auto shape = input_info.Shape();
@@ -754,6 +747,26 @@ int HouMoLLModel::Impl::set_xlenght_for_decode(std::vector<int> &seq_ids) {
     }
     return 0;
 }
+void HouMoLLModel::Impl::lora_init(std::string file_name, void *adapter) {
+    struct lora_item item;
+    item.adapter = adapter;
+    item.scale = 0.0;
+    lora_map[file_name] = item;
+    LLAMA_LOG_INFO("lora FILE_name IS %s\n", file_name.c_str());
+}
+void HouMoLLModel::Impl::lora_set_scale(void *adapter, float scale) {
+    for (auto iter = lora_map.begin(); iter != lora_map.end(); ++iter) {
+        if (iter->second.adapter == adapter) {
+            iter->second.scale = scale;
+        }
+    }
+}
+void HouMoLLModel::Impl::lora_clear() {
+    // scale set 0
+    for (auto iter = lora_map.begin(); iter != lora_map.end(); ++iter) {
+        iter->second.scale = 0;
+    }
+}
 
 // HouMoLLModel constructor and destructor
 HouMoLLModel::HouMoLLModel() : impl_(nullptr) {}
@@ -832,4 +845,13 @@ int HouMoLLModel::houmo_embedding(
 }
 bool HouMoLLModel::is_embedding() {
     return impl_->is_embedding();
+}
+void HouMoLLModel::lora_init(std::string file_name, void *adapter) {
+    impl_->lora_init(file_name, adapter);
+}
+void HouMoLLModel::lora_set_scale(void *adapter, float scale) {
+    impl_->lora_set_scale(adapter, scale);
+}
+void HouMoLLModel::lora_clear() {
+    impl_->lora_clear();
 }
