@@ -4,6 +4,8 @@
 #include "llama-impl.h"
 #include <regex>
 #include <cstring>
+#include "time-perf.h"
+
 #pragma pack(push, 1)
 struct CompactHeader {
     int16_t magic;      // 16位标识
@@ -222,9 +224,10 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
         LLAMA_LOG_ERROR("%s: seq_ids.size() > n_decode_batch_ not supported\n", __func__);
         return -1;
     }
+    PERF_START(DECODE_SETINPUT);
     // 1. 构造input_tokens
     auto ret = set_input_for_decode(batches, seq_ids);
-    if (ret != 0) { 
+    if (ret != 0) {
         LLAMA_LOG_ERROR("%s: set_input_for_decode failed\n", __func__);
         return ret;
     }
@@ -258,15 +261,18 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     decode_model_->SetInput(decode_model_->GetInputName(1), time_position_id);
     decode_model_->SetInput(decode_model_->GetInputName(2), hight_position_id);
     decode_model_->SetInput(decode_model_->GetInputName(3), width_position_id);
-    
+
     // 4. set kv_cache
     set_kv_cache_for_decode(seq_ids);
-
+    PERF_STOP(DECODE_SETINPUT);
+    PERF_START(DECODE_RUN);
     // 5. run & sync
     decode_model_->Run();
     decode_model_->Sync();
+    PERF_STOP(DECODE_RUN);
 
     // 6. get output to logits
+    PERF_START(DECODE_GETOUTPUT);
     tcim::Tensor decode_data =
         decode_model_->GetOutput(decode_output_names_[0]);
     // 转浮点
@@ -274,6 +280,8 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     decode_data.CastTo(decode_output_float);
     auto n_vocab =
         decode_output_float.MemSize() / (n_decode_batch_ * sizeof(float));
+    PERF_STOP(DECODE_GETOUTPUT);
+    // 7. 拷贝output到logits
     for (size_t i = 0; i < seq_ids.size(); i++) {
         auto batch_id = seq_ids[i];
         decode_valid_length_[batch_id]++;

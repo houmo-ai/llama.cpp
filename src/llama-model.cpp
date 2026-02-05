@@ -2205,7 +2205,7 @@ bool llama_model::load_hmmodels(llama_model_loader & ml) {
     if (hm_llmodel == nullptr) {
         hm_llmodel = std::make_shared<HouMoLLModel>();
     }
-    return hm_llmodel->houmo_load(ml.fname_, ml.use_mmap);
+    return hm_llmodel->houmo_load(ml);
 }
 
 bool llama_model::load_tensors(llama_model_loader & ml) {

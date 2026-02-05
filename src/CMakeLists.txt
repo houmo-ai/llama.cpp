@@ -35,12 +35,12 @@ add_library(llama
             unicode-data.cpp
             unicode.cpp
             unicode.h
-	        houmo-llmodel.cpp
-            houmo-gptoss.cpp
-            houmo-qwenllm.cpp
-            houmo-vllmodel.cpp
-            houmo-embed.cpp
-            houmo-embedding_layer.cpp
+            houmo/houmo-llmodel.cpp
+            houmo/houmo-gptoss.cpp
+            houmo/houmo-qwenllm.cpp
+            houmo/houmo-vllmodel.cpp
+            houmo/houmo-embed.cpp
+            houmo/houmo-embedding_layer.cpp
             models/apertus.cpp
             models/arcee.cpp
             models/arctic.cpp
@@ -143,7 +143,7 @@ add_library(llama
 #     SOVERSION 0
 # )
 
-target_include_directories(llama PRIVATE .)
+target_include_directories(llama PRIVATE . houmo)
 target_include_directories(llama PUBLIC ../include ../vendor ../common ${HOUMO_TCIM_RUNTIME_PATH}/include)
 target_compile_features   (llama PUBLIC cxx_std_17) # don't bump
 

@@ -197,10 +197,11 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
     // 3. set kv_cache
     set_kv_cache_for_decode(seq_ids);
     // 4. set lora_mask
-    for (const auto& pair : lora_map) {
+    for (const auto &pair : lora_map) {
         if (decode_input_map_.count(pair.first) > 0) {
             auto lora_mask = decode_input_map_[pair.first];
-            lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale, lora_mask_float_.MemSize());
+            lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
+                                                   lora_mask_float_.MemSize());
             lora_mask_float_.CastTo(lora_mask);
             decode_model_->SetInput(pair.first, lora_mask);
         }

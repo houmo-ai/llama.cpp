@@ -10,6 +10,7 @@
 #include "tcim/tcim_runtime.h"
 #include "houmo-embedding_layer.h"
 #include "houmo-memory.h"
+#include "llama-model-loader.h"
 // houmo llm model defination
 //
 // @guoxing.xu 2025-05-23
@@ -24,7 +25,7 @@ class HouMoLLModel {
     HouMoLLModel();
     ~HouMoLLModel();
 
-    bool houmo_load(const std::string &file_name, bool use_mmap);
+    bool houmo_load(llama_model_loader & ml);
     void houmo_init(houmo_memory_i *memory, int seq_max = 4);
     int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                       float *logits);
@@ -65,7 +66,7 @@ class HouMoLLModel::Impl {
 public:
   Impl() = default;
   virtual ~Impl() = default;
-  virtual bool houmo_load(const std::string &file_name, bool use_mmap);
+  virtual bool houmo_load(llama_model_loader & ml);
   virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4) = 0;
   virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                             float *logits) = 0;

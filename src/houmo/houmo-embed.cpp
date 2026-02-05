@@ -12,13 +12,9 @@ HouMoEmbed::~HouMoEmbed() {
     // do nothing
 }
 
-bool HouMoEmbed::houmo_load(const std::string &file_name, bool use_mmap) {
-    struct ggml_context *ctx_data = NULL;
-    struct gguf_init_params params = {
-        /*.no_alloc = */ true,
-        /*.ctx      = */ &ctx_data,
-    };
-    struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
+bool HouMoEmbed::houmo_load(llama_model_loader & ml) {
+    std::string file_name = ml.fname_;
+    gguf_context *ctx = ml.meta.get();
 
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
@@ -30,7 +26,7 @@ bool HouMoEmbed::houmo_load(const std::string &file_name, bool use_mmap) {
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         if (strncmp(name, "embedding", strlen("embedding")) == 0 ||
             strncmp(name, "reranker", strlen("reranker")) == 0) {
-            if (use_mmap) {
+            if (ml.use_mmap) {
                 embed_model_ = create_infer_engine(file_name, offset, size);
             } else {
                 std::vector<char> buffer_vec;
@@ -44,9 +40,6 @@ bool HouMoEmbed::houmo_load(const std::string &file_name, bool use_mmap) {
             }
         }
     }
-    ggml_free(ctx_data);
-    gguf_free(ctx);
-
     return true;
 }
 

@@ -9,8 +9,7 @@ class HouMoEmbed : public HouMoLLModel::Impl {
   public:
     HouMoEmbed();
     ~HouMoEmbed();
-    virtual bool houmo_load(const std::string &file_name,
-                            bool use_mmap) override;
+    virtual bool houmo_load(llama_model_loader & ml) override;
     virtual void houmo_init(houmo_memory_i *memory, int seq_max = 10) override;
     virtual int
     houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,

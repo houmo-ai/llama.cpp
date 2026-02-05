@@ -44,7 +44,11 @@ HouMoLLModel::Impl::create_infer_engine(bool prefill, void *raw_data,
     auto infer_model = std::make_shared<tcim::Module>();
     auto option = tcim::Module::Option(wm_);
     option.SetDummyTensors(dummy_tensor_names);
+#ifdef XH2_ENABLED
+    option.EnableHostLazyLoading(enable_lazy_mode_);
+#else
     option.EnableLazyMode(enable_lazy_mode_);
+#endif
     if (prefill) {
         if (!load_from_file)
             status = infer_model->LoadModel(raw_data, size, option);
@@ -89,10 +93,11 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     auto infer_model = std::make_shared<tcim::Module>();
     auto option = tcim::Module::Option(wm_);
     option.SetDummyTensors(dummy_tensor_names);
-    option.EnableLazyMode(enable_lazy_mode_);
 #ifdef XH2_ENABLED
+    option.EnableHostLazyLoading(enable_lazy_mode_);
     option.SetModelOffset(offset, size);
 #else
+    // xh1 should not come here
     (void) offset;
     (void) size;
 #endif
@@ -104,21 +109,16 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     return infer_model;
 }
 
-bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
-                                    bool use_mmap) {
-    struct ggml_context *ctx_data = NULL;
-    struct gguf_init_params params = {
-        /*.no_alloc = */ true,
-        /*.ctx      = */ &ctx_data,
-    };
-    struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
+bool HouMoLLModel::Impl::houmo_load(llama_model_loader & ml) {
+    std::string file_name = ml.fname_;
+    gguf_context *ctx = ml.meta.get();
     parser_gguf_parameters(ctx);
     LLAMA_LOG_INFO("HouMoLLModel::houmo_load after gguf_init_from_file\n");
     // 从gguf文件中加载hmmodels
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
     const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
     // 环境变量中是否开启了LLAMA_ENABLE_LAZY_MODE
-    enable_lazy_mode_ = false;
+    enable_lazy_mode_ = !ml.use_mmap;
     if (const char *env = std::getenv("LLAMA_ENABLE_LAZY_MODE")) {
         enable_lazy_mode_ = (std::string(env) == "1");
     }
@@ -152,9 +152,6 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
     } else {
         LLAMA_LOG_INFO("run models in %zu cards", device_ids_.size());
     }
-#ifndef XH2_ENABLED
-    use_mmap = false;
-#endif
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
@@ -174,15 +171,17 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
             }
         } else if (std::regex_match(name, kPrefillPattern)) {
             // load prefill
-            if (use_mmap) {
-                prefill_model_ = create_infer_engine(file_name, offset, size, dummy_tensor_names);
-            } else {
-                std::vector<char> buffer_vec;
-                buffer_vec.resize(size);
-                read_tensor_to_buffer(file_name, offset, size, buffer_vec);
-                prefill_model_ =
-                    create_infer_engine(true, buffer_vec.data(), size, false, dummy_tensor_names);
-            }
+#ifdef XH2_ENABLED
+            prefill_model_ = create_infer_engine(file_name, offset, size,
+                                                 dummy_tensor_names);
+#else
+            // xh1 不支持文件offset加载，需要先读到buffer中
+            std::vector<char> buffer_vec;
+            buffer_vec.resize(size);
+            read_tensor_to_buffer(file_name, offset, size, buffer_vec);
+            prefill_model_ = create_infer_engine(true, buffer_vec.data(), size,
+                                                 false, dummy_tensor_names);
+#endif
             if (prefill_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load prefill.hmm\n", __func__);
                 return false;
@@ -190,15 +189,16 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
             LLAMA_LOG_INFO("%s: succeed to load prefill.hmm\n", __func__);
         } else if (std::regex_match(name, kDecodePattern)) {
             // load decode
-            if (use_mmap) {
-                decode_model_ = create_infer_engine(file_name, offset, size);
-            } else {
-                std::vector<char> buffer_vec;
-                buffer_vec.resize(size);
-                read_tensor_to_buffer(file_name, offset, size, buffer_vec);
-                decode_model_ =
-                    create_infer_engine(false, buffer_vec.data(), size, false);
-            }
+#ifdef XH2_ENABLED
+            decode_model_ = create_infer_engine(file_name, offset, size);
+#else
+            // xh1 不支持文件offset加载，需要先读到buffer中
+            std::vector<char> buffer_vec;
+            buffer_vec.resize(size);
+            read_tensor_to_buffer(file_name, offset, size, buffer_vec);
+            decode_model_ = create_infer_engine(false, buffer_vec.data(), size,
+                                                 false);
+#endif
             if (decode_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load decode.hmm\n", __func__);
                 return false;
@@ -217,8 +217,6 @@ bool HouMoLLModel::Impl::houmo_load(const std::string &file_name,
             create_infer_engine(false, const_cast<char *>(file_name.c_str()),
                                 file_name.length(), true);
     }
-    ggml_free(ctx_data);
-    gguf_free(ctx);
     if (prefill_model_ == nullptr || embedding_layer_ == nullptr) {
         LLAMA_LOG_ERROR("%s: failed to load model. load "
                         "prefill=%d,load decode=%d\n",
@@ -778,38 +776,25 @@ HouMoLLModel::~HouMoLLModel() {
 }
 
 // Forward method calls to the implementation
-bool HouMoLLModel::houmo_load(const std::string &file_name, bool use_mmap) {
-
-    struct ggml_context *ctx_data = NULL;
-    struct gguf_init_params params = {
-        /*.no_alloc = */ true,
-        /*.ctx      = */ &ctx_data,
-    };
-    struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
-    auto key_id = gguf_find_key(ctx, "general.architecture");
-    if (key_id < 0) {
-        return false;
-    }
-    std::string arch = gguf_get_val_str(ctx, key_id);
-
+bool HouMoLLModel::houmo_load(llama_model_loader & ml) {
     if (impl_ == nullptr) {
-        if (arch.find("vl") != std::string::npos) {
+        if (ml.arch_name.find("vl") != std::string::npos) {
             impl_ = new HouMoVLLModel();
-        } else if (arch.find("gpt-oss") != std::string::npos) {
+        } else if (ml.arch_name.find("gpt-oss") != std::string::npos) {
             impl_ = new HouMoGPTOSS();
-        } else if (arch.find("bert") != std::string::npos) {
+        } else if (ml.arch_name.find("bert") != std::string::npos) {
             impl_ = new HouMoEmbed();
-        } else if (arch.find("qwen") != std::string::npos) {
+        } else if (ml.arch_name.find("qwen") != std::string::npos) {
             impl_ = new HoumoQwenLLM();
         } else {
             LLAMA_LOG_ERROR("%s: unknown architecture %s\n", __func__,
-                            arch.c_str());
+                            ml.arch_name.c_str());
             exit(1);
             return false;
         }
     }
 
-    return impl_->houmo_load(file_name, use_mmap);
+    return impl_->houmo_load(ml);
 }
 
 void HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max) {
