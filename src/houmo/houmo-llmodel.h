@@ -162,8 +162,9 @@ protected:
    * @brief Parse the gguf parameters.(n_blocks, n_embd, n_vocab)
    * @details Parse the gguf parameters with the given ctx.
    * @param ctx The gguf context.
+   * @param model_arch The model architecture.
    */
-  void parser_gguf_parameters(struct gguf_context *ctx);
+  void parser_gguf_parameters(struct gguf_context *ctx, std::string &model_arch);
   /**
    * @brief Set the input data for the tensor.
    * @details Set the input data for the tensor with the given batch_size and value.
@@ -215,13 +216,11 @@ protected:
   std::vector<std::string> decode_current_length_names_;
   std::map<int, kv_cache_item> kv_cache_;
   int need_set_kv_cache_ = 0; // 0: no need, 1: need
-  std::string kGeneralArch = "general.architecture";
   std::string kEmbeddingLengthEx = ".embedding_length";
   std::string kBlockCountEx = ".block_count";
   std::string kSpliteCount = "split.tensors.count";
   std::string kHmmInfo = "hmm.info";
   int kSeqMax = 4; // maximum sequence number for single-card model
-  std::string model_arch_ = "";
   bool xh1_ = false;
   int device_num_ = 1;
   std::vector<int> device_ids_ = {0};
@@ -230,4 +229,6 @@ protected:
   std::map<std::string, lora_item> lora_map;
   tcim::Tensor lora_mask_float_;
   std::vector<std::string> input_names_;
+  std::map<int32_t, std::vector<uint16_t>> input_embedding_ids_;
+  std::map<int32_t, std::vector<llama_token>> input_tokens_;
 };

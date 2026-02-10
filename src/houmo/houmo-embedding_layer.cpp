@@ -39,6 +39,18 @@ void HoumoEmbeddingLayer::get_embedding_batch(
     }
 }
 
+// Overload: accept raw pointer to token ids and length to avoid allocations
+void HoumoEmbeddingLayer::get_embedding_batch(const int32_t *token_ids, size_t n, void *out_batch) {
+    char *out_batch_char = static_cast<char *>(out_batch);
+    for (size_t i = 0; i < n; ++i) {
+        uint32_t token_id = token_ids[i];
+        validate_token_id(token_id);
+        size_t offset = token_id * n_embd_ * sizeof(int16_t);
+        memcpy(out_batch_char + i * n_embd_ * sizeof(int16_t),
+               &data_[offset], n_embd_ * sizeof(int16_t));
+    }
+}
+
 // 核心函数：加载二进制权重文件
 void HoumoEmbeddingLayer::load_weight(const std::string &weight_path, int64_t offset,
                                int64_t size) {

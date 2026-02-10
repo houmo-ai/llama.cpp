@@ -77,19 +77,23 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
     int32_t current_length = 0;
     // 先计算embedding.
+    LLAMA_LOG_INFO("%s: empty tokens, skip embedding. seq_id = %d\n", __func__, seq_id);
     embedding_layer_->get_embedding_batch(
         tokens, input_embedding_ids_[seq_id].data() +
-                       offset_embedding_ids_[seq_id] * n_embd_);
+                    offset_embedding_ids_[seq_id] * n_embd_);
 
     offset_embedding_ids_[seq_id] += tokens.size();
     prefill_input_lengths_[seq_id].push_back(tokens.size());
     // 计算所有embeddings
-    if (logits == nullptr) {
+    if (logits == nullptr && tokens.size() > 0) {
         // 只缓存输入
         LLAMA_LOG_INFO("%s: logits is nullptr, only cache input. seq_id = %d\n", __func__, seq_id);
         return 0;
     }
     size_t input_echo_len = offset_embedding_ids_[seq_id];
+    if (input_echo_len == 0) {
+        return 0;
+    }
     size_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
     static_cast<float>(prefill_length_));
 
@@ -166,7 +170,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
 int HouMoVLLModel::houmo_prefill(const float *embeddings, int n_tokens,
                                  int seq_id, float *logits) {
-    LLAMA_LOG_DEBUG("%s seq_id = %d, n_tokens is = %d\n", "prefill stage", seq_id,
+    LLAMA_LOG_INFO("%s seq_id = %d, n_tokens is = %d\n", "prefill stage", seq_id,
                    n_tokens);
     if (logits == nullptr) {
         // 只缓存输入
@@ -220,6 +224,20 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
                                 std::vector<int> &seq_ids, std::vector<float *> logits) {
     LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
                    seq_ids.size(), batches.size());
+    for (auto seq_id : seq_ids) {
+        if (prefill_input_lengths_[seq_id].size() != 0) {
+            LLAMA_LOG_INFO("%s: seq_id = %d, process cache input\n", __func__, seq_id);
+            std::vector<llama_token> empty_tokens;
+            houmo_prefill(empty_tokens, seq_id, nullptr);
+        }
+        int rollback_pos = decode_valid_length_[seq_id] - memory_->seq_pos_min(seq_id);
+        decode_valid_length_[seq_id] = memory_->seq_pos_min(seq_id);
+        LLAMA_LOG_DEBUG("%s: seq_id = %d, decode_valid_length_[seq_id] = %d\n",
+                        __func__, seq_id, decode_valid_length_[seq_id]);
+        if (rollback_pos > 0) {
+            position_indexs_[seq_id] -= rollback_pos;
+        }
+    }
     if (seq_ids.size() > (size_t)n_decode_batch_) {
         LLAMA_LOG_ERROR("%s: seq_ids.size() > n_decode_batch_ not supported\n", __func__);
         return -1;

@@ -19,5 +19,4 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
     virtual bool is_embedding() override;
   private:
     std::map<int32_t, std::vector<uint16_t>> input_embedding_ids_;
-    std::map<int32_t, std::vector<llama_token>> input_tokens_;
 };

@@ -229,11 +229,11 @@ main() {
     build_llama
     package_llama
 
-    download_file "$modelcli_url" "release/$PLATFORM/$ARCH/bin/model_cli"
+    download_file "$modelcli_url" "release/$PLATFORM/$ARCH/bin/model-cli"
     download_file "$ollama_url" "release/$PLATFORM/$ARCH/bin/hlaw_ollama"
     patchelf --set-rpath '$ORIGIN/../lib' release/$PLATFORM/$ARCH/bin/hlaw_ollama
     chmod 755 release/$PLATFORM/$ARCH/bin/hlaw_ollama
-    chmod 755 release/$PLATFORM/$ARCH/bin/model_cli
+    chmod 755 release/$PLATFORM/$ARCH/bin/model-cli
     echo "LLAMA build and packaging completed for $PLATFORM/$ARCH."
 }
 # 执行主函数

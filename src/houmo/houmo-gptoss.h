@@ -26,7 +26,6 @@ class HouMoGPTOSS : public HouMoLLModel::Impl {
                                            int past_seq_length, bool is_local);
 
   private:
-    std::vector<llama_token> prefill_tokens_;
     int32_t sliding_window_ = 128;
     std::vector<std::string> local_attention_names_;
     std::vector<std::string> global_attention_names_;

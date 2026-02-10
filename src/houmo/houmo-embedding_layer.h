@@ -20,6 +20,8 @@ class HoumoEmbeddingLayer {
 
     void get_embedding_batch(const std::vector<int32_t> &token_ids,
                                    void *data);
+  // Overload that accepts a raw pointer + length to avoid temporary vector copies
+  void get_embedding_batch(const int32_t *token_ids, size_t n, void *data);
     // ========== 工具接口 ==========
     // 获取词汇表大小
     uint32_t get_vocab_size() const { return vocab_size_; }

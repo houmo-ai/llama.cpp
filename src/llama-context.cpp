@@ -26,8 +26,8 @@ void llama_context::houmo_init(int32_t seq_max) {
                         ? cparams.n_ctx
                         : hm_llmodel->n_context_length();
     cparams.n_ctx_seq = cparams.n_ctx;
-    cparams.n_batch = cparams.n_ctx_seq;
-    cparams.n_ubatch = cparams.n_ctx_seq;
+    cparams.n_batch = cparams.n_batch < 256 ? 256 : cparams.n_batch;
+    cparams.n_ubatch = cparams.n_ubatch < 256 ? 256 : cparams.n_ubatch;
     cparams.kv_unified = true;
     if (hm_llmodel->is_embedding()) {
         memory = nullptr;

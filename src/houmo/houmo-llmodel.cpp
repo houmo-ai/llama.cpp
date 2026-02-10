@@ -26,10 +26,9 @@ static bool string_replace_once(std::string &str, const std::string &from,
     str.replace(pos, from.length(), to);
     return true;
 }
-std::shared_ptr<tcim::Module>
-HouMoLLModel::Impl::create_infer_engine(bool prefill, void *raw_data,
-                                        int64_t size, bool load_from_file,
-                                        std::vector<std::string> dummy_tensor_names) {
+std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
+    bool prefill, void *raw_data, int64_t size, bool load_from_file,
+    std::vector<std::string> dummy_tensor_names) {
     if (wm_.GetInitStatus() != tcim::Status::OK) {
         auto device_ids = parse_deviceids();
         std::string backend = "";
@@ -98,8 +97,8 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     option.SetModelOffset(offset, size);
 #else
     // xh1 should not come here
-    (void) offset;
-    (void) size;
+    (void)offset;
+    (void)size;
 #endif
     status = infer_model->LoadModel(file_name, option);
     if (status != tcim::Status::OK) {
@@ -109,11 +108,10 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     return infer_model;
 }
 
-bool HouMoLLModel::Impl::houmo_load(llama_model_loader & ml) {
+bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml) {
     std::string file_name = ml.fname_;
     gguf_context *ctx = ml.meta.get();
-    parser_gguf_parameters(ctx);
-    LLAMA_LOG_INFO("HouMoLLModel::houmo_load after gguf_init_from_file\n");
+    parser_gguf_parameters(ctx, ml.arch_name);
     // 从gguf文件中加载hmmodels
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
     const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
@@ -126,10 +124,10 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader & ml) {
     std::vector<std::string> dummy_tensor_names;
     // 防止更高效使用内存，这个将prefill 设置为dummy_tensor_names
     for (int idx = 0; idx < n_blocks_; idx++) {
-        std::string k_cache_name = "model_layers_" + std::to_string(idx) +
-                                    "_self_attn_kcache_input";
-        std::string v_cache_name = "model_layers_" + std::to_string(idx) +
-                                    "_self_attn_vcache_input";
+        std::string k_cache_name =
+            "model_layers_" + std::to_string(idx) + "_self_attn_kcache_input";
+        std::string v_cache_name =
+            "model_layers_" + std::to_string(idx) + "_self_attn_vcache_input";
         dummy_tensor_names.push_back(k_cache_name);
         dummy_tensor_names.push_back(v_cache_name);
     }
@@ -141,14 +139,12 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader & ml) {
     } else if (device_num_ == 1 && device_ids_.size() > 1) {
         // 模型是单卡模型，需要将device_ids 缩小为{0}
         device_ids_ = {0};
-        LLAMA_LOG_WARN(
-            "single card model, set device_ids size > 1, need to "
-            "resize device_ids to {0}");
-    } else if ( device_num_ == 4 && device_ids_.size() == 1) {
+        LLAMA_LOG_WARN("single card model, set device_ids size > 1, need to "
+                       "resize device_ids to {0}");
+    } else if (device_num_ == 4 && device_ids_.size() == 1) {
         // 模型是四卡模型，需要将device_ids 扩展为{0,1,2,3}
         device_ids_ = {0, 1, 2, 3};
-        LLAMA_LOG_WARN(
-            "4 card model, need to set device_ids to {0,1,2,3}");
+        LLAMA_LOG_WARN("4 card model, need to set device_ids to {0,1,2,3}");
     } else {
         LLAMA_LOG_INFO("run models in %zu cards", device_ids_.size());
     }
@@ -196,8 +192,8 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader & ml) {
             std::vector<char> buffer_vec;
             buffer_vec.resize(size);
             read_tensor_to_buffer(file_name, offset, size, buffer_vec);
-            decode_model_ = create_infer_engine(false, buffer_vec.data(), size,
-                                                 false);
+            decode_model_ =
+                create_infer_engine(false, buffer_vec.data(), size, false);
 #endif
             if (decode_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load decode.hmm\n", __func__);
@@ -205,8 +201,8 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader & ml) {
             }
             LLAMA_LOG_INFO("%s: succeed to load decode.hmm\n", __func__);
         } else {
-            LLAMA_LOG_INFO("tensor[%d]: name = %s, size = %zu, skipped\n", i, name,
-                           size);
+            LLAMA_LOG_INFO("tensor[%d]: name = %s, size = %zu, skipped\n", i,
+                           name, size);
         }
     }
     if (n_split_count_ == 3) {
@@ -364,27 +360,21 @@ void HouMoLLModel::Impl::decode_output_init() {
     }
 }
 
-void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx) {
-    auto key_id = gguf_find_key(ctx, kGeneralArch.c_str());
-    if (key_id < 0) {
-        LLAMA_LOG_INFO("%s: failed to find key %s in gguf file\n", __func__,
-                        kGeneralArch.c_str());
-        return;
-    }
-    model_arch_ = gguf_get_val_str(ctx, key_id);
-    std::string key = model_arch_ + kBlockCountEx;
-    key_id = gguf_find_key(ctx, key.c_str());
+void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx,
+                                                std::string &model_arch) {
+    std::string key = model_arch + kBlockCountEx;
+    auto key_id = gguf_find_key(ctx, key.c_str());
     if (key_id < 0) {
         LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
-                        key.c_str());
+                       key.c_str());
     } else {
         n_blocks_ = gguf_get_val_u32(ctx, key_id);
     }
-    key = model_arch_ + kEmbeddingLengthEx;
+    key = model_arch + kEmbeddingLengthEx;
     key_id = gguf_find_key(ctx, key.c_str());
     if (key_id < 0) {
         LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
-                        key.c_str());
+                       key.c_str());
     } else {
         n_embd_ = gguf_get_val_u32(ctx, key_id);
     }
@@ -399,7 +389,7 @@ void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx) {
     key_id = gguf_find_key(ctx, kHmmInfo.c_str());
     if (key_id < 0) {
         LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
-                        kHmmInfo.c_str());
+                       kHmmInfo.c_str());
         return;
     }
     auto hmm_info_str = gguf_get_val_str(ctx, key_id);
@@ -776,7 +766,7 @@ HouMoLLModel::~HouMoLLModel() {
 }
 
 // Forward method calls to the implementation
-bool HouMoLLModel::houmo_load(llama_model_loader & ml) {
+bool HouMoLLModel::houmo_load(llama_model_loader &ml) {
     if (impl_ == nullptr) {
         if (ml.arch_name.find("vl") != std::string::npos) {
             impl_ = new HouMoVLLModel();
@@ -828,15 +818,11 @@ int HouMoLLModel::houmo_embedding(
     std::map<int, float *> &embeddings) {
     return impl_->houmo_embedding(batches, embeddings);
 }
-bool HouMoLLModel::is_embedding() {
-    return impl_->is_embedding();
-}
+bool HouMoLLModel::is_embedding() { return impl_->is_embedding(); }
 void HouMoLLModel::lora_init(std::string file_name, void *adapter) {
     impl_->lora_init(file_name, adapter);
 }
 void HouMoLLModel::lora_set_scale(void *adapter, float scale) {
     impl_->lora_set_scale(adapter, scale);
 }
-void HouMoLLModel::lora_clear() {
-    impl_->lora_clear();
-}
+void HouMoLLModel::lora_clear() { impl_->lora_clear(); }

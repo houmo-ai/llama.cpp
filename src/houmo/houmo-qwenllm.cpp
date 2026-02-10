@@ -1,5 +1,6 @@
 #include "houmo-qwenllm.h"
 #include <cstring>
+#include <algorithm>
 #include "llama-impl.h"
 #include "time-perf.h"
 void HoumoQwenLLM::houmo_init(houmo_memory_i *memory, int seq_max) {
@@ -33,20 +34,28 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
     int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
-    int32_t cache_tokens = std::max(input_tokens_[seq_id].size(), input_embedding_ids_[seq_id].size() / n_embd_);
-    if (( cache_tokens + tokens.size() + kv_offset) >= (uint32_t)context_length_) {
+    size_t embeddings_available = input_embedding_ids_[seq_id].size() / n_embd_;
+    if ((embeddings_available + tokens.size() + kv_offset) >= (uint32_t)context_length_) {
         LLAMA_LOG_ERROR("%s: input size %zu > context_length_%d, "
                         "reset to 0\n",
-                        __func__, cache_tokens + tokens.size() + kv_offset, context_length_);
-        input_tokens_[seq_id].resize(0);
+                        __func__, embeddings_available + tokens.size() + kv_offset, context_length_);
+        // clear embedding cache
         input_embedding_ids_[seq_id].resize(0);
         return 1;
     }
-    input_tokens_[seq_id].insert(input_tokens_[seq_id].end(), tokens.begin(), tokens.end());
-    if (logits == nullptr) {
+
+    // Determine total available tokens. We support mixed caches: existing
+    // embeddings (stored first) plus the incoming token ids (stored after).
+    size_t tokens_available = tokens.size();
+    size_t total_tokens = embeddings_available + tokens_available;
+
+    // Decide how many tokens to actually process now.
+    // Process all available tokens regardless of whether logits is provided.
+    size_t process_tokens = total_tokens;
+    if (process_tokens == 0) {
         LLAMA_LOG_INFO(
-            "%s: logits is null, just cache return, total size = %zu\n",
-            __func__, cache_tokens + tokens.size());
+            "%s: no tokens to process, just cache return, total size = %zu\n",
+            __func__, total_tokens);
         return 0;
     }
 
@@ -56,42 +65,51 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     std::vector<llama_token> input_ids;
     LLAMA_LOG_INFO("%s: seq_id = %d, kv_offset = %d\n", __func__, seq_id, kv_offset);
 
-    auto &prefill_tokens_ = input_tokens_[seq_id];
-    if (input_embedding_ids_[seq_id].size() >0) {
-        int existing_embedding_tokens = input_embedding_ids_[seq_id].size();
-        input_embedding_ids_[seq_id].resize(existing_embedding_tokens + prefill_tokens_.size() * n_embd_);
-        uint16_t *input_data_ptr = input_embedding_ids_[seq_id].data() + existing_embedding_tokens;
+    auto &prefill_tokens_ = tokens; // process incoming tokens directly, no caching
 
-        embedding_layer_->get_embedding_batch(prefill_tokens_, input_data_ptr);
-        prefill_tokens_.resize(0);
-    }
-    size_t input_echo_len = input_tokens_[seq_id].size() == 0?  input_embedding_ids_[seq_id].size() / n_embd_: input_tokens_[seq_id].size();
-    int16_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
-                                      static_cast<float>(prefill_length_));
-    for (int round = 0; round < prefill_loop_round; round++) {
+    // number of rounds needed to process `process_tokens` tokens
+    size_t rounds = (process_tokens + prefill_length_ - 1) / prefill_length_;
+
+    // reuse vector for token slices to avoid reallocations
+    std::vector<llama_token> token_slice;
+    token_slice.reserve(prefill_length_);
+
+    for (size_t round = 0; round < rounds; ++round) {
         auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
-        if (input_tokens_[seq_id].size() != 0) {
-            if (round == prefill_loop_round - 1) {
-                current_length = input_echo_len - round * prefill_length_;
-                auto first = prefill_tokens_.begin() + round * prefill_length_;
-                auto last = prefill_tokens_.begin() + input_echo_len;
-                input_ids = std::vector<llama_token>(first, last);
-            } else {
-                current_length = prefill_length_;
-                auto first = prefill_tokens_.begin() + round * prefill_length_;
-                auto last = prefill_tokens_.begin() + (round + 1) * prefill_length_;
-                input_ids = std::vector<llama_token>(first, last);
-            }
+
+        size_t round_start = round * prefill_length_;
+        size_t remaining = process_tokens > round_start ? process_tokens - round_start : 0;
+        current_length = remaining >= (size_t)prefill_length_ ? prefill_length_ : (int)remaining;
+
+        // three cases: entirely from embeddings, entirely from tokens, or spanning both
+        if (round_start + current_length <= embeddings_available) {
+            // entirely in embeddings
+            size_t emb_start = round_start * n_embd_;
+            size_t copy_bytes = current_length * n_embd_ * sizeof(uint16_t);
+            memcpy(input_data.Data(),
+                   input_embedding_ids_[seq_id].data() + emb_start,
+                   copy_bytes);
+        } else if (round_start >= embeddings_available) {
+            // entirely in tokens
+            size_t token_offset = round_start - embeddings_available;
+            // avoid creating a temporary vector: call overload that accepts raw pointer
+            const int32_t *token_ptr = prefill_tokens_.data() + token_offset;
             memset(input_data.Data(), 0, input_data.MemSize());
-            embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
+            embedding_layer_->get_embedding_batch(token_ptr, current_length, input_data.Data());
         } else {
-            // set embedding input directly
-            if (round == prefill_loop_round - 1) {
-                current_length = input_echo_len - round * prefill_length_;
-            } else {
-                current_length = prefill_length_;
-            }
-            memcpy(input_data.Data(), input_embedding_ids_[seq_id].data() + round * prefill_length_ * n_embd_, current_length * n_embd_ * sizeof(uint16_t));
+            // spans embeddings and tokens
+            size_t emb_part = embeddings_available > round_start ? (embeddings_available - round_start) : 0;
+            size_t token_part = current_length - emb_part;
+            // copy embeddings portion
+            size_t emb_start = round_start * n_embd_;
+            memcpy(input_data.Data(),
+                   input_embedding_ids_[seq_id].data() + emb_start,
+                   emb_part * n_embd_ * sizeof(uint16_t));
+            // prepare token slice (tokens start at index 0 in prefill_tokens_)
+            auto token_ptr = prefill_tokens_.data();
+            // embed token part into tail of input_data
+            embedding_layer_->get_embedding_batch(token_ptr, token_part,
+                                                 static_cast<uint16_t*>(input_data.Data()) + emb_part * n_embd_);
         }
         auto prefill_valid_length =
             prefill_input_map_.at(prefill_model_->GetInputName(1));
@@ -136,9 +154,9 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         prefill_model_->Run();
         prefill_model_->Sync();
         PERF_STOP(PREFILL_RUN_ONCE);
-        valid_length += prefill_length_;
+        valid_length += current_length;
     }
-    decode_valid_length_[seq_id] = input_echo_len + kv_offset;
+    decode_valid_length_[seq_id] = kv_offset + (int32_t)process_tokens;
     PERF_START(PREFILL_GETOUTPUT);
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
@@ -146,11 +164,15 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
     prefill_output_data.CastTo(prefill_output_float);
     PERF_STOP(PREFILL_GETOUTPUT);
-    memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+    if (logits != nullptr) {
+        memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+    }
+
+    // clear embedding cache
     input_embedding_ids_[seq_id].resize(0);
-    input_tokens_[seq_id].resize(0);
+
     if (memory_) {
-        memory_->seq_add(seq_id, 0, 0, input_echo_len);
+        memory_->seq_add(seq_id, 0, 0, (int32_t)process_tokens);
     }
     return 0;
 }
@@ -160,15 +182,9 @@ int HoumoQwenLLM::houmo_prefill(const float *embeddings, int n_tokens,
     (void) logits;
     int size = input_embedding_ids_[seq_id].size();
     input_embedding_ids_[seq_id].resize(
-        input_embedding_ids_[seq_id].size() + (n_tokens + input_tokens_[seq_id].size()) * n_embd_);
+        input_embedding_ids_[seq_id].size() + n_tokens * n_embd_);
     uint16_t *input_data_ptr = input_embedding_ids_[seq_id].data() + size;
-    if (input_tokens_[seq_id].size() > 0) {
-        // do embedding
-        embedding_layer_->get_embedding_batch(input_tokens_[seq_id], input_data_ptr);
-        input_tokens_[seq_id].resize(0);
-    }
-    std::memcpy(input_data_ptr + input_tokens_[seq_id].size() * n_embd_, embeddings,
-                n_tokens * n_embd_ * sizeof(uint16_t));
+    std::memcpy(input_data_ptr, embeddings, n_tokens * n_embd_ * sizeof(uint16_t));
     return 0;
 }
 
@@ -177,13 +193,16 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
                                std::vector<float *> logits) {
     LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
                     seq_ids.size(), batches.size());
+    for (auto seq_id : seq_ids)
+        decode_valid_length_[seq_id] = memory_->seq_pos_min(seq_id);
+    int ret = 0;
     if (seq_ids.size() > (size_t)n_decode_batch_) {
         LLAMA_LOG_ERROR("%s: seq_ids.size() > n_decode_batch_ not supported\n", __func__);
         return -1;
     }
     PERF_START(DECODE_SETINPUT);
     // 1. 构造input_tokens
-    auto ret = set_input_for_decode(batches, seq_ids);
+    ret = set_input_for_decode(batches, seq_ids);
     if (ret != 0) {
         LLAMA_LOG_ERROR("%s: set_input_for_decode failed\n", __func__);
         return ret;

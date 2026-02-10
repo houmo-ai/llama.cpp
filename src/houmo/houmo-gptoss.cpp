@@ -100,42 +100,32 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
     int kv_offset = memory_->seq_pos_min(seq_id);
-    if ((prefill_tokens_.size() + tokens.size() + kv_offset) >=
-        (uint32_t)context_length_) {
-        LLAMA_LOG_ERROR("%s: prefill_tokens_ size %zu > context_length_%d, "
-                        "reset to 0\n",
-                        __func__, prefill_tokens_.size(), context_length_);
-        prefill_tokens_.resize(0);
+    // Do not cache tokens anymore. Process the provided tokens immediately.
+    if ((tokens.size() + kv_offset) >= (uint32_t)context_length_) {
+        LLAMA_LOG_ERROR("%s: tokens size %zu + kv_offset %d >= context_length_%d, reset to 0\n",
+                        __func__, tokens.size(), kv_offset, context_length_);
         return 1;
     }
-    prefill_tokens_.insert(prefill_tokens_.end(), tokens.begin(), tokens.end());
 
-    if (logits == nullptr) {
-        LLAMA_LOG_INFO(
-            "%s: logits is null, just cache return, total size = %zu\n",
-            __func__, prefill_tokens_.size());
-        return 0;
-    }
-    size_t input_echo_len = prefill_tokens_.size();
-    int16_t prefill_loop_round = ceil(static_cast<float>(input_echo_len) /
-                                      static_cast<float>(prefill_length_));
+    size_t input_echo_len = tokens.size();
+    // compute number of rounds needed (integer ceil)
+    int32_t prefill_loop_round = 0;
+    prefill_loop_round = static_cast<int32_t>((input_echo_len + prefill_length_ - 1) / prefill_length_);
     int32_t current_length = 0;
 
     std::vector<llama_token> input_ids;
     int32_t valid_length = kv_offset;
     for (int round = 0; round < prefill_loop_round; round++) {
         if (round == prefill_loop_round - 1) {
-            current_length = input_echo_len - round * prefill_length_;
-            auto first = prefill_tokens_.begin() + round * prefill_length_;
-            auto last = prefill_tokens_.begin() + input_echo_len;
-            std::vector<llama_token> round_tokens(first, last);
-            input_ids = round_tokens;
+            current_length = static_cast<int32_t>(input_echo_len - round * prefill_length_);
+            auto first = tokens.begin() + round * prefill_length_;
+            auto last = tokens.begin() + input_echo_len;
+            input_ids.assign(first, last);
         } else {
             current_length = prefill_length_;
-            auto first = prefill_tokens_.begin() + round * prefill_length_;
-            auto last = prefill_tokens_.begin() + (round + 1) * prefill_length_;
-            std::vector<llama_token> round_tokens(first, last);
-            input_ids = round_tokens;
+            auto first = tokens.begin() + round * prefill_length_;
+            auto last = tokens.begin() + (round + 1) * prefill_length_;
+            input_ids.assign(first, last);
         }
         auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
         memset(input_data.Data(), 0, input_data.MemSize());
@@ -160,15 +150,17 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         prefill_model_->Sync();
         valid_length += prefill_length_;
     }
-    decode_valid_length_[seq_id] = input_echo_len + kv_offset;
+    // update decode valid length and optionally copy logits
+    decode_valid_length_[seq_id] = static_cast<int32_t>(input_echo_len) + kv_offset;
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
     // 转浮点
     auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
     prefill_output_data.CastTo(prefill_output_float);
-    memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
-    prefill_tokens_.resize(0);
-    memory_->seq_add(seq_id, 0, 0, input_echo_len);
+    if (logits != nullptr) {
+        memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+    }
+    memory_->seq_add(seq_id, 0, 0, static_cast<int32_t>(input_echo_len));
     return 0;
 }
 
@@ -177,12 +169,18 @@ int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
                               std::vector<float *> logits) {
     LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
                     seq_ids.size(), batches.size());
+    for (auto seq_id : seq_ids)
+        decode_valid_length_[seq_id] = memory_->seq_pos_min(seq_id);
+    int ret = 0;
+    if (seq_ids.size() == 0) {
+        return ret;
+    }
     if (seq_ids.size() > (size_t)n_decode_batch_) {
         LLAMA_LOG_ERROR("%s: seq_ids.size() > n_decode_batch_ not supported\n", __func__);
         return -1;
     }
     // 1. 构造input_tokens
-    auto ret = set_input_for_decode(batches, seq_ids);
+    ret = set_input_for_decode(batches, seq_ids);
     if (ret != 0) {
         LLAMA_LOG_ERROR("%s: set_input_for_decode failed\n", __func__);
         return ret;

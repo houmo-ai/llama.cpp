@@ -178,7 +178,7 @@ main() {
     # 编译和打包
     build_llama
     package_llama
-    download_file "$modelcli_url" "release/$PLATFORM/$ARCH/bin/model_cli"
+    download_file "$modelcli_url" "release/$PLATFORM/$ARCH/bin/model-cli.exe"
     echo "LLAMA build and packaging completed for $PLATFORM/$ARCH."
 }
 # 执行主函数
