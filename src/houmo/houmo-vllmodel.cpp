@@ -19,7 +19,11 @@ HouMoVLLModel::HouMoVLLModel() : HouMoLLModel::Impl() {
     // do nothing
 }
 
-void HouMoVLLModel::houmo_init(houmo_memory_i *memory, int seq_max) {
+void HouMoVLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
+                               ggml_abort_callback abort_callback,
+                               void *abort_callback_data) {
+    abort_callback_data_ = abort_callback_data;
+    abort_callback_ = abort_callback;
     /**
      *  qwen2.5vl：input1, time_position_id, height_position_id, width_position_id, valid_length, current_length
      *  qwen3vl：..., deepstack_features_0, deepstack_features_1, deepstack_features_2
@@ -153,6 +157,11 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         set_kv_cache_for_prefill(seq_id);
         prefill_model_->Run();
         prefill_model_->Sync();
+        if (abort_callback_ != nullptr && abort_callback_(abort_callback_data_)) {
+            LLAMA_LOG_INFO("%s: abort_callback_ is called. seq_id = %d\n", __func__, seq_id);
+            reset_position_ids(seq_id);
+            return 2;
+        }
         valid_length += prefill_length_;
     }
     decode_valid_length_[seq_id] = input_echo_len + kv_offset;

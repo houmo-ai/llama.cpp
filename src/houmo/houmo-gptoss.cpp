@@ -13,8 +13,7 @@ std::vector<uint16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
                                                     int past_seq_length,
                                                     bool is_local) {
     // ========== 1. 兼容原有参数，==========
-    int fill_length =
-        (query_length == 1) ? 1 : 256; // prefill=256, decode=1（固定值）
+    int fill_length = (query_length == 1) ? 1 : prefill_length_; // prefill=256, decode=1（固定值）
     int new_cache_length = query_length;
     int old_cache_length = past_seq_length;
 
@@ -35,35 +34,17 @@ std::vector<uint16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
         // 仅循环new_cache_length次
         for (int i = 0; i < new_cache_length; ++i) {
             if (is_local) {
-                // 1. 计算当前token的绝对位置
-                int current_abs_pos = old_cache_length + i;
+                // start_idx = i if old_cache_length + i > window else 0
+                int start_idx = (old_cache_length + i > sliding_window_) ? i : 0;
+                // end_idx = min(start_idx + window, old_cache_length + i + 1)
+                int end_idx = std::min(start_idx + sliding_window_, old_cache_length + i + 1);
+                LLAMA_LOG_DEBUG("%s: i = %d, start_idx = %d, end_idx = %d\n",
+                               __func__, i, start_idx, end_idx);
 
-                // 2. 正确计算滑窗的起始点（核心修正）
-                // 也就是：当前位置 减去 窗口大小，再加1（因为是闭区间或长度计算），并防止为负
-                int start_idx = std::max(0, current_abs_pos - sliding_window_ + 1);
-
-                // 3. 计算结束点（通常是当前位置+1，即包含自身）
-                int end_idx = current_abs_pos + 1;
-
-                // 4. 双重保险（防止 end_idx 超过 width 边界，虽然逻辑上不应发生，但为了安全）
-                if (fill_length == 256 &&  end_idx > (width - sliding_window_)) {
-                    end_idx = end_idx - sliding_window_ -1;
-                    start_idx = start_idx - sliding_window_ -1;
-                } else if (end_idx > width) {
-                    end_idx = sliding_window_;
-                    start_idx = 0;
-                }
-                LLAMA_LOG_DEBUG("%s: current_abs_pos = %d, start_idx = %d, end_idx = %d\n",
-                               __func__, current_abs_pos, start_idx, end_idx);
-                
-                // 有效区域置0（覆盖负无穷）
                 for (int j = start_idx; j < end_idx; ++j) {
                     if (j >= width)
-                        break; // 防止越界
-                    // 索引计算：[batch, 1, fill_length, width]
-                    int idx = b * 1 * fill_length * width // batch维度
-                              + i * width                 // fill_length维度
-                              + j;                        // width维度
+                        break;
+                    int idx = b * 1 * fill_length * width + i * width + j;
                     mask_tensor[idx] = 0.0f;
                 }
             } else {
@@ -82,7 +63,11 @@ std::vector<uint16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
     return mask_tensor;
 }
 
-void HouMoGPTOSS::houmo_init(houmo_memory_i *memory, int seq_max) {
+void HouMoGPTOSS::houmo_init(houmo_memory_i *memory, int seq_max,
+                             ggml_abort_callback abort_callback,
+                             void *abort_callback_data) {
+    abort_callback_data_ = abort_callback_data;
+    abort_callback_ = abort_callback;
     model_inout_init(seq_max);
     int sum = decode_model_->GetInputNum();
     for (int i = 0; i < sum; i++) {
@@ -116,6 +101,7 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     std::vector<llama_token> input_ids;
     int32_t valid_length = kv_offset;
     for (int round = 0; round < prefill_loop_round; round++) {
+
         if (round == prefill_loop_round - 1) {
             current_length = static_cast<int32_t>(input_echo_len - round * prefill_length_);
             auto first = tokens.begin() + round * prefill_length_;
@@ -127,6 +113,8 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             auto last = tokens.begin() + (round + 1) * prefill_length_;
             input_ids.assign(first, last);
         }
+        LLAMA_LOG_DEBUG("%s: round %d/%d, valid_length = %d, current_length = %d\n", __func__, round + 1,
+                    prefill_loop_round, valid_length, current_length);
         auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
         memset(input_data.Data(), 0, input_data.MemSize());
         embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
@@ -144,7 +132,7 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                  prefill_valid_length);
         prefill_model_->SetInput(prefill_model_->GetInputName(2),
                                  prefill_current_length);
-        set_attentions_for_prefill(current_length, valid_length - kv_offset);
+        set_attentions_for_prefill(current_length, valid_length);
         set_kv_cache_for_prefill(seq_id);
         prefill_model_->Run();
         prefill_model_->Sync();
@@ -214,8 +202,10 @@ int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
     auto n_vocab =
         decode_output_float.MemSize() / (n_decode_batch_ * sizeof(float));
     for (size_t i = 0; i < seq_ids.size(); i++) {
-        auto batch_id = seq_ids[i];
-        decode_valid_length_[batch_id]++;
+        auto seq_id = seq_ids[i];
+        decode_valid_length_[seq_id]++;
+
+        auto batch_id = seq_id;
         // 单batch模式下所有序列共用batch 0
         if (n_decode_batch_ == 1)
             batch_id = 0;
@@ -223,7 +213,7 @@ int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
         float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
                             batch_id * n_vocab;
         memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
-        memory_->seq_add(batch_id, 0, 0, 1);
+        memory_->seq_add(seq_id, 0, 0, 1);
     }
     return 0;
 }
@@ -251,17 +241,21 @@ int HouMoGPTOSS::set_attentions_for_prefill(int current_length, int valid_length
 }
 int HouMoGPTOSS::set_attentions_for_decode(std::vector<int> &seq_ids) {
     int current_length = 1;
-    for (auto seq_id : seq_ids) {
-        int valid_length = decode_valid_length_[seq_ids[0]];
+    for (size_t i = 0; i < seq_ids.size(); i++) {
+        auto seq_id = seq_ids[i];
+        int batch_id = seq_id;
+        if (n_decode_batch_ == 1) batch_id = 0;
+
+        int valid_length = decode_valid_length_[seq_id];
         // set local attention mask
-        std::string name = local_attention_names_[seq_id];
+        std::string name = local_attention_names_[batch_id];
         auto& local_mask_input_data = decode_input_map_.at(name);
         auto local_mask_host = generate_mask_f16(1, current_length, valid_length, true);
         local_mask_input_data.Buffer().CopyFromHost(local_mask_host.data(), local_mask_input_data.MemSize());
         decode_model_->SetInput(name, local_mask_input_data);
 
         // set global attention mask
-        name = global_attention_names_[seq_id];
+        name = global_attention_names_[batch_id];
         auto& global_mask_input_data = decode_input_map_.at(name);
         auto global_mask_host = generate_mask_f16(1, current_length, valid_length, false);
         global_mask_input_data.Buffer().CopyFromHost(global_mask_host.data(), global_mask_input_data.MemSize());

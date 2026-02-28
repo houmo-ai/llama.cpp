@@ -787,8 +787,10 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml) {
     return impl_->houmo_load(ml);
 }
 
-void HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max) {
-    impl_->houmo_init(memory, seq_max);
+void HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
+                              ggml_abort_callback abort_callback,
+                              void *abort_callback_data) {
+    impl_->houmo_init(memory, seq_max, abort_callback, abort_callback_data);
 }
 
 int HouMoLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,

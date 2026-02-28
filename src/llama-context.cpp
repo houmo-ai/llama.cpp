@@ -13,12 +13,12 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
-#include <iostream>
 
 void llama_context::houmo_init(int32_t seq_max) {
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
     memory = std::make_unique<houmo_memory_i>();
-    hm_llmodel->houmo_init(dynamic_cast<houmo_memory_i*>(memory.get()), seq_max);
+    hm_llmodel->houmo_init(dynamic_cast<houmo_memory_i*>(memory.get()), seq_max,
+                           abort_callback, abort_callback_data);
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
 
     // 修正n_ctx
@@ -1137,7 +1137,10 @@ int llama_context::houmo_decode(const llama_batch &batch) {
         }
     }
     n_outputs = n_outputs_all;
-    return 0;
+    if (abort_callback && abort_callback(abort_callback_data)) {
+        return 2;
+    }
+    return ret;
 }
 
 int llama_context::houmo_embedding(const llama_batch &batch) {

@@ -43,8 +43,12 @@ bool HouMoEmbed::houmo_load(llama_model_loader & ml) {
     return true;
 }
 
-void HouMoEmbed::houmo_init(houmo_memory_i *memory, int seq_max) {
+void HouMoEmbed::houmo_init(houmo_memory_i *memory, int seq_max,
+                            ggml_abort_callback abort_callback,
+                            void *abort_callback_data) {
     (void)memory;
+    abort_callback_data_ = abort_callback_data;
+    abort_callback_ = abort_callback;
     size_t input_num = embed_model_->GetInputNum();
     for (size_t idx = 0; idx < input_num; idx++) {
         auto input_name = embed_model_->GetInputName(idx);

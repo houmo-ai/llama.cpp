@@ -3,7 +3,11 @@
 #include <algorithm>
 #include "llama-impl.h"
 #include "time-perf.h"
-void HoumoQwenLLM::houmo_init(houmo_memory_i *memory, int seq_max) {
+void HoumoQwenLLM::houmo_init(houmo_memory_i *memory, int seq_max,
+                              ggml_abort_callback abort_callback,
+                              void *abort_callback_data) {
+    abort_callback_data_ = abort_callback_data;
+    abort_callback_ = abort_callback;
     model_inout_init(seq_max);
     if (is_embedding()) {
         memory_= nullptr;
@@ -127,7 +131,7 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             prefill_model_->SetInput(prefill_model_->GetInputName(3),
                                      prefill_position_ids);
         }
-        LLAMA_LOG_INFO(
+        LLAMA_LOG_DEBUG(
             "%s: valid_length = %d, current_length = %d, kv_offset = %d\n",
             __func__, valid_length, current_length, kv_offset);
         set_input_data(prefill_valid_length, n_prefill_batch_, valid_length);

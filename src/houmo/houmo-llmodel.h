@@ -11,6 +11,7 @@
 #include "houmo-embedding_layer.h"
 #include "houmo-memory.h"
 #include "llama-model-loader.h"
+#include "ggml.h"
 // houmo llm model defination
 //
 // @guoxing.xu 2025-05-23
@@ -26,7 +27,9 @@ class HouMoLLModel {
     ~HouMoLLModel();
 
     bool houmo_load(llama_model_loader & ml);
-    void houmo_init(houmo_memory_i *memory, int seq_max = 4);
+    void houmo_init(houmo_memory_i *memory, int seq_max = 4,
+          ggml_abort_callback abort_callback = nullptr,
+          void *abort_callback_data = nullptr);
     int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                       float *logits);
     int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
@@ -67,7 +70,9 @@ public:
   Impl() = default;
   virtual ~Impl() = default;
   virtual bool houmo_load(llama_model_loader & ml);
-  virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4) = 0;
+  virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4,
+                          ggml_abort_callback abort_callback = nullptr,
+                          void *abort_callback_data = nullptr) = 0;
   virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                             float *logits) = 0;
   virtual int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
@@ -231,4 +236,6 @@ protected:
   std::vector<std::string> input_names_;
   std::map<int32_t, std::vector<uint16_t>> input_embedding_ids_;
   std::map<int32_t, std::vector<llama_token>> input_tokens_;
+  ggml_abort_callback abort_callback_      = nullptr;
+  void *              abort_callback_data_ = nullptr;
 };
