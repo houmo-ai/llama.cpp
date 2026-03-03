@@ -63,6 +63,7 @@ void HouMoVLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
             decode_model_->SetInput(name, deepstack);
         }
     }
+    chunk_history_.resize(actual_seq_max);
 }
 
 int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
@@ -88,6 +89,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
     offset_embedding_ids_[seq_id] += tokens.size();
     prefill_input_lengths_[seq_id].push_back(tokens.size());
+    chunk_history_[seq_id].push_back(tokens.size());
     // 计算所有embeddings
     if (logits == nullptr && tokens.size() > 0) {
         // 只缓存输入
@@ -134,7 +136,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             prefill_input_map_.at(prefill_model_->GetInputName(4));
         auto prefill_current_length =
             prefill_input_map_.at(prefill_model_->GetInputName(5));
-        LLAMA_LOG_INFO("%s: valid_length = %d, current_length = %d, kv_offset = %d\n", __func__, valid_length, current_length, kv_offset);
+        LLAMA_LOG_DEBUG("%s: valid_length = %d, current_length = %d, kv_offset = %d\n", __func__, valid_length, current_length, kv_offset);
         set_input_data(time_position_id, time_position_ids, valid_length - kv_offset);
         set_input_data(high_position_id, high_position_ids, valid_length - kv_offset);
         set_input_data(width_position_id, width_position_ids, valid_length - kv_offset);
@@ -221,6 +223,7 @@ int HouMoVLLModel::houmo_prefill(const float *embeddings, int n_tokens,
         }
         offset_embedding_ids_[seq_id] += n_tokens;
         prefill_input_lengths_[seq_id].push_back(n_tokens);
+        chunk_history_[seq_id].push_back(n_tokens);
         return 0;
     } else {
         LLAMA_LOG_ERROR("%s: logits is not null, not supported\n", __func__);
@@ -239,12 +242,38 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
             std::vector<llama_token> empty_tokens;
             houmo_prefill(empty_tokens, seq_id, nullptr);
         }
-        int rollback_pos = decode_valid_length_[seq_id] - memory_->seq_pos_min(seq_id);
-        decode_valid_length_[seq_id] = memory_->seq_pos_min(seq_id);
-        LLAMA_LOG_DEBUG("%s: seq_id = %d, decode_valid_length_[seq_id] = %d\n",
-                        __func__, seq_id, decode_valid_length_[seq_id]);
-        if (rollback_pos > 0) {
-            position_indexs_[seq_id] -= rollback_pos;
+        int target_tokens = memory_->seq_pos_min(seq_id);
+
+        if (target_tokens < decode_valid_length_[seq_id]) {
+            int current_tokens = 0;
+            int current_pos = 0;
+
+            // Replay history to find exact position mapping
+            for (int len : chunk_history_[seq_id]) {
+                if (current_tokens >= target_tokens) break;
+
+                if (len == nx * ny) {
+                    current_tokens += len;
+                    current_pos += nx;
+                } else {
+                    int step = std::min(len, target_tokens - current_tokens);
+                    current_tokens += step;
+                    current_pos += step;
+                }
+            }
+
+            // Account for any single tokens generated during decode so far
+            if (target_tokens > current_tokens) {
+                current_pos += (target_tokens - current_tokens);
+            }
+
+            decode_valid_length_[seq_id] = target_tokens;
+            position_indexs_[seq_id] = current_pos;
+
+            LLAMA_LOG_INFO("%s: seq_id = %d, rolled back to valid_length = %d, position_index = %d\n",
+                            __func__, seq_id, target_tokens, current_pos);
+        } else {
+            decode_valid_length_[seq_id] = target_tokens;
         }
     }
     if (seq_ids.size() > (size_t)n_decode_batch_) {

@@ -87,7 +87,7 @@ Documentation=man:llama-server(1)
 [Service]
 WorkingDirectory=${INSTALL_DIR}
 # 绝对路径执行，参数保留你的原始配置
-ExecStart=${LLAMA_SERVER_BIN} --models-dir models --no-context-shift --reasoning-format none --log-prefix --log-timestamps --embeddings
+ExecStart=${LLAMA_SERVER_BIN} --models-dir models --no-context-shift --reasoning-format auto --log-prefix --log-timestamps --embeddings
 # 运行用户/组
 User=${CURRENT_USER}
 Group=${CURRENT_USER}
