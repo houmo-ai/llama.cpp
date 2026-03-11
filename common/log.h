@@ -21,11 +21,11 @@
 #    define LOG_ATTRIBUTE_FORMAT(...) __attribute__((format(printf, __VA_ARGS__)))
 #endif
 
-#define LOG_LEVEL_DEBUG  1
-#define LOG_LEVEL_INFO   2
-#define LOG_LEVEL_WARN   3
-#define LOG_LEVEL_ERROR  4
-#define LOG_LEVEL_OUTPUT 5 // output data from tools
+#define LOG_LEVEL_DEBUG  4
+#define LOG_LEVEL_INFO   3
+#define LOG_LEVEL_WARN   2
+#define LOG_LEVEL_ERROR  1
+#define LOG_LEVEL_OUTPUT 0 // output data from tools
 
 #define LOG_DEFAULT_DEBUG LOG_LEVEL_DEBUG
 #define LOG_DEFAULT_LLAMA LOG_LEVEL_INFO
@@ -98,7 +98,7 @@ void common_log_flush         (struct common_log * log);                    // f
 
 #define LOG_TMPL(level, verbosity, ...) \
     do { \
-        if (verbosity >= std::abs(common_log_verbosity_thold)) { \
+        if ((verbosity) <= common_log_verbosity_thold) { \
             common_log_add(common_log_main(), (level), __VA_ARGS__); \
         } \
     } while (0)

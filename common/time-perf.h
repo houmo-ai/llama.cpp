@@ -15,17 +15,14 @@ public:
         double* current_ns;
         double* max_ns;
     };
-
     static PerfRegistry& Instance() {
         static PerfRegistry instance;
         return instance;
     }
-
     void Register(Metric m) {
         std::lock_guard<std::mutex> lock(mutex_);
         metrics_.push_back(m);
     }
-
     void PrintAll() {
         printf(
             "\n================ GLOBAL PERFORMANCE REPORT ================\n");
@@ -37,7 +34,6 @@ public:
             double cur = *m.current_ns;
             double maxv = *m.max_ns;
             double avg = (cnt > 0) ? (total / cnt) : 0;
-
             // 直接传入浮点数，不再使用 std::to_string
             printf("%-25s %-12.4f %-12.4f %-12.4f %-10llu\n",
                      m.tag.c_str(),
@@ -51,12 +47,10 @@ public:
             *m.max_ns = 0; // <-- 重置最大值
         }
     }
-
 private:
     std::vector<Metric> metrics_;
     std::mutex mutex_;
 };
-
 // --- 宏实现 ---
 #define PERF_START(tag) \
     static double total_ns_##tag = 0; \
@@ -69,7 +63,6 @@ private:
     }(); \
     (void) registered_##tag; \
     auto start_##tag = std::chrono::high_resolution_clock::now();
-
 #define PERF_STOP(tag) \
     { \
         auto end_##tag = std::chrono::high_resolution_clock::now(); \
@@ -78,5 +71,4 @@ private:
         if (current_ns_##tag > max_ns_##tag) max_ns_##tag = current_ns_##tag; \
         count_##tag++; \
     }
-
 #define PERF_REPORT() PerfRegistry::Instance().PrintAll()

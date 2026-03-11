@@ -73,6 +73,14 @@ static inline float op_log(float x) {
     return logf(x);
 }
 
+static inline float op_expm1(float x) {
+    return expf(x) - 1.0f;
+}
+
+static inline float op_softplus(float x) {
+    return (x > 20.0f) ? x : logf(1.0f + expf(x));
+}
+
 static inline float op_floor(float x) {
     return floorf(x);
 }
@@ -103,7 +111,7 @@ template <float (*op)(float), typename src0_t, typename dst_t>
 static void apply_unary_op(const ggml_compute_params * params, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
 
-    GGML_ASSERT(ggml_is_contiguous_1(src0) && ggml_is_contiguous_1(dst) && ggml_are_same_shape(src0, dst));
+    GGML_ASSERT(ggml_is_contiguous_rows(src0) && ggml_is_contiguous_rows(dst) && ggml_are_same_shape(src0, dst));
 
     GGML_TENSOR_UNARY_OP_LOCALS
 
@@ -288,6 +296,14 @@ void ggml_compute_forward_cos(const ggml_compute_params * params, ggml_tensor * 
 
 void ggml_compute_forward_log(const ggml_compute_params * params, ggml_tensor * dst) {
     unary_op<op_log>(params, dst);
+}
+
+void ggml_compute_forward_expm1(const ggml_compute_params * params, ggml_tensor * dst) {
+    unary_op<op_expm1>(params, dst);
+}
+
+void ggml_compute_forward_softplus(const ggml_compute_params * params, ggml_tensor * dst) {
+    unary_op<op_softplus>(params, dst);
 }
 
 void ggml_compute_forward_floor(const ggml_compute_params * params, ggml_tensor * dst) {

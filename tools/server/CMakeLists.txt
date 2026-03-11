@@ -15,9 +15,9 @@ add_library(${TARGET} STATIC
     server-context.h
 )
 
-#if (BUILD_SHARED_LIBS)
+if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
-#endif()
+endif()
 
 target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
@@ -27,10 +27,6 @@ target_link_libraries(${TARGET} PUBLIC common mtmd ${CMAKE_THREAD_LIBS_INIT})
 # llama-server executable
 
 set(TARGET llama-server)
-
-if (NOT LLAMA_HTTPLIB)
-    message(FATAL_ERROR "LLAMA_HTTPLIB is OFF, cannot build llama-server. Hint: to skip building server, set -DLLAMA_BUILD_SERVER=OFF")
-endif()
 
 set(TARGET_SRCS
     server.cpp
@@ -62,9 +58,5 @@ install(TARGETS ${TARGET} RUNTIME)
 target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(${TARGET} PRIVATE server-context PUBLIC common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
-
-if (WIN32)
-    TARGET_LINK_LIBRARIES(${TARGET} PRIVATE ws2_32)
-endif()
 
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

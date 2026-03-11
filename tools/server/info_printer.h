@@ -13,6 +13,7 @@
 #include <string>
 #include "nlohmann/json.hpp"
 #include "server-common.h"
+#include "server-context.h"
 using json = nlohmann::ordered_json;
 
 class InfoPrinter {
@@ -118,11 +119,11 @@ class InfoPrinter {
                 virtual_peak, virtual_size , working_set_peak, working_set_size,
                 elapsed_seconds());
     }
-    void print_model_info(json &model_meta) {
+    void print_model_info(server_context_meta &meta) {
         LOG_INF(
             "\n==========model info===========================\n"
             "=n_ctx_length = %5d\n"
-            "=n_layer      = %5d\n"
+            "=n_ctx_train  = %5d\n"
             "=n_embd       = %5d\n"
             "=allow_image  = %5d\n"
             "=allow_audio  = %5d\n"
@@ -130,13 +131,13 @@ class InfoPrinter {
             "=vision_height= %5d\n"
             "=model_desc   = %s\n"
             "==========model info===========================\n",
-            json_value(model_meta, "n_ctx_length", 0),
-            json_value(model_meta, "n_layer", 0),
-            json_value(model_meta, "n_embd", 0),
-            json_value(model_meta, "allow_image", false),
-            json_value(model_meta, "allow_audio", false),
-            json_value(model_meta, "vision_width", 0),
-            json_value(model_meta, "vision_height", 0),
-            json_value(model_meta, "model_desc", std::string("")).c_str());
+            meta.model_n_ctx,
+            meta.model_n_ctx_train,
+            meta.model_n_embd_inp,
+            meta.allow_image,
+            meta.allow_audio,
+            meta.vision_width,
+            meta.vision_height,
+            meta.model_desc.c_str());
     }
 };

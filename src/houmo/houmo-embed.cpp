@@ -14,7 +14,7 @@ HouMoEmbed::~HouMoEmbed() {
 
 bool HouMoEmbed::houmo_load(llama_model_loader & ml) {
     std::string file_name = ml.fname_;
-    gguf_context *ctx = ml.meta.get();
+    gguf_context *ctx = ml.metadata_ptr.get();
 
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);

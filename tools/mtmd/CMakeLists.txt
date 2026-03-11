@@ -6,11 +6,32 @@ add_library(mtmd
             mtmd.cpp
             mtmd-audio.cpp
             mtmd.h
+            mtmd-helper.cpp
+            mtmd-helper.h
             clip.cpp
             clip.h
             clip-impl.h
-            mtmd-helper.cpp
-            mtmd-helper.h
+            clip-model.h
+            clip-graph.h
+            models/models.h
+            models/cogvlm.cpp
+            models/conformer.cpp
+            models/glm4v.cpp
+            models/internvl.cpp
+            models/kimivl.cpp
+            models/kimik25.cpp
+            models/nemotron-v2-vl.cpp
+            models/llama4.cpp
+            models/llava.cpp
+            models/minicpmv.cpp
+            models/paddleocr.cpp
+            models/pixtral.cpp
+            models/qwen2vl.cpp
+            models/qwen3vl.cpp
+            models/siglip.cpp
+            models/whisper-enc.cpp
+            models/mobilenetv5.cpp
+            models/youtuvl.cpp
             houmo-vision.cpp
             houmo-vision.h
             )
@@ -18,7 +39,7 @@ add_library(mtmd
 #     VERSION ${LLAMA_INSTALL_VERSION}
 #     SOVERSION 0
 # )
-target_link_libraries     (mtmd PUBLIC ggml llama common)
+target_link_libraries     (mtmd PUBLIC ggml llama)
 target_link_libraries     (mtmd PRIVATE Threads::Threads)
 target_include_directories(mtmd PUBLIC  .)
 target_include_directories(mtmd PRIVATE ../..)
@@ -50,6 +71,15 @@ endif()
 if (TARGET BUILD_INFO)
     add_dependencies(mtmd        BUILD_INFO)
     add_dependencies(mtmd-helper BUILD_INFO)
+endif()
+
+# if mtmd is linked against common, we throw an error
+if (TARGET mtmd)
+    get_target_property(libs mtmd LINK_LIBRARIES)
+    if (libs AND "common" IN_LIST libs)
+        message(FATAL_ERROR "mtmd is designed to be a public library.\n"
+                            "It must not link against common")
+    endif()
 endif()
 
 add_executable(llama-llava-cli    deprecation-warning.cpp)

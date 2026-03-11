@@ -110,7 +110,7 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
 
 bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml) {
     std::string file_name = ml.fname_;
-    gguf_context *ctx = ml.meta.get();
+    gguf_context *ctx = ml.metadata_ptr.get();
     parser_gguf_parameters(ctx, ml.arch_name);
     // 从gguf文件中加载hmmodels
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
