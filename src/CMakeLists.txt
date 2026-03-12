@@ -39,10 +39,11 @@ add_library(llama
             houmo/houmo-llmodel.cpp
             houmo/houmo-gptoss.cpp
             houmo/houmo-qwenllm.cpp
+            houmo/houmo-qwen35llm.cpp
             houmo/houmo-vllmodel.cpp
             houmo/houmo-embed.cpp
             houmo/houmo-embedding_layer.cpp
-	        models/afmoe.cpp
+            models/afmoe.cpp
             models/apertus.cpp
             models/arcee.cpp
             models/arctic.cpp

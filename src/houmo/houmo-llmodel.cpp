@@ -4,6 +4,7 @@
 #include "houmo-embed.h"
 #include "houmo-gptoss.h"
 #include "houmo-qwenllm.h"
+#include "houmo-qwen35llm.h"
 #include "houmo-vllmodel.h"
 #include "llama-arch.h"
 #include "llama-batch.h"
@@ -45,8 +46,6 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     option.SetDummyTensors(dummy_tensor_names);
 #ifdef XH2_ENABLED
     option.EnableHostLazyLoading(enable_lazy_mode_);
-#else
-    option.EnableLazyMode(enable_lazy_mode_);
 #endif
     if (prefill) {
         if (!load_from_file)
@@ -110,6 +109,7 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
 
 bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml) {
     std::string file_name = ml.fname_;
+    arch_name = ml.arch_name;
     gguf_context *ctx = ml.metadata_ptr.get();
     parser_gguf_parameters(ctx, ml.arch_name);
     // 从gguf文件中加载hmmodels
@@ -263,7 +263,9 @@ void HouMoLLModel::Impl::prefill_input_init() {
                         input_name.c_str());
         if (input_name.find("past_key_cache_") != std::string::npos ||
             input_name.find("_self_attn_vcache") != std::string::npos ||
-            input_name.find("_self_attn_kcache") != std::string::npos) {
+            input_name.find("_self_attn_kcache") != std::string::npos ||
+            input_name.find("past_conv_cache") != std::string::npos ||
+            input_name.find("past_recurrent_state") != std::string::npos) {
             continue;
         }
         input_names_.push_back(input_name);
@@ -316,7 +318,9 @@ void HouMoLLModel::Impl::decode_input_init() {
                         input_name.c_str());
         if (input_name.find("past_key_cache_") != std::string::npos ||
             input_name.find("_self_attn_vcache") != std::string::npos ||
-            input_name.find("_self_attn_kcache") != std::string::npos) {
+            input_name.find("_self_attn_kcache") != std::string::npos ||
+            input_name.find("past_conv_cache") != std::string::npos ||
+            input_name.find("past_recurrent_state") != std::string::npos) {
             continue;
         }
         if (input_name.find("valid_length") != std::string::npos) {
@@ -566,11 +570,14 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                      std::string::npos) {
         ends_with = ".hmcc.format";
     }
-
+    int kv_cache_count = n_blocks_;
+    if (arch_name == "qwen35") {
+        kv_cache_count = n_blocks_ / 4;
+    }
     for (int i = 0; i < size; i++) {
         kv_cache_item item;
         item.seq_id = i;
-        for (int idx = 0; idx < n_blocks_; idx++) {
+        for (int idx = 0; idx < kv_cache_count; idx++) {
             std::string k_cache_name = kv_prefix_name + std::to_string(idx) +
                                        "_self_attn_kcache_input" + ends_with;
             std::string v_cache_name = kv_prefix_name + std::to_string(idx) +
@@ -774,6 +781,10 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml) {
             impl_ = new HouMoGPTOSS();
         } else if (ml.arch_name.find("bert") != std::string::npos) {
             impl_ = new HouMoEmbed();
+        } else if (ml.arch_name.find("qwen35") != std::string::npos ||
+                   ml.arch_name.find("qwen3.5") != std::string::npos ||
+                   ml.arch_name.find("qwen3_5") != std::string::npos) {
+            impl_ = new HoumoQwen35LLM();
         } else if (ml.arch_name.find("qwen") != std::string::npos) {
             impl_ = new HoumoQwenLLM();
         } else {

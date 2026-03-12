@@ -221,6 +221,7 @@ protected:
   std::vector<std::string> decode_current_length_names_;
   std::map<int, kv_cache_item> kv_cache_;
   int need_set_kv_cache_ = 0; // 0: no need, 1: need
+  std::string arch_name = "unknown";
   std::string kEmbeddingLengthEx = ".embedding_length";
   std::string kBlockCountEx = ".block_count";
   std::string kSpliteCount = "split.tensors.count";
