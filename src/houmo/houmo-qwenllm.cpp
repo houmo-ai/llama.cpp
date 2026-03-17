@@ -272,14 +272,8 @@ int HoumoQwenLLM::houmo_embedding(
         if (tokens.empty()) {
             continue;
         }
-        
+
         auto &embedding = embeddings[seq_id];
-        
-        // 验证embedding指针
-        if (embedding == nullptr) {
-            LLAMA_LOG_ERROR("%s: null embedding pointer for seq_id %d\n", __func__, seq_id);
-            return -1;
-        }
 
         // 调用houmo_prefill并检查返回值
         int ret = houmo_prefill(const_cast<std::vector<llama_token>&>(tokens), seq_id, embedding);

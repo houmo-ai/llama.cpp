@@ -2018,27 +2018,45 @@ server_tokens format_prompt_rerank(
         server_tokens tokens = tokenize_input_subprompt(vocab, mctx, prompt, false, true);
         result.push_back(tokens);
     } else {
-        // Get EOS token - use SEP token as fallback if EOS is not available
-        server_tokens query_tokens = tokenize_input_subprompt(vocab, mctx, query, false, false);
-        server_tokens doc_tokens   = tokenize_input_subprompt(vocab, mctx, doc,   false, false);
-        llama_token eos_token = llama_vocab_eos(vocab);
-        if (eos_token == LLAMA_TOKEN_NULL) {
-            eos_token = llama_vocab_sep(vocab);
-        }
+        // Check if the model uses chatml format (Qwen3-Reranker)
+        const char * default_tmpl = llama_model_chat_template(model, nullptr);
+        if (default_tmpl != nullptr && std::string(default_tmpl).find("<|im_start|>") != std::string::npos) {
+            // Qwen3-Reranker prompt template
+            std::string prompt =
+                "<|im_start|>system\n"
+                "Judge whether the Document meets the requirements based on the Query and the Instruct provided. "
+                "Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n"
+                "<|im_start|>user\n"
+                "<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n"
+                "<Query>: " + query + "\n"
+                "<Document>: " + doc + "<|im_end|>\n"
+                "<|im_start|>assistant\n"
+                "<think>\n\n</think>\n\n";
+            server_tokens tokens = tokenize_input_subprompt(vocab, mctx, prompt, false, true);
+            result.push_back(tokens);
+        } else {
+            // Get EOS token - use SEP token as fallback if EOS is not available
+            server_tokens query_tokens = tokenize_input_subprompt(vocab, mctx, query, false, false);
+            server_tokens doc_tokens   = tokenize_input_subprompt(vocab, mctx, doc,   false, false);
+            llama_token eos_token = llama_vocab_eos(vocab);
+            if (eos_token == LLAMA_TOKEN_NULL) {
+                eos_token = llama_vocab_sep(vocab);
+            }
 
-        if (llama_vocab_get_add_bos(vocab)) {
-            result.push_back(llama_vocab_bos(vocab));
-        }
-        result.push_back(query_tokens);
-        if (llama_vocab_get_add_eos(vocab)) {
-            result.push_back(eos_token);
-        }
-        if (llama_vocab_get_add_sep(vocab)) {
-            result.push_back(llama_vocab_sep(vocab));
-        }
-        result.push_back(doc_tokens);
-        if (llama_vocab_get_add_eos(vocab)) {
-            result.push_back(eos_token);
+            if (llama_vocab_get_add_bos(vocab)) {
+                result.push_back(llama_vocab_bos(vocab));
+            }
+            result.push_back(query_tokens);
+            if (llama_vocab_get_add_eos(vocab)) {
+                result.push_back(eos_token);
+            }
+            if (llama_vocab_get_add_sep(vocab)) {
+                result.push_back(llama_vocab_sep(vocab));
+            }
+            result.push_back(doc_tokens);
+            if (llama_vocab_get_add_eos(vocab)) {
+                result.push_back(eos_token);
+            }
         }
     }
 

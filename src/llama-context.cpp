@@ -1516,6 +1516,7 @@ int llama_context::houmo_decode(const llama_batch &batch) {
 }
 
 int llama_context::houmo_embedding(const llama_batch &batch) {
+    LLAMA_LOG_DEBUG("===****batch.n_tokens: %d\n", batch.n_tokens);
     n_outputs = batch.n_tokens;
     const int32_t n_embd = model.hparams.n_embd;
     // 0. batch拆分
@@ -1529,7 +1530,8 @@ int llama_context::houmo_embedding(const llama_batch &batch) {
             if (seqid_token_map.count(seq_id) == 0)
                 seqid_token_map[seq_id] = std::vector<llama_token>();
             seqid_token_map[seq_id].push_back(batch.token[j]);
-            seqid_embd_map[seq_id] = embd.data + seq_id * n_embd;
+            if (batch.logits && batch.logits[j] == 1)
+                seqid_embd_map[seq_id] = embd.data + seq_id * n_embd;
         }
     } else {
         // 多序列推理
@@ -1539,7 +1541,8 @@ int llama_context::houmo_embedding(const llama_batch &batch) {
                 if (seqid_token_map.count(seq_id) == 0)
                     seqid_token_map[seq_id] = std::vector<llama_token>();
                 seqid_token_map[seq_id].push_back(batch.token[j]);
-                seqid_embd_map[seq_id] = embd.data + seq_id * n_embd;
+                if (batch.logits && batch.logits[j] == 1)
+                    seqid_embd_map[seq_id] = embd.data + seq_id * n_embd;
             }
         }
     }
@@ -1569,19 +1572,56 @@ int llama_context::houmo_embedding(const llama_batch &batch) {
                 // batch)
                 auto &embd_seq_out = embd_seq;
                 for (const auto &[seq_id, addrs] : seqid_embd_map) {
+                    if (addrs == nullptr) {
+                        LLAMA_LOG_ERROR("%s: missing embedding for seq_id %d\n", __func__, seq_id);
+                        continue;
+                    }
                     embd_seq_out[seq_id].resize(n_embd);
                     memcpy(embd_seq_out[seq_id].data(), addrs, n_embd * sizeof(float));
                 }
             } break;
             case LLAMA_POOLING_TYPE_RANK: {
-                // extract the rerank score - n_cls_out floats per sequence
-                // FIXME:  @guoxing.xu .. Rerank not Tested..
                 auto &embd_seq_out = embd_seq;
                 const uint32_t n_cls_out = model.hparams.n_cls_out;
-                for (const auto &[seq_id, addrs] : seqid_embd_map) {
-                    embd_seq_out[seq_id].resize(n_cls_out);
-                    memcpy(embd_seq_out[seq_id].data(), addrs,
-                        n_cls_out * sizeof(float));
+                if (model.arch == LLM_ARCH_QWEN3) {
+                    // Qwen3-Reranker: model outputs vocab logits, need to
+                    // pick "yes"/"no" logits and softmax to get the score.
+                    const llama_token token_yes = model.vocab.text_to_token("yes");
+                    const llama_token token_no  = model.vocab.text_to_token("no");
+                    LLAMA_LOG_INFO("%s: Qwen3-Reranker token_yes = %d, token_no = %d\n",
+                                  __func__, token_yes, token_no);
+                    if (token_yes == LLAMA_TOKEN_NULL || token_no == LLAMA_TOKEN_NULL) {
+                        LLAMA_LOG_ERROR("%s: failed to find 'yes'/'no' token in vocab "
+                                       "(yes=%d, no=%d)\n", __func__, token_yes, token_no);
+                        return -1;
+                    }
+                    for (const auto &[seq_id, addrs] : seqid_embd_map) {
+                        if (addrs == nullptr) {
+                            LLAMA_LOG_ERROR("%s: missing embedding for seq_id %d\n", __func__, seq_id);
+                            continue;
+                        }
+                        const float logit_yes = addrs[token_yes];
+                        const float logit_no  = addrs[token_no];
+                        LLAMA_LOG_INFO("%s: seq_id=%d, logit_yes=%.6f, logit_no=%.6f\n",
+                                       __func__, seq_id, logit_yes, logit_no);
+                        // numerically stable softmax for two classes
+                        const float max_logit = std::max(logit_yes, logit_no);
+                        const float exp_yes = std::exp(logit_yes - max_logit);
+                        const float exp_no  = std::exp(logit_no  - max_logit);
+                        const float score   = exp_yes / (exp_yes + exp_no);
+                        LLAMA_LOG_INFO("%s: seq_id=%d, score=%.6f\n",
+                                       __func__, seq_id, score);
+                        embd_seq_out[seq_id].resize(n_cls_out);
+                        embd_seq_out[seq_id][0] = score;
+                    }
+                } else {
+                    // BGE and other rerankers: score is already computed by
+                    // the model, just copy n_cls_out floats directly.
+                    for (const auto &[seq_id, addrs] : seqid_embd_map) {
+                        embd_seq_out[seq_id].resize(n_cls_out);
+                        memcpy(embd_seq_out[seq_id].data(), addrs,
+                            n_cls_out * sizeof(float));
+                    }
                 }
             } break;
             case LLAMA_POOLING_TYPE_UNSPECIFIED: {
