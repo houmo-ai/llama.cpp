@@ -227,7 +227,6 @@ protected:
   std::string kSpliteCount = "split.tensors.count";
   std::string kHmmInfo = "hmm.info";
   int kSeqMax = 4; // maximum sequence number for single-card model
-  bool xh1_ = false;
   int device_num_ = 1;
   std::vector<int> device_ids_ = {0};
   bool enable_lazy_mode_ = false;

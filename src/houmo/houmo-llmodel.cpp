@@ -33,9 +33,7 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     if (wm_.GetInitStatus() != tcim::Status::OK) {
         auto device_ids = parse_deviceids();
         std::string backend = "";
-#ifdef XH2_ENABLED
         backend = "Xh2HalBackend";
-#endif
         tcim::DevManager dev_manager =
             tcim::DevManager::Create(device_ids, backend);
         wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
@@ -44,9 +42,7 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     auto infer_model = std::make_shared<tcim::Module>();
     auto option = tcim::Module::Option(wm_);
     option.SetDummyTensors(dummy_tensor_names);
-#ifdef XH2_ENABLED
     option.EnableHostLazyLoading(enable_lazy_mode_);
-#endif
     if (prefill) {
         if (!load_from_file)
             status = infer_model->LoadModel(raw_data, size, option);
@@ -80,9 +76,7 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     std::vector<std::string> dummy_tensor_names) {
     if (wm_.GetInitStatus() != tcim::Status::OK) {
         std::string backend = "";
-#ifdef XH2_ENABLED
         backend = "Xh2HalBackend";
-#endif
         tcim::DevManager dev_manager =
             tcim::DevManager::Create(device_ids_, backend);
         wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
@@ -91,14 +85,8 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     auto infer_model = std::make_shared<tcim::Module>();
     auto option = tcim::Module::Option(wm_);
     option.SetDummyTensors(dummy_tensor_names);
-#ifdef XH2_ENABLED
     option.EnableHostLazyLoading(enable_lazy_mode_);
     option.SetModelOffset(offset, size);
-#else
-    // xh1 should not come here
-    (void)offset;
-    (void)size;
-#endif
     status = infer_model->LoadModel(file_name, option);
     if (status != tcim::Status::OK) {
         LLAMA_LOG_ERROR("LoadModel failed: status == %d\n", (int)status);
@@ -160,24 +148,10 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml) {
                     strlen("quant_embedding.bin")) == 0) {
             embedding_layer_ =
                 std::make_shared<HoumoEmbeddingLayer>(file_name, offset, size);
-            if (embedding_layer_->get_dtype() == EmbeddingDtype::INT16) {
-                xh1_ = true;
-            } else {
-                xh1_ = false;
-            }
         } else if (std::regex_match(name, kPrefillPattern)) {
             // load prefill
-#ifdef XH2_ENABLED
             prefill_model_ = create_infer_engine(file_name, offset, size,
                                                  dummy_tensor_names);
-#else
-            // xh1 不支持文件offset加载，需要先读到buffer中
-            std::vector<char> buffer_vec;
-            buffer_vec.resize(size);
-            read_tensor_to_buffer(file_name, offset, size, buffer_vec);
-            prefill_model_ = create_infer_engine(true, buffer_vec.data(), size,
-                                                 false, dummy_tensor_names);
-#endif
             if (prefill_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load prefill.hmm\n", __func__);
                 return false;
@@ -185,16 +159,8 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml) {
             LLAMA_LOG_INFO("%s: succeed to load prefill.hmm\n", __func__);
         } else if (std::regex_match(name, kDecodePattern)) {
             // load decode
-#ifdef XH2_ENABLED
             decode_model_ = create_infer_engine(file_name, offset, size);
-#else
-            // xh1 不支持文件offset加载，需要先读到buffer中
-            std::vector<char> buffer_vec;
-            buffer_vec.resize(size);
-            read_tensor_to_buffer(file_name, offset, size, buffer_vec);
-            decode_model_ =
-                create_infer_engine(false, buffer_vec.data(), size, false);
-#endif
+
             if (decode_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load decode.hmm\n", __func__);
                 return false;
@@ -401,11 +367,6 @@ void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx,
     try {
         // 解析hmm.info
         auto hmm_info = json::parse(hmm_info_str);
-        if (hmm_info.contains("target")) {
-            if (hmm_info["target"] == "xh1") {
-                xh1_ = true;
-            }
-        }
         if (hmm_info.contains("device_num")) {
             device_num_ = hmm_info["device_num"];
         }
@@ -550,28 +511,15 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                      prefill_model_->GetInputInfo(name).Shape()[3]);
         return;
     }
-    // FIXME: M30 QWENVL 的命名和M50 不一致, 量化后续会统一后移除
     std::string kv_prefix_name = "model_layers_";
-    for (size_t i = 0; i < prefill_model_->GetInputNum(); i++) {
-        auto input_name = prefill_model_->GetInputName(i);
-        if (input_name.find("kcache") != std::string::npos ||
-            input_name.find("vcache") != std::string::npos) {
-            // 判断是否有model_language_model_layers_ 前缀
-            if (input_name.find("model_language_model_layers_") !=
-                std::string::npos) {
-                kv_prefix_name = "model_language_model_layers_";
-            }
-            break;
-        }
-    }
     // 检查是否有.hmcc.format 后缀. 开发编译的模型会添加后缀
     std::string ends_with = "";
-    if (!xh1_ && prefill_model_->GetInputName(0).find(".hmcc.format") !=
+    if (prefill_model_->GetInputName(0).find(".hmcc.format") !=
                      std::string::npos) {
         ends_with = ".hmcc.format";
     }
     int kv_cache_count = n_blocks_;
-    if (arch_name == "qwen35") {
+    if (arch_name.find("qwen35") != std::string::npos) {
         kv_cache_count = n_blocks_ / 4;
     }
     for (int i = 0; i < size; i++) {
@@ -584,6 +532,7 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                                        "_self_attn_vcache_input" + ends_with;
             item.names.push_back(k_cache_name);
             item.names.push_back(v_cache_name);
+            LLAMA_LOG_DEBUG("%s: kv_cache_name: %s, n_blocks = %d\n", __func__, k_cache_name.c_str(), n_blocks_);
             if (n_decode_batch_ > 1) {
                 if (i > 0) {
                     k_cache_name = k_cache_name + "_batch" + std::to_string(i);
