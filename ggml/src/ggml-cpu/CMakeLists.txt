@@ -677,7 +677,17 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         set_source_files_properties(${GGML_KLEIDIAI_SOURCES} PROPERTIES COMPILE_OPTIONS "${PRIVATE_ARCH_FLAGS}")
         list(APPEND GGML_CPU_SOURCES ${GGML_KLEIDIAI_SOURCES})
     endif()
-
+    # 移除特定架构选项，使用通用基线以避免非法指令 (SIGILL)
+    if (GGML_SYSTEM_ARCH STREQUAL "x86")
+        # x86-64 基线：仅 SSE2，兼容所有 x86_64 CPU
+        set(ARCH_FLAGS "-march=x86-64" "-mtune=generic")
+    elseif (GGML_SYSTEM_ARCH STREQUAL "ARM")
+        # ARMv8-A 基线：兼容所有 64 位 ARM CPU
+        set(ARCH_FLAGS "-march=armv8-a")
+    else()
+        set(ARCH_FLAGS "")
+    endif()
+    set(ARCH_DEFINITIONS "")
     message(STATUS "Adding CPU backend variant ${GGML_CPU_NAME}: ${ARCH_FLAGS} ${ARCH_DEFINITIONS}")
     target_sources(${GGML_CPU_NAME} PRIVATE ${GGML_CPU_SOURCES})
     target_compile_options(${GGML_CPU_NAME} PRIVATE ${ARCH_FLAGS})
