@@ -1025,10 +1025,30 @@ json oaicompat_chat_params_parse(
         }
         llama_params["parse_tool_calls"] = true;
     }
-
+    // parse the oai compatible "reasoning_effort" or openrouter compatible "reasoning.effort"
+    // to override "chat_template_kwargs.enable_thinking"
+    auto reasoning_effort = json_value(
+        body,
+        "reasoning_effort",
+        json_value(
+            json_value(body, "reasoning", json::object()),
+            "effort",
+            std::string("")
+        )
+    );
+    if (reasoning_effort == "none") {
+        inputs.chat_template_kwargs["enable_thinking"] = "false";
+    } else if (reasoning_effort != "") {
+        inputs.chat_template_kwargs["enable_thinking"] = "true";
+    }
+    // override "chat_template_kwargs.reasoning_effort"
+    if (reasoning_effort != "") {
+        inputs.chat_template_kwargs["reasoning_effort"] = json(reasoning_effort).dump();
+    }
     // merge the template args provided from command line with the args provided in the user request
+    // this takes precedence over vendor compatibility args
     auto chat_template_kwargs_object = json_value(body, "chat_template_kwargs", json::object());
-    inputs.chat_template_kwargs = opt.chat_template_kwargs;
+    // inputs.chat_template_kwargs = opt.chat_template_kwargs;
     for (const auto & item : chat_template_kwargs_object.items()) {
         inputs.chat_template_kwargs[item.key()] = item.value().dump();
     }
