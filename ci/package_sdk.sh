@@ -26,7 +26,7 @@ esac
 
 # 验证平台参数
 case "$PLATFORM" in
-    xh1|xh2)
+    xh2)
         ;;
     *)
         echo "Invalid platform: $PLATFORM"
@@ -35,9 +35,7 @@ case "$PLATFORM" in
 esac
 
 # SDK URLs
-xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/ubuntu1804/houmo_tcim_runtime_xh1_ubuntu1804_x86_64-2.6.0.tar.gz"
-xh1_dadao_sdk_url_aarch64="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/ubuntu2004/houmo_tcim_runtime_xh1_ubuntu2004_aarch64-2.6.0.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.0.0/2026/02/03/2019/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-1.0.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.1.0/2026/03/12/2005/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-1.1.0.tar.gz"
 
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/hlaw_ollama.${ARCH}"
 modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.${ARCH}"
@@ -207,13 +205,6 @@ function package_ollama() {
 main() {
     # 确定使用的SDK URL
     case "$PLATFORM" in
-        xh1)
-            if [ "$ARCH" == "aarch64" ]; then
-                deploy_dadao_sdk "$xh1_dadao_sdk_url_aarch64"
-            else
-                deploy_dadao_sdk "$xh1_dadao_sdk_url"
-            fi
-            ;;
         xh2)
             if [ "$ARCH" == "aarch64" ]; then
                 deploy_dadao_sdk "$xh2_dadao_sdk_url"

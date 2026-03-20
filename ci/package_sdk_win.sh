@@ -2,16 +2,14 @@
 
 # 检查参数数量
 if [ $# -ne 1 ]; then
-    echo "Usage: $0 <xh1|xh2>"
+    echo "Usage: $0 <xh2>"
     exit 1
 fi
 PLATFORM=$1
 ARCH=x86_64
 
 # SDK URLs
-xh1_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/windows11/houmo_tcim_runtime_xh1_windows11_x86_64-2.6.0.tar.gz"
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.0.0/2026/02/03/2019/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-1.0.0.tar.gz"
-xh1_sw_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh1_v2.6.0/2025/12/20/0742/windows11/houmo_drv_xh1_v2.6.0_windows11_x86_64.zip"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.1.0/2026/03/12/2005/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-1.1.0.tar.gz"
 xh2_sw_sdk_url=""
 modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.exe"
 
@@ -56,32 +54,6 @@ deploy_dadao_sdk() {
     tar -xzf dadao_sdk.tar.gz -C third_party/houmo --strip-components=1
     cp third_party/houmo/bin/*.dll third_party/houmo/lib/
     rm dadao_sdk.tar.gz
-
-
-    if [ $PLATFORM == "xh1" ]; then
-        # 下载并解压 SystemWare SDK
-        download_file "$sw_url" "third_party/sw_sdk.zip"
-
-        # 提取SDK
-        unzip -o third_party/sw_sdk.zip -d third_party
-        # 移动关键库文件
-        if [ -f third_party/houmo_drv_xh1/hal/lib/*hdplrt_asic.dll ]; then
-            cp third_party/houmo_drv_xh1/hal/lib/*hdplrt_asic.dll third_party/houmo/lib/
-        else
-            echo "Warning: libhdplrt_asic.dll not found in expected location"
-        fi
-
-        if [ -f third_party/houmo_drv_xh1/hal/lib/*hm800_hal.dll ]; then
-            cp third_party/houmo_drv_xh1/hal/lib/*hm800_hal.dll third_party/houmo/lib/
-        else
-            echo "Warning: libhm800_hal.dll not found in expected location"
-        fi
-
-        cp third_party/houmo_drv_xh1/hal/lib/libwinpthread-1.dll third_party/houmo/lib/
-
-        # 清理临时文件
-        rm -rf third_party/sw_sdk.zip third_party/houmo_drv*
-    fi
 }
 
 # 编译 LLAMA
@@ -165,9 +137,6 @@ package_llama() {
 main() {
     # 确定使用的SDK URL
     case "$PLATFORM" in
-        xh1)
-            deploy_dadao_sdk "$xh1_dadao_sdk_url" "$xh1_sw_sdk_url"
-            ;;
         xh2)
             deploy_dadao_sdk "$xh2_dadao_sdk_url" "$xh2_sw_sdk_url"
             ;;
