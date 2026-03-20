@@ -210,6 +210,7 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
     state_cache_output_names_.clear();
     state_cache_.clear();
     state_cache_initialized_.clear();
+    prefill_snapshots_.clear();
     if (decode_model_ == nullptr) {
         return;
     }
@@ -247,6 +248,19 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
     if (state_cache_names_.empty()) {
         return;
     }
+    // Build checkpoint_tensor_indices_: only conv_cache and recurrent_state
+    // tensors need to be saved/restored in checkpoints.  KV cache tensors
+    // are managed by the KV cache system and must be excluded.
+    checkpoint_tensor_indices_.clear();
+    for (size_t idx = 0; idx < state_cache_names_.size(); ++idx) {
+        const auto &name = state_cache_names_[idx];
+        if (name.find("conv_cache") != std::string::npos ||
+            name.find("recurrent_state") != std::string::npos) {
+            checkpoint_tensor_indices_.push_back(idx);
+        }
+    }
+    LLAMA_LOG_INFO("%s: checkpoint_tensor_indices_ size=%zu (total state_cache_names_=%zu)\n",
+                   __func__, checkpoint_tensor_indices_.size(), state_cache_names_.size());
     int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
     size = std::max(size, n_decode_batch_);
     for (int i = 0; i < size; ++i) {
@@ -275,9 +289,10 @@ void HoumoQwen35LLM::set_state_cache_for_prefill(int seq_id) {
     auto &tensors = iter->second.tensors;
     if (!state_cache_initialized_[seq_id]) {
         for (size_t idx = 0; idx < tensors.size(); ++idx) {
-            auto host_tensor = tcim::Tensor::CreateHostTensor(tensors[idx].Info());
+            auto host_tensor = tcim::Tensor::CreateHostTensor(
+                tensors[idx].Info().AsContiguous());
             zero_tensor(host_tensor);
-            tensors[idx].Buffer().CopyFromHost(host_tensor.Data(), host_tensor.MemSize());
+            host_tensor.CopyTo(tensors[idx]);
         }
         state_cache_initialized_[seq_id] = true;
     }
@@ -311,6 +326,118 @@ void HoumoQwen35LLM::set_state_cache_for_decode(
             }
         }
     }
+}
+
+int HoumoQwen35LLM::find_common_prefix_length(
+    const std::vector<llama_token> &saved,
+    const std::vector<llama_token> &incoming) const {
+    size_t min_len = std::min(saved.size(), incoming.size());
+    for (size_t i = 0; i < min_len; ++i) {
+        if (saved[i] != incoming[i]) {
+            LLAMA_LOG_INFO("%s: common prefix length=%zu (saved[%zu]=%d vs incoming[%zu]=%d)\n",
+                       __func__, i, i, saved[i], i, incoming[i]);
+            return static_cast<int>(i);
+        }
+    }
+    return static_cast<int>(min_len);
+}
+
+void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
+    if (prefill_model_ == nullptr) {
+        return;
+    }
+    auto cache_iter = state_cache_.find(seq_id);
+    if (cache_iter == state_cache_.end()) {
+        return;
+    }
+    auto &tensors = cache_iter->second.tensors;
+    auto &snapshot = prefill_snapshots_[seq_id];
+    auto &ckpt = snapshot.checkpoints[position];
+    ckpt.position = position;
+    ckpt.state_tensors.clear();
+    ckpt.state_tensors.reserve(checkpoint_tensor_indices_.size());
+
+    for (size_t idx : checkpoint_tensor_indices_) {
+        if (checkpoint_storage_ == CheckpointStorage::kDevice) {
+            // Device-side deep copy — fast device↔device transfer,
+            // but consumes extra device memory per checkpoint.
+            ckpt.state_tensors.push_back(tensors[idx].Clone());
+        } else {
+            // Host copy — use ToHost(true) to get a contiguous host copy
+            // that correctly handles device-specific strides and alignment.
+            ckpt.state_tensors.push_back(tensors[idx].ToHost(true));
+        }
+    }
+    LLAMA_LOG_INFO("%s: saved checkpoint seq_id=%d pos=%d "
+                   "state_tensors=%zu storage=%s\n",
+                   __func__, seq_id, position, ckpt.state_tensors.size(),
+                   checkpoint_storage_ == CheckpointStorage::kDevice
+                       ? "device" : "host");
+}
+
+int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
+                                                      int max_position) {
+    auto snap_iter = prefill_snapshots_.find(seq_id);
+    if (snap_iter == prefill_snapshots_.end() || !snap_iter->second.valid) {
+        return -1;
+    }
+    auto &checkpoints = snap_iter->second.checkpoints;
+    if (checkpoints.empty()) {
+        return -1;
+    }
+    // Find the highest checkpoint with position <= max_position
+    auto it = checkpoints.upper_bound(max_position);
+    if (it == checkpoints.begin()) {
+        return -1; // no checkpoint at or below max_position
+    }
+    --it; // now points to highest key <= max_position
+
+    auto cache_iter = state_cache_.find(seq_id);
+    if (cache_iter == state_cache_.end()) {
+        return -1;
+    }
+    auto &tensors = cache_iter->second.tensors;
+    auto &ckpt_tensors = it->second.state_tensors;
+    if (ckpt_tensors.size() != checkpoint_tensor_indices_.size()) {
+        LLAMA_LOG_WARN("%s: checkpoint state_tensors size mismatch seq_id=%d "
+                       "(%zu vs %zu)\n",
+                       __func__, seq_id, ckpt_tensors.size(),
+                       checkpoint_tensor_indices_.size());
+        return -1;
+    }
+    for (size_t ci = 0; ci < checkpoint_tensor_indices_.size(); ++ci) {
+        size_t ti = checkpoint_tensor_indices_[ci];
+        // Validate shape and data type (works for both host and device
+        // stored checkpoints).
+        if (ckpt_tensors[ci].Info().Shape() != tensors[ti].Info().Shape() ||
+            ckpt_tensors[ci].Info().DataType() != tensors[ti].Info().DataType()) {
+            LLAMA_LOG_WARN("%s: checkpoint tensor %zu info mismatch "
+                           "seq_id=%d\n",
+                           __func__, ci, seq_id);
+            return -1;
+        }
+        // CopyTo handles both host→device and device→device transfers,
+        // respecting stride/alignment differences.
+        ckpt_tensors[ci].CopyTo(tensors[ti]);
+    }
+    int restored_pos = it->second.position;
+
+    // Erase all checkpoints after restored_pos — they are stale.
+    auto erase_begin = it;
+    ++erase_begin;
+    if (erase_begin != checkpoints.end()) {
+        size_t erase_count = static_cast<size_t>(
+            std::distance(erase_begin, checkpoints.end()));
+        LLAMA_LOG_INFO("%s: erasing stale checkpoints seq_id=%d after pos=%d "
+                       "(count=%zu)\n",
+                       __func__, seq_id, restored_pos, erase_count);
+        checkpoints.erase(erase_begin, checkpoints.end());
+    }
+
+    LLAMA_LOG_INFO("%s: restored checkpoint seq_id=%d pos=%d "
+                   "reused_tokens=%d (max_allowed=%d)\n",
+                   __func__, seq_id, restored_pos, restored_pos, max_position);
+    return restored_pos;
 }
 
 std::vector<int32_t> HoumoQwen35LLM::build_rope_position_ids(int valid_length,
@@ -368,29 +495,202 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                  float *logits) {
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
+
+    // kv_offset: how many tokens the KV cache already has (prefix reuse
+    // computed by the outer layer).  The incoming `tokens` do NOT include
+    // those prefix tokens — they have already been stripped.
     int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
-    if (kv_offset == 0 && state_cache_initialized_.count(seq_id) > 0) {
+
+    // ---- state cache checkpoint reuse ----
+    // The outer layer reuses kv_offset tokens of KV cache.  But the state
+    // cache (conv_cache / recurrent_state) checkpoint may be at a position
+    // earlier than kv_offset.  In that case we need to:
+    //   1. Restore state to the best checkpoint position
+    //   2. Retrieve the "gap" tokens [checkpoint_pos .. kv_offset) from our
+    //      saved token history
+    //   3. Roll back the KV cache to the checkpoint position
+    //   4. Prepend gap tokens to incoming tokens and re-compute from there
+    //
+    // Continuation batches (multi-batch prefill for the same prompt) are
+    // detected by snapshot.last_processed_pos == kv_offset, meaning the
+    // state is already up-to-date at kv_offset — no rollback needed.
+    std::vector<llama_token> effective_tokens;
+    int32_t effective_kv_offset = kv_offset;
+
+    if (!state_cache_names_.empty() && kv_offset > 0) {
+        auto snap_iter = prefill_snapshots_.find(seq_id);
+        bool is_continuation = false;
+
+        if (snap_iter != prefill_snapshots_.end() &&
+            snap_iter->second.valid) {
+            // If the snapshot's last processed position matches kv_offset
+            // exactly, this is a continuation batch — the previous
+            // houmo_prefill call (or decode) already brought the state to
+            // this position.
+            if (snap_iter->second.last_processed_pos == kv_offset) {
+                is_continuation = true;
+            }
+        }
+
+        if (is_continuation) {
+            // Continuation batch — state is already correct, just proceed.
+            effective_tokens = tokens;
+            LLAMA_LOG_INFO(
+                "%s: continuation batch seq_id=%d kv_offset=%d "
+                "last_processed_pos=%d\n",
+                __func__, seq_id, kv_offset,
+                snap_iter->second.last_processed_pos);
+        } else if (snap_iter != prefill_snapshots_.end() &&
+                   snap_iter->second.valid) {
+            // First batch of a new request with KV prefix reuse.
+            // Try to find a checkpoint at or before kv_offset.
+            const auto &saved_history = snap_iter->second.tokens;
+            int best_ckpt = -1;
+
+            if (!snap_iter->second.checkpoints.empty()) {
+                best_ckpt =
+                    find_and_restore_best_checkpoint(seq_id, kv_offset);
+            }
+
+            // Determine the rollback position.
+            // - best_ckpt > 0  → state restored to that position
+            // - best_ckpt == -1 → no checkpoint found, state must start
+            //   from position 0 (will be zero-initialized)
+            //
+            // In both cases, if rollback_pos < kv_offset we need to
+            // retrieve the gap tokens [rollback_pos .. kv_offset) from
+            // saved history and roll back the KV cache, because the
+            // state cache is sequential and must see ALL tokens.
+            int rollback_pos = (best_ckpt > 0) ? best_ckpt : 0;
+
+            if (rollback_pos < kv_offset) {
+                // Need gap tokens [rollback_pos .. kv_offset).
+                if (static_cast<size_t>(kv_offset) <= saved_history.size()) {
+                    std::vector<llama_token> gap(
+                        saved_history.begin() + rollback_pos,
+                        saved_history.begin() + kv_offset);
+
+                    // Roll back KV cache to the rollback position.
+                    if (memory_) {
+                        memory_->seq_rm(seq_id, rollback_pos, kv_offset);
+                    }
+
+                    // Build effective tokens: gap + incoming.
+                    effective_tokens.reserve(gap.size() + tokens.size());
+                    effective_tokens.insert(effective_tokens.end(),
+                                           gap.begin(), gap.end());
+                    effective_tokens.insert(effective_tokens.end(),
+                                           tokens.begin(), tokens.end());
+                    effective_kv_offset = rollback_pos;
+
+                    if (best_ckpt > 0) {
+                        state_cache_initialized_[seq_id] = true;
+                    } else {
+                        // No checkpoint — zero-init state.
+                        state_cache_initialized_[seq_id] = false;
+                    }
+
+                    LLAMA_LOG_INFO(
+                        "%s: rollback seq_id=%d, best_ckpt=%d, "
+                        "kv_offset=%d, last_processed_pos=%d, "
+                        "gap=%zu, effective=%zu, "
+                        "effective_kv_offset=%d\n",
+                        __func__, seq_id, best_ckpt, kv_offset,
+                        snap_iter->second.last_processed_pos,
+                        gap.size(), effective_tokens.size(),
+                        effective_kv_offset);
+                } else {
+                    // History too short to fill gap — can't recover.
+                    // Reset state and process from kv_offset (state will
+                    // be inaccurate but it's the best we can do).
+                    LLAMA_LOG_WARN(
+                        "%s: saved history too short (%zu) to fill gap "
+                        "[%d..%d) for seq_id=%d, state will be inaccurate\n",
+                        __func__, saved_history.size(),
+                        rollback_pos, kv_offset, seq_id);
+                    effective_tokens = tokens;
+                    state_cache_initialized_[seq_id] = false;
+                }
+                snap_iter->second.valid = false;
+                if (best_ckpt <= 0) {
+                    // No usable checkpoint — clear all stale checkpoints.
+                    snap_iter->second.checkpoints.clear();
+                }
+                // When best_ckpt > 0, find_and_restore_best_checkpoint
+                // already erased stale checkpoints after the restored
+                // position.  Keep the restored checkpoint so that the
+                // NEXT request can still reuse it.
+            } else {
+                // rollback_pos == kv_offset → checkpoint exactly matches.
+                effective_tokens = tokens;
+                state_cache_initialized_[seq_id] = true;
+                snap_iter->second.valid = false;
+                LLAMA_LOG_INFO(
+                    "%s: state checkpoint matches kv_offset=%d, "
+                    "no gap, seq_id=%d\n",
+                    __func__, kv_offset, seq_id);
+            }
+        } else {
+            // No snapshot at all — state must start from position 0.
+            // If kv_offset > 0 we must roll back KV cache and recompute
+            // from scratch, but we have no saved history to retrieve
+            // tokens [0..kv_offset).  This only happens if the first
+            // request had kv_offset > 0 somehow (shouldn't happen in
+            // practice).
+            if (kv_offset > 0) {
+                LLAMA_LOG_WARN(
+                    "%s: no snapshot for seq_id=%d but kv_offset=%d, "
+                    "cannot retrieve prefix tokens, state inaccurate\n",
+                    __func__, seq_id, kv_offset);
+            }
+            effective_tokens = tokens;
+            state_cache_initialized_[seq_id] = false;
+        }
+    } else if (!state_cache_names_.empty() && kv_offset == 0) {
+        // Fresh start — reset state.
+        effective_tokens = tokens;
         state_cache_initialized_[seq_id] = false;
+        auto snap_iter = prefill_snapshots_.find(seq_id);
+        if (snap_iter != prefill_snapshots_.end()) {
+            snap_iter->second.valid = false;
+            snap_iter->second.checkpoints.clear();
+            snap_iter->second.last_processed_pos = 0;
+        }
+    } else {
+        // No state cache — use tokens as-is.
+        effective_tokens = tokens;
     }
-    if ((tokens.size() + kv_offset) >=
+    // ---- end state cache checkpoint reuse ----
+
+    if ((effective_tokens.size() + effective_kv_offset) >=
         static_cast<uint32_t>(context_length_)) {
         LLAMA_LOG_ERROR(
-            "%s: input size %zu > context_length_%d, reset to 0\n",
-            __func__, tokens.size() + kv_offset,
+            "%s: input size %zu + offset %d >= context_length_ %d\n",
+            __func__, effective_tokens.size(), effective_kv_offset,
             context_length_);
         return 1;
     }
 
-    size_t process_tokens = tokens.size();
+    size_t process_tokens = effective_tokens.size();
     if (process_tokens == 0) {
         LLAMA_LOG_INFO(
-            "%s: no tokens to process, just cache return, total size = %zu\n",
-            __func__, process_tokens);
+            "%s: no tokens to process for seq_id=%d (kv_offset=%d)\n",
+            __func__, seq_id, kv_offset);
+        // Still update snapshot history.
+        auto &snapshot = prefill_snapshots_[seq_id];
+        if (snapshot.tokens.size() >= static_cast<size_t>(effective_kv_offset)) {
+            snapshot.tokens.resize(static_cast<size_t>(effective_kv_offset));
+        }
+        snapshot.tokens.insert(snapshot.tokens.end(),
+                               tokens.begin(), tokens.end());
+        snapshot.last_processed_pos = effective_kv_offset;
+        snapshot.valid = true;
+        decode_valid_length_[seq_id] = effective_kv_offset;
         return 0;
     }
 
     int32_t current_length = 0;
-    int32_t valid_length = kv_offset;
+    int32_t valid_length = effective_kv_offset;
 
     size_t rounds = (process_tokens + prefill_length_ - 1) / prefill_length_;
 
@@ -403,7 +703,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                              ? prefill_length_
                              : static_cast<int>(remaining);
 
-        const int32_t *token_ptr = tokens.data() + round_start;
+        const int32_t *token_ptr = effective_tokens.data() + round_start;
         memset(input_data.Data(), 0, input_data.MemSize());
         embedding_layer_->get_embedding_batch(token_ptr, current_length,
                                              input_data.Data());
@@ -461,9 +761,20 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         prefill_model_->Sync();
         PERF_STOP(PREFILL_RUN_ONCE);
         valid_length += current_length;
+
+        // Save a checkpoint after every prefill round.  The old condition
+        // (valid_length % kCheckpointInterval == 0) only triggered when
+        // valid_length was an exact multiple of 256, which never happens
+        // when the starting offset is not aligned (e.g. first batch was
+        // 66 tokens → positions 66, 322, 578 are never multiples of 256).
+        // Saving every round (≤ prefill_length_ tokens apart) ensures we
+        // have checkpoints at ~256-token granularity regardless of offset.
+        if (valid_length > 0 && rounds > 1) {
+            save_state_checkpoint(seq_id, valid_length);
+        }
     }
 
-    decode_valid_length_[seq_id] = kv_offset + static_cast<int32_t>(process_tokens);
+    decode_valid_length_[seq_id] = effective_kv_offset + static_cast<int32_t>(process_tokens);
     PERF_START(PREFILL_GETOUTPUT);
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
@@ -477,6 +788,57 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     if (memory_) {
         memory_->seq_add(seq_id, 0, 0, static_cast<int32_t>(process_tokens));
     }
+
+    // ---- update snapshot token history ----
+    // Maintain a complete token history so that future checkpoint restores
+    // can retrieve gap tokens that are not passed in by the outer layer.
+    //
+    // Layout: snapshot.tokens = [0 .. effective_kv_offset) ++ effective_tokens
+    //
+    // For rollback case (effective_kv_offset < kv_offset):
+    //   keeps history[0..ckpt) + gap + incoming  → full history restored
+    // For continuation batch:
+    //   keeps history[0..kv_offset) + incoming   → history extended
+    // For fresh start (kv_offset == 0):
+    //   effective_tokens == tokens               → history starts fresh
+    {
+        auto &snapshot = prefill_snapshots_[seq_id];
+
+        if (snapshot.tokens.size() >=
+            static_cast<size_t>(effective_kv_offset)) {
+            // Truncate to effective_kv_offset (keep the prefix) and append
+            // the tokens we just processed.
+            snapshot.tokens.resize(
+                static_cast<size_t>(effective_kv_offset));
+        } else {
+            // History is shorter than expected — pad with zeros.
+            // This is a degraded case; future gap retrieval for positions
+            // within the padding won't produce correct tokens.
+            LLAMA_LOG_WARN(
+                "%s: snapshot history (%zu) < effective_kv_offset (%d) "
+                "for seq_id=%d, padding\n",
+                __func__, snapshot.tokens.size(), effective_kv_offset,
+                seq_id);
+            snapshot.tokens.resize(
+                static_cast<size_t>(effective_kv_offset), 0);
+        }
+        snapshot.tokens.insert(snapshot.tokens.end(),
+                               effective_tokens.begin(),
+                               effective_tokens.end());
+
+        // Always save a checkpoint at the prefill end position so that
+        // the next conversation turn can reuse state up to this point
+        // with minimal gap replay.  Per-round checkpoints are saved
+        // inside the loop when rounds > 1; this covers the single-round
+        // case and also ensures the final position is always checkpointed.
+        if (valid_length > 0) {
+            save_state_checkpoint(seq_id, valid_length);
+        }
+        snapshot.last_processed_pos = valid_length;
+        snapshot.valid = true;
+    }
+    // ---- end snapshot ----
+
     return 0;
 }
 
@@ -598,6 +960,25 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
         memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
         if (memory_) {
             memory_->seq_add(seq_ids[i], 0, 0, 1);
+        }
+
+        // Append the decoded token to snapshot history and save a checkpoint
+        // at kCheckpointInterval-aligned positions so that the next
+        // conversation can reuse the state accumulated during decode.
+        {
+            auto &snapshot = prefill_snapshots_[seq_ids[i]];
+            if (i < batches.size()) {
+                snapshot.tokens.push_back(batches[i]);
+            }
+            int vl = decode_valid_length_[seq_ids[i]];
+            snapshot.last_processed_pos = vl;
+            if (vl > 0 && vl % kCheckpointInterval == 0) {
+                // State cache is up-to-date (decode model wrote back via
+                // SetDevOutput).  Save a checkpoint from the decode-side
+                // state cache.
+                save_state_checkpoint(seq_ids[i], vl);
+                snapshot.valid = true;
+            }
         }
     }
     return 0;
