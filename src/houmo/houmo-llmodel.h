@@ -26,7 +26,7 @@ class HouMoLLModel {
     HouMoLLModel();
     ~HouMoLLModel();
 
-    bool houmo_load(llama_model_loader & ml);
+    bool houmo_load(llama_model_loader & ml, std::vector<int> device_ids);
     void houmo_init(houmo_memory_i *memory, int seq_max = 4,
           ggml_abort_callback abort_callback = nullptr,
           void *abort_callback_data = nullptr);
@@ -69,7 +69,7 @@ class HouMoLLModel::Impl {
 public:
   Impl() = default;
   virtual ~Impl() = default;
-  virtual bool houmo_load(llama_model_loader & ml);
+  virtual bool houmo_load(llama_model_loader & ml, std::vector<int> device_ids);
   virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4,
                           ggml_abort_callback abort_callback = nullptr,
                           void *abort_callback_data = nullptr) = 0;
@@ -156,11 +156,10 @@ protected:
   ////////////////////////////////////////////////////////////////////////////////////////////////
   /**
    * @brief Parse the device ids.
-   * @details Parse the device ids form env. If single_card is true, return the first device id.
-   * @param single_card The single card.
+   * @details Parse the device ids form env.
    * @return The device ids.
    */
-  std::vector<int> parse_deviceids(bool single_card = true);
+  void parse_deviceids();
   void read_tensor_to_buffer(const std::string &file_name, size_t offset,
                              size_t size, std::vector<char> &buffer);
   /**

@@ -114,6 +114,7 @@ mtmd_context_params mtmd_context_params_default() {
         /* image_max_tokens  */ -1,
         /* cb_eval           */ nullptr,
         /* cb_eval_user_data */ nullptr,
+        /* devices           */ nullptr,
     };
     return params;
 }
@@ -192,11 +193,24 @@ struct mtmd_context {
         }
 
         if (clip_is_hmm(ctx_v)) {
+            std::vector<int> device_ids;
+            if (ctx_params.devices != nullptr) {
+                LOG_INF("device is not null...");
+                for (int i = 0; ctx_params.devices[i] != nullptr; i++) {
+                    ggml_backend_dev_t device = ctx_params.devices[i];
+                    const char *dev_name = ggml_backend_dev_name(device);
+                    if (dev_name) {
+                        int id = std::stoi(dev_name);
+                        LOG_INF ("MTMD set %s \n", dev_name);
+                        device_ids.push_back(id);
+                    }
+                }
+            }
             if (clip_is_minicpmv(ctx_v))
                 hm_vision = new HoumoMinicpmVision();
             else 
                 hm_vision = new HoumoQwenVision();
-            if (!hm_vision->init(mmproj_fname))
+            if (!hm_vision->init(mmproj_fname, device_ids))
                 throw std::runtime_error(string_format(
                     "Failed to load HMM model from %s\n", mmproj_fname));
         }

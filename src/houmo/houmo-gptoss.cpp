@@ -38,8 +38,8 @@ std::vector<uint16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
                 int start_idx = (old_cache_length + i > sliding_window_) ? i : 0;
                 // end_idx = min(start_idx + window, old_cache_length + i + 1)
                 int end_idx = std::min(start_idx + sliding_window_, old_cache_length + i + 1);
-                LLAMA_LOG_DEBUG("%s: i = %d, start_idx = %d, end_idx = %d\n",
-                               __func__, i, start_idx, end_idx);
+                // LLAMA_LOG_DEBUG("%s: i = %d, start_idx = %d, end_idx = %d\n",
+                //                __func__, i, start_idx, end_idx);
 
                 for (int j = start_idx; j < end_idx; ++j) {
                     if (j >= width)
@@ -113,8 +113,8 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             auto last = tokens.begin() + (round + 1) * prefill_length_;
             input_ids.assign(first, last);
         }
-        LLAMA_LOG_DEBUG("%s: round %d/%d, valid_length = %d, current_length = %d\n", __func__, round + 1,
-                    prefill_loop_round, valid_length, current_length);
+        // LLAMA_LOG_DEBUG("%s: round %d/%d, valid_length = %d, current_length = %d\n", __func__, round + 1,
+        //             prefill_loop_round, valid_length, current_length);
         auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
         memset(input_data.Data(), 0, input_data.MemSize());
         embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
@@ -155,8 +155,8 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
                               std::vector<int> &seq_ids,
                               std::vector<float *> logits) {
-    LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
-                    seq_ids.size(), batches.size());
+    // LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
+    //                 seq_ids.size(), batches.size());
     for (auto seq_id : seq_ids)
         decode_valid_length_[seq_id] = memory_->seq_pos_min(seq_id);
     int ret = 0;
@@ -223,10 +223,10 @@ int HouMoGPTOSS::set_attentions_for_prefill(int current_length, int valid_length
     std::string name = prefill_model_->GetInputName(3);
     auto& local_mask_input_data = prefill_input_map_.at(name);
     auto prefill_local_mask_host = generate_mask_f16(1, current_length, valid_length, true);
-    LLAMA_LOG_DEBUG("%s: current_length = %d, valid_length = %d, "
-                   "prefill_local_mask_host.size() = %zu\n",
-                   __func__, current_length, valid_length,
-                   prefill_local_mask_host.size());
+    // LLAMA_LOG_DEBUG("%s: current_length = %d, valid_length = %d, "
+    //                "prefill_local_mask_host.size() = %zu\n",
+    //                __func__, current_length, valid_length,
+    //                prefill_local_mask_host.size());
     local_mask_input_data.Buffer().CopyFromHost(
         prefill_local_mask_host.data(), local_mask_input_data.MemSize());
     prefill_model_->SetInput(name, local_mask_input_data);

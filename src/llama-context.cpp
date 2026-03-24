@@ -1415,7 +1415,6 @@ static std::string common_token_to_piece(const struct llama_vocab * vocab, llama
 
 int llama_context::houmo_decode(const llama_batch &batch) {
     int ret = 0;
-    LLAMA_LOG_DEBUG("****batch.n_tokens: %d\n", batch.n_tokens);
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
     const int32_t n_vocab = model.vocab.n_tokens();
     // 输入的是数据，当前只支持prefill阶段是embdding
@@ -1516,7 +1515,6 @@ int llama_context::houmo_decode(const llama_batch &batch) {
 }
 
 int llama_context::houmo_embedding(const llama_batch &batch) {
-    LLAMA_LOG_DEBUG("===****batch.n_tokens: %d\n", batch.n_tokens);
     n_outputs = batch.n_tokens;
     const int32_t n_embd = model.hparams.n_embd;
     // 0. batch拆分

@@ -461,6 +461,12 @@ ggml_add_backend(OpenCL)
 ggml_add_backend(Hexagon)
 ggml_add_backend(ZenDNN)
 
+# HoumoNPU backend - static linkage (always included)
+add_subdirectory(ggml-houmonpu)
+target_link_libraries(ggml PUBLIC houmonpu)
+target_compile_definitions(ggml PUBLIC GGML_USE_HOUMONPU)
+message(STATUS "Including HoumoNPU backend (static)")
+
 foreach (target ggml-base ggml)
     target_include_directories(${target} PUBLIC    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include> $<INSTALL_INTERFACE:include>)
     target_compile_features   (${target} PRIVATE c_std_11 cxx_std_17) # don't bump

@@ -10,7 +10,7 @@ class HoumoVision {
   public:
     HoumoVision() = default;
     virtual ~HoumoVision() = default;
-    virtual bool init(const std::string &model_path) = 0;
+    virtual bool init(const std::string &model_path, std::vector<int> device_ids) = 0;
     virtual bool encoding(const std::vector<float> &input_data,
                           std::vector<float> &output_data, int out_offset = 0) = 0;
     int16_t image_width() const  {
@@ -28,7 +28,7 @@ class HoumoVision {
     bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output);
 
   protected:
-    bool houmo_load(const std::string &file_name);
+    bool houmo_load(const std::string &file_name, std::vector<int> device_ids);
     void rgb_to_yuv444(const std::vector<float> &bgr_data, int width,
                        int height, std::vector<uint8_t> &yuv444sp_data);
     void read_tensor_to_buffer(const std::string &file_name, size_t offset,
@@ -43,7 +43,7 @@ class HoumoVision {
                      int target_width, int target_height);
     void fill_header(std::vector<float> &output_data);
 
-    std::vector<int> parse_deviceids(bool single_card = true);
+    void parse_deviceids();
   protected:
     std::shared_ptr<tcim::Module> module_;
     std::map<std::string, tcim::Tensor> input_tensors_;
@@ -57,6 +57,7 @@ class HoumoVision {
     uint16_t image_frames_ = 2;
     std::string input_name_;
     uint32_t patch_size_ = 14;
+    std::vector<int> device_ids_;
 };
 /*
 *@ 基于qwen架构的视觉模型, 支持Qwen2.5vl, Qwen3vl模型
@@ -65,7 +66,7 @@ class HoumoQwenVision : public HoumoVision {
   public:
     HoumoQwenVision(): HoumoVision() {}
     ~HoumoQwenVision() override = default;
-    virtual bool init(const std::string &model_path) override;
+    virtual bool init(const std::string &model_path, std::vector<int> device_ids) override;
     virtual bool encoding(const std::vector<float> &input_data,
                           std::vector<float> &output_data, int out_offset = 0) override;
 
@@ -85,7 +86,7 @@ class HoumoMinicpmVision : public HoumoVision {
   public:
     HoumoMinicpmVision() : HoumoVision() {}
     ~HoumoMinicpmVision() override = default;
-    virtual bool init(const std::string &model_path) override;
+    virtual bool init(const std::string &model_path, std::vector<int> device_ids) override;
     virtual bool encoding(const std::vector<float> &input_data,
                           std::vector<float> &output_data, int out_offset = 0) override;
   private:

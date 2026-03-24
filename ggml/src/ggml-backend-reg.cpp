@@ -82,6 +82,10 @@
 #include "ggml-zendnn.h"
 #endif
 
+#ifdef GGML_USE_HOUMONPU
+#include "ggml-houmonpu.h"
+#endif
+
 namespace fs = std::filesystem;
 
 static std::string path_str(const fs::path & path) {
@@ -153,6 +157,9 @@ struct ggml_backend_registry {
 #endif
 #ifdef GGML_USE_RPC
         register_backend(ggml_backend_rpc_reg());
+#endif
+#ifdef GGML_USE_HOUMONPU
+        register_backend(ggml_backend_houmonpu_reg());
 #endif
 #ifdef GGML_USE_CPU
         register_backend(ggml_backend_cpu_reg());

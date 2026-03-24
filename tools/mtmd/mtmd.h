@@ -99,6 +99,9 @@ struct mtmd_context_params {
     // callback function passed over to mtmd proper
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
+
+    // NULL-terminated list of devices to use for offloading (if NULL, index 0 are used)
+    ggml_backend_dev_t * devices;
 };
 
 MTMD_API const char * mtmd_default_marker(void);

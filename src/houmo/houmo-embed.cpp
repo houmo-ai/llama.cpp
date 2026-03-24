@@ -12,9 +12,12 @@ HouMoEmbed::~HouMoEmbed() {
     // do nothing
 }
 
-bool HouMoEmbed::houmo_load(llama_model_loader & ml) {
+bool HouMoEmbed::houmo_load(llama_model_loader & ml, std::vector<int> device_ids) {
     std::string file_name = ml.fname_;
     gguf_context *ctx = ml.metadata_ptr.get();
+    // 0. 获取设置的device_ids. env>params>default.
+    device_ids_ = device_ids;
+    parse_deviceids();
 
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);

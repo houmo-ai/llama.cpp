@@ -82,12 +82,13 @@ void HoumoVision::rgb_to_nchw(const std::vector<float> &rgb_data) {
     }
 }
 
-bool HoumoVision::houmo_load(const std::string &file_name) {
+bool HoumoVision::houmo_load(const std::string &file_name, std::vector<int> device_ids) {
     struct ggml_context *ctx_data = NULL;
     struct gguf_init_params params = {
         /*.no_alloc = */ true,
         /*.ctx      = */ &ctx_data,
     };
+    device_ids_ = device_ids;
     struct gguf_context *ctx = gguf_init_from_file(file_name.c_str(), params);
     auto key_id = gguf_find_key(ctx, kPatchSizeKey.c_str());
     if (key_id < 0) {
@@ -96,11 +97,8 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
     } else {
         patch_size_ = gguf_get_val_u32(ctx, key_id);
     }
-#ifdef XH2_ENABLED
     std::string backend = "Xh2HalBackend";
-#else
-    std::string backend = "";
-#endif
+    parse_deviceids();
     // 从gguf文件中加载hmmodels
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
@@ -114,12 +112,9 @@ bool HoumoVision::houmo_load(const std::string &file_name) {
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         std::vector<char> buffer(size);
         read_tensor_to_buffer(file_name, offset, size, buffer);
-        auto device_ids = parse_deviceids();
-        if (device_ids.size() != 1)
-            device_ids = {device_ids[0]};
 
         tcim::DevManager dev_manager =
-            tcim::DevManager::Create(device_ids, backend);
+            tcim::DevManager::Create(device_ids_, backend);
         auto wm = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
         auto option = tcim::Module::Option(wm);
 
@@ -409,33 +404,28 @@ void HoumoVision::fill_header(std::vector<float>& output_data) {
     );
 }
 
-std::vector<int> HoumoVision::parse_deviceids(bool single_card) {
-    std::vector<int> deviceIds;
+void HoumoVision::parse_deviceids() {
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
-
     if (device_id_str == nullptr) {
-        deviceIds.push_back(0);
-        if (!single_card)
-            deviceIds.push_back(1);
-        return deviceIds;
+        if (device_ids_.size() == 0)
+            device_ids_.push_back(0);
+        return;
     }
 
     std::string deviceList(device_id_str);
     std::istringstream iss(deviceList);
     std::string token;
-
+    device_ids_.clear();
     while (std::getline(iss, token, ',')) {
         try {
             // 转换为整数并添加到列表
-            deviceIds.push_back(std::stoi(token));
+            device_ids_.push_back(std::stoi(token));
         } catch (const std::invalid_argument &) {
-            LOG_ERR("Invalid device ID: %s", token.c_str());
+            LOG_ERR("Invalid device ID: %s\n", token.c_str());
         } catch (const std::out_of_range &) {
-            LOG_ERR("Device ID out of range: %s", token.c_str());
+            LOG_ERR("Device ID out of range: %s\n", token.c_str());
         }
     }
-
-    return deviceIds;
 }
 
 void HoumoQwenVision::set_windows_attention() {
@@ -509,8 +499,8 @@ void HoumoQwenVision::set_windows_attention() {
     }
     module_->SetInput(module_->GetInputName(2), mask_tensor);
 }
-bool HoumoQwenVision::init(const std::string &model_path) {
-    if (!houmo_load(model_path)) {
+bool HoumoQwenVision::init(const std::string &model_path, std::vector<int> device_ids) {
+    if (!houmo_load(model_path, device_ids)) {
         LOG_ERR("Failed to load HoumoQwenVision model from %s\n",
                 model_path.c_str());
         return false;
@@ -589,9 +579,9 @@ bool HoumoQwenVision::encoding(const std::vector<float> &input_data,
     LOG_INF("houmo_vision: run model done\n");
     return true;
 }
-bool HoumoMinicpmVision::init(const std::string &model_path) {
+bool HoumoMinicpmVision::init(const std::string &model_path, std::vector<int> device_ids) {
     // TODO: not implemented
-    if (!houmo_load(model_path)) {
+    if (!houmo_load(model_path, device_ids)) {
         LOG_ERR("Failed to load HoumoMinicpmVision model from %s\n",
                 model_path.c_str());
         return false;

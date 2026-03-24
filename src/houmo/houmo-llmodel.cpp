@@ -31,11 +31,10 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     bool prefill, void *raw_data, int64_t size, bool load_from_file,
     std::vector<std::string> dummy_tensor_names) {
     if (wm_.GetInitStatus() != tcim::Status::OK) {
-        auto device_ids = parse_deviceids();
         std::string backend = "";
         backend = "Xh2HalBackend";
         tcim::DevManager dev_manager =
-            tcim::DevManager::Create(device_ids, backend);
+            tcim::DevManager::Create(device_ids_, backend);
         wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
     }
     tcim::Status status;
@@ -95,9 +94,10 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     return infer_model;
 }
 
-bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml) {
+bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
     std::string file_name = ml.fname_;
     arch_name = ml.arch_name;
+    device_ids_ = device_ids;
     gguf_context *ctx = ml.metadata_ptr.get();
     parser_gguf_parameters(ctx, ml.arch_name);
     // 从gguf文件中加载hmmodels
@@ -119,23 +119,7 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml) {
         dummy_tensor_names.push_back(k_cache_name);
         dummy_tensor_names.push_back(v_cache_name);
     }
-    device_ids_ = parse_deviceids();
-    if (device_num_ == 2 && device_ids_.size() == 1) {
-        // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
-        device_ids_ = {0, 1};
-        LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
-    } else if (device_num_ == 1 && device_ids_.size() > 1) {
-        // 模型是单卡模型，需要将device_ids 缩小为{0}
-        device_ids_ = {0};
-        LLAMA_LOG_WARN("single card model, set device_ids size > 1, need to "
-                       "resize device_ids to {0}");
-    } else if (device_num_ == 4 && device_ids_.size() == 1) {
-        // 模型是四卡模型，需要将device_ids 扩展为{0,1,2,3}
-        device_ids_ = {0, 1, 2, 3};
-        LLAMA_LOG_WARN("4 card model, need to set device_ids to {0,1,2,3}");
-    } else {
-        LLAMA_LOG_INFO("run models in %zu cards", device_ids_.size());
-    }
+    parse_deviceids();
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
@@ -428,33 +412,46 @@ void HouMoLLModel::Impl::read_tensor_to_buffer(const std::string &file_name,
     }
 }
 
-std::vector<int> HouMoLLModel::Impl::parse_deviceids(bool single_card) {
-    std::vector<int> deviceIds;
+void HouMoLLModel::Impl::parse_deviceids() {
     const char *device_id_str = std::getenv("HOUMO_DEVICE_ID");
     if (device_id_str == nullptr) {
-        deviceIds.push_back(0);
-        if (!single_card)
-            deviceIds.push_back(1);
-        return deviceIds;
-    }
-    LLAMA_LOG_INFO("HOUMO_DEVICE_ID: %s\n", device_id_str);
+        if (device_ids_.size() == 0)
+            device_ids_.push_back(0);
+    } else {
+        LLAMA_LOG_INFO("HOUMO_DEVICE_ID: %s\n", device_id_str);
+        device_ids_.clear();
+        std::string deviceList(device_id_str);
+        std::istringstream iss(deviceList);
+        std::string token;
 
-    std::string deviceList(device_id_str);
-    std::istringstream iss(deviceList);
-    std::string token;
-
-    while (std::getline(iss, token, ',')) {
-        try {
-            // 转换为整数并添加到列表
-            deviceIds.push_back(std::stoi(token));
-        } catch (const std::invalid_argument &) {
-            LLAMA_LOG_ERROR("Invalid device ID: %s\n", token.c_str());
-        } catch (const std::out_of_range &) {
-            LLAMA_LOG_ERROR("Device ID out of range: %s\n", token.c_str());
+        while (std::getline(iss, token, ',')) {
+            try {
+                // 转换为整数并添加到列表
+                device_ids_.push_back(std::stoi(token));
+            } catch (const std::invalid_argument &) {
+                LLAMA_LOG_ERROR("Invalid device ID: %s\n", token.c_str());
+            } catch (const std::out_of_range &) {
+                LLAMA_LOG_ERROR("Device ID out of range: %s\n", token.c_str());
+            }
         }
     }
-
-    return deviceIds;
+    // 校验设置的是否合法
+    if (device_num_ == 2 && device_ids_.size() == 1) {
+        // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
+        device_ids_ = {0, 1};
+        LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
+    } else if (device_num_ == 1 && device_ids_.size() > 1) {
+        // 模型是单卡模型，需要将device_ids 缩小为{0}
+        device_ids_ = {0};
+        LLAMA_LOG_WARN("single card model, set device_ids size > 1, need to "
+                       "resize device_ids to {0}");
+    } else if (device_num_ == 4 && device_ids_.size() == 1) {
+        // 模型是四卡模型，需要将device_ids 扩展为{0,1,2,3}
+        device_ids_ = {0, 1, 2, 3};
+        LLAMA_LOG_WARN("4 card model, need to set device_ids to {0,1,2,3}");
+    } else {
+        LLAMA_LOG_INFO("run models in %zu cards", device_ids_.size());
+    }
 }
 
 void HouMoLLModel::Impl::set_input_data(tcim::Tensor &tensor, int batch_size,
@@ -662,8 +659,8 @@ int HouMoLLModel::Impl::set_xlenght_for_decode(std::vector<int> &seq_ids) {
             name = decode_current_length_names_[i];
             auto current_valid_length = decode_input_map_.at(name);
             set_input_data(current_valid_length, 1, 1);
-            LLAMA_LOG_DEBUG("name = %s, current_valid_length: %d\n",
-                            name.c_str(), 1);
+            // LLAMA_LOG_DEBUG("name = %s, current_valid_length: %d\n",
+            //                 name.c_str(), 1);
             status = decode_model_->SetInput(name, current_valid_length);
             if (status != tcim::Status::OK) {
                 LLAMA_LOG_ERROR("%s: failed to set input %s\n", __func__,
@@ -722,7 +719,7 @@ HouMoLLModel::~HouMoLLModel() {
 }
 
 // Forward method calls to the implementation
-bool HouMoLLModel::houmo_load(llama_model_loader &ml) {
+bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
     if (impl_ == nullptr) {
         if (ml.arch_name.find("vl") != std::string::npos) {
             impl_ = new HouMoVLLModel();
@@ -744,7 +741,7 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml) {
         }
     }
 
-    return impl_->houmo_load(ml);
+    return impl_->houmo_load(ml, device_ids);
 }
 
 void HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
