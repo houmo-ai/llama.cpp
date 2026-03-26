@@ -339,7 +339,9 @@ static void ggml_backend_houmonpu_device_get_memory(ggml_backend_dev_t dev,
 
 static enum ggml_backend_dev_type ggml_backend_houmonpu_device_get_type(ggml_backend_dev_t dev) {
     GGML_UNUSED(dev);
-    return GGML_BACKEND_DEVICE_TYPE_ACCEL;
+    // HW_ACCEL: 可被 --list-devices 显示，但不会被自动初始化为计算后端
+    // 后端完整实现后改为 GGML_BACKEND_DEVICE_TYPE_ACCEL
+    return GGML_BACKEND_DEVICE_TYPE_HM_ACCEL;
 }
 
 static void ggml_backend_houmonpu_device_get_props(ggml_backend_dev_t dev,
@@ -355,18 +357,42 @@ static void ggml_backend_houmonpu_device_get_props(ggml_backend_dev_t dev,
     props->caps.events = false;
 }
 
+// TODO: 以下 stub 函数在后端完整实现后替换
+static ggml_backend_t ggml_backend_houmonpu_device_init_backend(ggml_backend_dev_t dev, const char * params) {
+    GGML_UNUSED(dev);
+    GGML_UNUSED(params);
+    return nullptr;
+}
+
+static ggml_backend_buffer_type_t ggml_backend_houmonpu_device_get_buffer_type(ggml_backend_dev_t dev) {
+    GGML_UNUSED(dev);
+    return nullptr;
+}
+
+static bool ggml_backend_houmonpu_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    GGML_UNUSED(dev);
+    GGML_UNUSED(op);
+    return false;
+}
+
+static bool ggml_backend_houmonpu_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
+    GGML_UNUSED(dev);
+    GGML_UNUSED(buft);
+    return false;
+}
+
 static struct ggml_backend_device_i ggml_backend_houmonpu_device_interface = {
     /* .get_name              = */ ggml_backend_houmonpu_device_get_name,
     /* .get_description       = */ ggml_backend_houmonpu_device_get_description,
     /* .get_memory            = */ ggml_backend_houmonpu_device_get_memory,
     /* .get_type              = */ ggml_backend_houmonpu_device_get_type,
     /* .get_props             = */ ggml_backend_houmonpu_device_get_props,
-    /* .init_backend          = */ NULL,
-    /* .get_buffer_type       = */ NULL,
+    /* .init_backend          = */ ggml_backend_houmonpu_device_init_backend,
+    /* .get_buffer_type       = */ ggml_backend_houmonpu_device_get_buffer_type,
     /* .get_host_buffer_type  = */ NULL,
     /* .buffer_from_host_ptr  = */ NULL,
-    /* .supports_op           = */ NULL,
-    /* .supports_buft         = */ NULL,
+    /* .supports_op           = */ ggml_backend_houmonpu_device_supports_op,
+    /* .supports_buft         = */ ggml_backend_houmonpu_device_supports_buft,
     /* .offload_op            = */ NULL,
     /* .event_new             = */ NULL,
     /* .event_free            = */ NULL,
