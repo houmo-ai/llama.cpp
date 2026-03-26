@@ -29,7 +29,6 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
 
   private:
     void resolve_input_names();
-    void init_cache_io_tensors();
     void init_state_cache(int seq_max);
     void set_state_cache_for_prefill(int seq_id);
     void set_state_cache_for_decode(const std::vector<int> &seq_ids);
@@ -44,6 +43,7 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
                                   const std::vector<llama_token> &incoming) const;
     void save_state_checkpoint(int seq_id, int position);
     int find_and_restore_best_checkpoint(int seq_id, int max_position);
+    void restore_zero_state(int seq_id);
 
   private:
     std::map<int32_t, std::vector<uint16_t>> input_embedding_ids_;
@@ -67,6 +67,8 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     std::vector<std::string> state_cache_output_names_;
     std::map<int, StateCacheEntry> state_cache_;
     std::map<int, bool> state_cache_initialized_;
+    // Device-side zero-initialized state tensors for fast initialization
+    std::vector<tcim::Tensor> zero_state_tensors_;
 
     // Indices into state_cache_names_ / StateCacheEntry::tensors that
     // correspond to recurrent state (conv_cache + recurrent_state) — only
@@ -74,8 +76,14 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     // separately and must NOT be included.
     std::vector<size_t> checkpoint_tensor_indices_;
 
-    // Prefix cache with periodic checkpoints for state reuse
-    int kCheckpointInterval = prefill_length_ * 2;
+    // Prefix cache with periodic checkpoints for state reuse.
+    // checkpoint_min_interval_: minimum distance (in tokens) between two
+    //   consecutive checkpoints.  Prevents over-saving during fast prefill.
+    // checkpoint_max_count_: maximum number of checkpoints kept per seq_id.
+    //   When exceeded, the checkpoint closest to a neighbor is evicted
+    //   (preserving first and last for maximum rollback coverage).
+    int checkpoint_min_interval_ = prefill_length_ * 4;
+    size_t checkpoint_max_count_ = 40;
 
     // Where to store state checkpoint tensors.
     //   kHost   — copy to host (CPU) memory; saves device memory but

@@ -1,6 +1,7 @@
 #include "houmo-qwen35llm.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include "ggml.h"
 #include "llama-impl.h"
@@ -157,7 +158,6 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
         memory_ = memory;
     }
     resolve_input_names();
-    init_cache_io_tensors();
     init_state_cache(seq_max);
 }
 
@@ -184,26 +184,6 @@ void HoumoQwen35LLM::resolve_input_names() {
     decode_linear_mask_names_.push_back(decode_model_->GetInputName(6));
 }
 
-void HoumoQwen35LLM::init_cache_io_tensors() {
-    if (prefill_model_ == nullptr || decode_model_ == nullptr) {
-        return;
-    }
-    for (size_t i = 0; i < prefill_model_->GetInputNum(); ++i) {
-        auto input_name = prefill_model_->GetInputName(i);
-        if (input_name.find("conv_cache") != std::string::npos) {
-            auto cache = prefill_model_->GetDevInput(input_name);
-            auto tensor = tcim::Tensor::CreateHostTensor(cache.Info());
-            zero_tensor(tensor);
-            prefill_model_->SetInput(input_name, tensor);
-        }
-        if (input_name.find("recurrent_state") != std::string::npos) {
-            auto cache = prefill_model_->GetDevInput(input_name);
-            auto tensor = tcim::Tensor::CreateHostTensor(cache.Info());
-            zero_tensor(tensor);
-            prefill_model_->SetInput(input_name, tensor);
-        }
-    }
-}
 
 void HoumoQwen35LLM::init_state_cache(int seq_max) {
     state_cache_names_.clear();
@@ -276,6 +256,27 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
         state_cache_[i] = std::move(entry);
         state_cache_initialized_[i] = false;
     }
+    // Create device-side zero-initialized tensors for fast state restoration.
+    // These serve as the single source of truth for position-0 state,
+    // avoiding redundant per-seq_id checkpoint 0 storage.
+    zero_state_tensors_.clear();
+    zero_state_tensors_.reserve(state_cache_names_.size());
+    for (const auto &name : state_cache_names_) {
+        auto cache = decode_model_->GetDevInput(name);
+        auto dev_tensor = cache.Clone();
+        zero_tensor(dev_tensor);
+        zero_state_tensors_.push_back(dev_tensor);
+    }
+    // Zero-initialize all state cache entries so model I/O is connected.
+    for (auto &[seq_id, entry] : state_cache_) {
+        for (size_t idx = 0; idx < entry.tensors.size(); ++idx) {
+            zero_state_tensors_[idx].CopyTo(entry.tensors[idx]);
+        }
+        state_cache_initialized_[seq_id] = true;
+        auto &snap = prefill_snapshots_[seq_id];
+        snap.last_processed_pos = 0;
+        snap.valid = true;
+    }
 }
 
 void HoumoQwen35LLM::set_state_cache_for_prefill(int seq_id) {
@@ -287,15 +288,12 @@ void HoumoQwen35LLM::set_state_cache_for_prefill(int seq_id) {
         return;
     }
     auto &tensors = iter->second.tensors;
+    // If not initialized, restore zero state directly from template.
     if (!state_cache_initialized_[seq_id]) {
-        for (size_t idx = 0; idx < tensors.size(); ++idx) {
-            auto host_tensor = tcim::Tensor::CreateHostTensor(
-                tensors[idx].Info().AsContiguous());
-            zero_tensor(host_tensor);
-            host_tensor.CopyTo(tensors[idx]);
-        }
+        restore_zero_state(seq_id);
         state_cache_initialized_[seq_id] = true;
     }
+    // Set inputs/outputs for the model - tensors are already in place
     for (size_t idx = 0; idx < tensors.size(); ++idx) {
         prefill_model_->SetDevInput(state_cache_names_[idx], tensors[idx]);
         if (idx < state_cache_output_names_.size() &&
@@ -352,6 +350,7 @@ void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
     }
     auto &tensors = cache_iter->second.tensors;
     auto &snapshot = prefill_snapshots_[seq_id];
+
     auto &ckpt = snapshot.checkpoints[position];
     ckpt.position = position;
     ckpt.state_tensors.clear();
@@ -368,11 +367,55 @@ void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
             ckpt.state_tensors.push_back(tensors[idx].ToHost(true));
         }
     }
+
+    // Erase all checkpoints after this position — they are stale
+    // (e.g. from a previous longer sequence before rollback).
+    auto erase_begin = snapshot.checkpoints.upper_bound(position);
+    if (erase_begin != snapshot.checkpoints.end()) {
+        LLAMA_LOG_INFO("%s: erasing stale checkpoints seq_id=%d after pos=%d "
+                       "(count=%zu)\n",
+                       __func__, seq_id, position,
+                       static_cast<size_t>(std::distance(
+                           erase_begin, snapshot.checkpoints.end())));
+        snapshot.checkpoints.erase(erase_begin, snapshot.checkpoints.end());
+    }
+
     LLAMA_LOG_INFO("%s: saved checkpoint seq_id=%d pos=%d "
                    "state_tensors=%zu storage=%s\n",
                    __func__, seq_id, position, ckpt.state_tensors.size(),
                    checkpoint_storage_ == CheckpointStorage::kDevice
                        ? "device" : "host");
+
+    // Evict if over budget — remove the checkpoint whose distance to its
+    // nearest neighbor is smallest (but never evict the first or last,
+    // which provide maximum rollback range).
+    if (snapshot.checkpoints.size() > checkpoint_max_count_ &&
+        snapshot.checkpoints.size() > 2) {
+        auto best_evict = snapshot.checkpoints.end();
+        int best_gap = INT_MAX;
+        for (auto it = snapshot.checkpoints.begin();
+             it != snapshot.checkpoints.end(); ++it) {
+            // Skip first and last.
+            if (it == snapshot.checkpoints.begin()) continue;
+            auto next = std::next(it);
+            if (next == snapshot.checkpoints.end()) continue;
+            auto prev = std::prev(it);
+            int gap = std::min(it->first - prev->first,
+                               next->first - it->first);
+            if (gap < best_gap) {
+                best_gap = gap;
+                best_evict = it;
+            }
+        }
+        if (best_evict != snapshot.checkpoints.end()) {
+            LLAMA_LOG_INFO("%s: evicting checkpoint seq_id=%d pos=%d "
+                           "(count=%zu, max=%zu)\n",
+                           __func__, seq_id, best_evict->first,
+                           snapshot.checkpoints.size(),
+                           checkpoint_max_count_);
+            snapshot.checkpoints.erase(best_evict);
+        }
+    }
 }
 
 int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
@@ -438,6 +481,17 @@ int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
                    "reused_tokens=%d (max_allowed=%d)\n",
                    __func__, seq_id, restored_pos, restored_pos, max_position);
     return restored_pos;
+}
+
+void HoumoQwen35LLM::restore_zero_state(int seq_id) {
+    auto cache_iter = state_cache_.find(seq_id);
+    if (cache_iter == state_cache_.end()) {
+        return;
+    }
+    auto &tensors = cache_iter->second.tensors;
+    for (size_t idx : checkpoint_tensor_indices_) {
+        zero_state_tensors_[idx].CopyTo(tensors[idx]);
+    }
 }
 
 std::vector<int32_t> HoumoQwen35LLM::build_rope_position_ids(int valid_length,
@@ -662,6 +716,11 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
     // ---- end state cache checkpoint reuse ----
 
+    // Mark state as needing zero-init if effective_kv_offset is 0
+    if (!state_cache_names_.empty() && effective_kv_offset == 0) {
+        state_cache_initialized_[seq_id] = false;
+    }
+
     if ((effective_tokens.size() + effective_kv_offset) >=
         static_cast<uint32_t>(context_length_)) {
         LLAMA_LOG_ERROR(
@@ -693,10 +752,8 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t valid_length = effective_kv_offset;
 
     size_t rounds = (process_tokens + prefill_length_ - 1) / prefill_length_;
-
+    auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
     for (size_t round = 0; round < rounds; ++round) {
-        auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
-
         size_t round_start = round * prefill_length_;
         size_t remaining = process_tokens > round_start ? process_tokens - round_start : 0;
         current_length = remaining >= static_cast<size_t>(prefill_length_)
@@ -742,18 +799,24 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         }
 
         PERF_START(PREFILL_SETINPUT_ONCE);
-        for (const auto &pair : lora_map) {
-            if (prefill_input_map_.count(pair.first) > 0) {
-                auto lora_mask = prefill_input_map_[pair.first];
-                lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
-                                                       lora_mask_float_.MemSize());
-                lora_mask_float_.CastTo(lora_mask);
-                prefill_model_->SetInput(pair.first, lora_mask);
+        // Only set LoRA masks in the first round - they don't change across rounds
+        if (round == 0) {
+            for (const auto &pair : lora_map) {
+                if (prefill_input_map_.count(pair.first) > 0) {
+                    auto lora_mask = prefill_input_map_[pair.first];
+                    lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
+                                                           lora_mask_float_.MemSize());
+                    lora_mask_float_.CastTo(lora_mask);
+                    prefill_model_->SetInput(pair.first, lora_mask);
+                }
             }
         }
         prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
-        set_state_cache_for_prefill(seq_id);
-        set_kv_cache_for_prefill(seq_id);
+        // Only set state cache and KV cache in the first round - they persist across rounds
+        if (round == 0) {
+            set_state_cache_for_prefill(seq_id);
+            set_kv_cache_for_prefill(seq_id);
+        }
         PERF_STOP(PREFILL_SETINPUT_ONCE);
 
         PERF_START(PREFILL_RUN_ONCE);
@@ -762,15 +825,27 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         PERF_STOP(PREFILL_RUN_ONCE);
         valid_length += current_length;
 
-        // Save a checkpoint after every prefill round.  The old condition
-        // (valid_length % kCheckpointInterval == 0) only triggered when
-        // valid_length was an exact multiple of 256, which never happens
-        // when the starting offset is not aligned (e.g. first batch was
-        // 66 tokens → positions 66, 322, 578 are never multiples of 256).
-        // Saving every round (≤ prefill_length_ tokens apart) ensures we
-        // have checkpoints at ~256-token granularity regardless of offset.
-        if (valid_length > 0 && rounds > 1) {
-            save_state_checkpoint(seq_id, valid_length);
+        // Save a checkpoint when the distance from the nearest existing
+        // checkpoint exceeds checkpoint_min_interval_.  Skip the last
+        // round — the end-of-prefill checkpoint covers it.
+        if (valid_length > 0 && rounds > 1 && round + 1 < rounds) {
+            auto &ckpts = prefill_snapshots_[seq_id].checkpoints;
+            bool should_save = ckpts.empty();
+            if (!should_save) {
+                auto it = ckpts.lower_bound(valid_length);
+                int dist = INT_MAX;
+                if (it != ckpts.end()) {
+                    dist = std::min(dist, it->first - valid_length);
+                }
+                if (it != ckpts.begin()) {
+                    --it;
+                    dist = std::min(dist, valid_length - it->first);
+                }
+                should_save = (dist >= checkpoint_min_interval_);
+            }
+            if (should_save) {
+                save_state_checkpoint(seq_id, valid_length);
+            }
         }
     }
 
@@ -826,11 +901,8 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                effective_tokens.begin(),
                                effective_tokens.end());
 
-        // Always save a checkpoint at the prefill end position so that
-        // the next conversation turn can reuse state up to this point
-        // with minimal gap replay.  Per-round checkpoints are saved
-        // inside the loop when rounds > 1; this covers the single-round
-        // case and also ensures the final position is always checkpointed.
+        // Save a checkpoint at the prefill end position so that the next
+        // conversation turn can reuse state up to this point.
         if (valid_length > 0) {
             save_state_checkpoint(seq_id, valid_length);
         }
@@ -899,6 +971,58 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
             decode_valid_length_[seq_id] = memory_->seq_pos_min(seq_id);
         }
     }
+
+    // ---- Detect state cache gap and redirect to prefill if needed ----
+    // When the state cache has a gap (e.g. KV prefix reused but state
+    // checkpoint is behind target_vl), running decode alone produces wrong
+    // results.  Since decode processes only 1 token per seq, the simplest
+    // fix is to redirect the token through houmo_prefill, which already
+    // handles rollback, gap replay, and checkpoint management.
+    if (!state_cache_names_.empty()) {
+        for (size_t i = 0; i < seq_ids.size(); ++i) {
+            int seq_id = seq_ids[i];
+            int target_vl = decode_valid_length_[seq_id];
+
+            auto snap_iter = prefill_snapshots_.find(seq_id);
+            int state_pos = -1;
+            if (snap_iter != prefill_snapshots_.end() &&
+                snap_iter->second.valid) {
+                state_pos = snap_iter->second.last_processed_pos;
+            }
+
+            if (state_pos >= 0 && state_pos != target_vl) {
+                // State gap detected — route through prefill instead.
+                LLAMA_LOG_INFO(
+                    "%s: state gap seq_id=%d state_pos=%d target_vl=%d, "
+                    "redirecting token to prefill\n",
+                    __func__, seq_id, state_pos, target_vl);
+                std::vector<llama_token> token_vec = {batches[i]};
+                int ret = houmo_prefill(token_vec, seq_id, logits[i]);
+                if (ret != 0) {
+                    return ret;
+                }
+                // prefill updated decode_valid_length_ and snapshot;
+                // done for this seq_id.
+                if (seq_ids.size() == 1) {
+                    return 0;
+                }
+                // Multi-batch: remove this seq from decode and continue.
+                // (rare path — n_decode_batch_ > 1 with gap)
+                seq_ids.erase(seq_ids.begin() + static_cast<ptrdiff_t>(i));
+                batches.erase(batches.begin() + static_cast<ptrdiff_t>(i));
+                logits.erase(logits.begin() + static_cast<ptrdiff_t>(i));
+                --i;
+                continue;
+            }
+
+            if (target_vl == 0) {
+                restore_zero_state(seq_id);
+                state_cache_initialized_[seq_id] = true;
+            }
+        }
+    }
+    // ---- end state cache gap detection ----
+
     if (seq_ids.size() > static_cast<size_t>(n_decode_batch_)) {
         LLAMA_LOG_ERROR("%s: seq_ids.size() > n_decode_batch_ not supported\n",
                         __func__);
@@ -963,8 +1087,7 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
         }
 
         // Append the decoded token to snapshot history and save a checkpoint
-        // at kCheckpointInterval-aligned positions so that the next
-        // conversation can reuse the state accumulated during decode.
+        // when far enough from the nearest existing one.
         {
             auto &snapshot = prefill_snapshots_[seq_ids[i]];
             if (i < batches.size()) {
@@ -972,10 +1095,27 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
             }
             int vl = decode_valid_length_[seq_ids[i]];
             snapshot.last_processed_pos = vl;
-            if (vl > 0 && vl % kCheckpointInterval == 0) {
-                // State cache is up-to-date (decode model wrote back via
-                // SetDevOutput).  Save a checkpoint from the decode-side
-                // state cache.
+
+            bool should_save = false;
+            if (vl > 0) {
+                auto &ckpts = snapshot.checkpoints;
+                if (ckpts.empty()) {
+                    should_save = true;
+                } else {
+                    // Distance to the nearest checkpoint.
+                    auto it = ckpts.lower_bound(vl);
+                    int dist = INT_MAX;
+                    if (it != ckpts.end()) {
+                        dist = std::min(dist, it->first - vl);
+                    }
+                    if (it != ckpts.begin()) {
+                        --it;
+                        dist = std::min(dist, vl - it->first);
+                    }
+                    should_save = (dist >= checkpoint_min_interval_);
+                }
+            }
+            if (should_save) {
                 save_state_checkpoint(seq_ids[i], vl);
                 snapshot.valid = true;
             }
