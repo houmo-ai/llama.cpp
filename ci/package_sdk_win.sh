@@ -97,6 +97,7 @@ package_llama() {
     cp -r include/* "$release_dir/include/" || true
     cp -r ggml/include/* "$release_dir/include/" || true
     cp -r common/*.h* "$release_dir/include/" || true
+    cp -r common/jinja "$release_dir/include/jinja" || true
     cp -r tools/mtmd/mtmd*.h "$release_dir/include/" || true
     cp -r vendor/nlohmann "$release_dir/include/" || true
     cp -r src/llama*.h* "$release_dir/include/" || true
