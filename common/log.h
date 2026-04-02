@@ -44,6 +44,10 @@ void common_log_set_verbosity_thold(int verbosity); // not thread-safe
 
 void common_log_default_callback(enum ggml_log_level level, const char * text, void * user_data);
 
+typedef void (*common_log_cb_t)(enum ggml_log_level level, const char* text, void* data);
+
+void common_set_log_callback(common_log_cb_t log_cb, void* data);
+
 // the common_log uses an internal worker thread to print/write log messages
 // when the worker thread is paused, incoming log messages are discarded
 struct common_log;

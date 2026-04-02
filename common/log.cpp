@@ -386,10 +386,30 @@ void common_log_free(struct common_log * log) {
     delete log;
 }
 
+
+static common_log_cb_t common_log_cb = nullptr;
+static void* common_log_cb_data      = nullptr;
+
 void common_log_add(struct common_log * log, enum ggml_log_level level, const char * fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    log->add(level, fmt, args);
+    if (common_log_cb) {
+        va_list args_copy;
+        va_copy(args_copy, args);
+        char buffer[128];
+        if (const int len = vsnprintf(buffer, 128, fmt, args); len < 128) {
+            common_log_cb(level, buffer, common_log_cb_data);
+        } else {
+            auto *const buffer2 = new char[len + 1];
+            vsnprintf(buffer2, len + 1, fmt, args_copy);
+            buffer2[len] = 0;
+            common_log_cb(level, buffer2, common_log_cb_data);
+            delete[] buffer2;
+        }
+        va_end(args_copy);
+    } else {
+        log->add(level, fmt, args);
+    }
     va_end(args);
 }
 
@@ -443,4 +463,9 @@ void common_log_default_callback(enum ggml_log_level level, const char * text, v
     if (verbosity <= common_log_verbosity_thold) {
         common_log_add(common_log_main(), level, "%s", text);
     }
+}
+
+void common_set_log_callback(const common_log_cb_t log_cb, void* data) {
+    common_log_cb    = log_cb;
+    common_log_cb_data = data;
 }
