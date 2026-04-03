@@ -1,9 +1,19 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
 #include "houmo-llmodel.h"
+
+#pragma pack(push, 1)
+struct VisionCompactHeader {
+    int16_t magic;
+    int16_t nx;
+    int16_t ny;
+    int16_t chunksize;
+};
+#pragma pack(pop)
 
 /**
  * @brief HoumoQwen35LLM is the derived class for Qwen3.5 HouMo model.
@@ -45,7 +55,30 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     int find_and_restore_best_checkpoint(int seq_id, int max_position);
     void restore_zero_state(int seq_id);
 
+    // Vision support
+    int houmo_prefill_vision(std::vector<llama_token> &tokens, int seq_id,
+                             float *logits);
+    void compute_vision_position_ids(
+        int seq_id, int kv_offset,
+        const std::vector<llama_token> &trailing_tokens,
+        std::vector<int32_t> &time_positions,
+        std::vector<int32_t> &height_positions,
+        std::vector<int32_t> &width_positions,
+        int32_t &final_position);
+    void clear_vision_cache(int seq_id);
+
   private:
+    // Vision embedding cache and chunk tracking
+    struct ChunkInfo {
+        int size;       // number of tokens in this chunk
+        bool is_vision; // true = vision embedding, false = text
+        int nx;         // grid width after merge (only for vision)
+        int ny;         // grid height after merge (only for vision)
+    };
+    std::map<int, std::vector<int16_t>> embedding_cache_; // accumulated embeddings (fp16)
+    std::map<int, std::vector<ChunkInfo>> pending_chunks_; // chunk types
+    std::map<int, int32_t> decode_position_offset_;        // position offset for decode after vision
+
     std::map<int32_t, std::vector<uint16_t>> input_embedding_ids_;
     std::string prefill_time_pos_name_;
     std::string prefill_height_pos_name_;

@@ -203,8 +203,7 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
     };
     for (size_t idx = 0; idx < decode_model_->GetInputNum(); ++idx) {
         auto input_name = decode_model_->GetInputName(idx);
-        if (input_name.find("model_layers") != std::string::npos ||
-            input_name.find("conv_cache") != std::string::npos ||
+        if (input_name.find("conv_cache") != std::string::npos ||
             input_name.find("recurrent_state") != std::string::npos) {
             std::string output_name;
             if (input_name.find("conv_cache") != std::string::npos) {
@@ -549,6 +548,33 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                  float *logits) {
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
+
+    // ---- Vision multi-call caching ----
+    // When logits is nullptr, cache text embeddings for later combined processing.
+    if (logits == nullptr) {
+        if (!tokens.empty()) {
+            auto &cache = embedding_cache_[seq_id];
+            size_t cur = cache.size();
+            size_t add_elems = tokens.size() * n_embd_;
+            cache.resize(cur + add_elems);
+            embedding_layer_->get_embedding_batch(
+                tokens.data(), tokens.size(), cache.data() + cur);
+            pending_chunks_[seq_id].push_back(
+                {static_cast<int>(tokens.size()), /*is_vision=*/false, 0, 0});
+            LLAMA_LOG_INFO("%s: cached %zu text tokens for seq_id=%d\n",
+                           __func__, tokens.size(), seq_id);
+        }
+        return 0;
+    }
+
+    // When logits is non-null and we have pending vision/text cache, use vision path.
+    if (!pending_chunks_[seq_id].empty()) {
+        return houmo_prefill_vision(tokens, seq_id, logits);
+    }
+    // ---- End vision caching ----
+
+    // Pure text path — reset vision position offset
+    decode_position_offset_[seq_id] = 0;
 
     // kv_offset: how many tokens the KV cache already has (prefix reuse
     // computed by the outer layer).  The incoming `tokens` do NOT include
@@ -916,10 +942,278 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
 int HoumoQwen35LLM::houmo_prefill(const float *embeddings, int n_tokens,
                                  int seq_id, float *logits) {
-    (void)embeddings;
-    (void)n_tokens;
-    (void)seq_id;
     (void)logits;
+    LLAMA_LOG_INFO("%s: seq_id=%d, n_tokens=%d (vision embedding)\n",
+                   __func__, seq_id, n_tokens);
+
+    if (n_tokens <= 0) {
+        return 0;
+    }
+
+    // Parse compact header to extract grid dimensions
+    VisionCompactHeader header;
+    int embedding_offset = 0;
+    int16_t nx = 0, ny = 0;
+    std::memcpy(&header, embeddings, sizeof(VisionCompactHeader));
+    if (header.magic == 0x1234) {
+        ny = header.ny;
+        nx = header.nx;
+        embedding_offset = sizeof(VisionCompactHeader);
+        LLAMA_LOG_INFO("%s: header magic=0x%04x nx=%d ny=%d chunksize=%d\n",
+                       __func__, header.magic, nx, ny, header.chunksize);
+    }
+
+    // Cache raw embedding data (fp16 / int16 format)
+    const int8_t *ptr = reinterpret_cast<const int8_t *>(embeddings);
+    const size_t data_elems = static_cast<size_t>(n_tokens) * n_embd_;
+    const size_t data_bytes = data_elems * sizeof(int16_t);
+
+    auto &cache = embedding_cache_[seq_id];
+    size_t cur = cache.size();
+    cache.resize(cur + data_elems);
+    std::memcpy(cache.data() + cur, ptr + embedding_offset, data_bytes);
+
+    // Track chunk info
+    pending_chunks_[seq_id].push_back({n_tokens, /*is_vision=*/true, nx, ny});
+
+    return 0;
+}
+
+void HoumoQwen35LLM::clear_vision_cache(int seq_id) {
+    embedding_cache_[seq_id].clear();
+    pending_chunks_[seq_id].clear();
+}
+
+void HoumoQwen35LLM::compute_vision_position_ids(
+    int seq_id, int kv_offset,
+    const std::vector<llama_token> & /*trailing_tokens*/,
+    std::vector<int32_t> &time_positions,
+    std::vector<int32_t> &height_positions,
+    std::vector<int32_t> &width_positions,
+    int32_t &final_position) {
+    (void)seq_id;
+    // Build M-RoPE position IDs matching Python get_rope_index:
+    //   - text chunk: all 3 dims = start_pos + i
+    //   - vision chunk (nx*ny tokens): t = start_pos,
+    //       h = start_pos + y, w = start_pos + x  (y in [0,ny), x in [0,nx))
+    //       then start_pos advances by max(nx, ny)
+    auto &chunks = pending_chunks_[seq_id];
+    int32_t pos = static_cast<int32_t>(kv_offset);
+    for (auto &chunk : chunks) {
+        if (chunk.is_vision && chunk.nx > 0 && chunk.ny > 0) {
+            // Vision tokens: grid layout height=ny, width=nx
+            for (int y = 0; y < chunk.ny; y++) {
+                for (int x = 0; x < chunk.nx; x++) {
+                    time_positions.push_back(pos);
+                    height_positions.push_back(pos + y);
+                    width_positions.push_back(pos + x);
+                }
+            }
+            pos += std::max(chunk.nx, chunk.ny);
+        } else {
+            // Text tokens
+            for (int i = 0; i < chunk.size; i++) {
+                time_positions.push_back(pos + i);
+                height_positions.push_back(pos + i);
+                width_positions.push_back(pos + i);
+            }
+            pos += chunk.size;
+        }
+    }
+    final_position = pos;
+}
+
+int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
+                                          int seq_id, float *logits) {
+    LLAMA_LOG_INFO("%s: seq_id=%d, trailing text tokens=%zu\n",
+                   __func__, seq_id, tokens.size());
+
+    // Append trailing text tokens to cache
+    if (!tokens.empty()) {
+        auto &cache = embedding_cache_[seq_id];
+        size_t cur = cache.size();
+        size_t add_elems = tokens.size() * n_embd_;
+        cache.resize(cur + add_elems);
+        embedding_layer_->get_embedding_batch(
+            tokens.data(), tokens.size(), cache.data() + cur);
+        pending_chunks_[seq_id].push_back(
+            {static_cast<int>(tokens.size()), /*is_vision=*/false, 0, 0});
+    }
+
+    // Compute total tokens
+    size_t total_tokens = 0;
+    for (auto &chunk : pending_chunks_[seq_id]) {
+        total_tokens += chunk.size;
+    }
+
+    int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
+
+    if ((total_tokens + kv_offset) >= static_cast<size_t>(context_length_)) {
+        LLAMA_LOG_ERROR("%s: total %zu + kv_offset %d >= context_length %d\n",
+                        __func__, total_tokens, kv_offset, context_length_);
+        clear_vision_cache(seq_id);
+        return 1;
+    }
+
+    // Reset state for fresh vision prefill
+    if (!state_cache_names_.empty()) {
+        state_cache_initialized_[seq_id] = false;
+        auto snap_iter = prefill_snapshots_.find(seq_id);
+        if (snap_iter != prefill_snapshots_.end()) {
+            snap_iter->second.valid = false;
+            snap_iter->second.checkpoints.clear();
+            snap_iter->second.last_processed_pos = 0;
+        }
+    }
+
+    // Compute M-RoPE position IDs
+    std::vector<int32_t> time_pos_ids, height_pos_ids, width_pos_ids;
+    int32_t final_pos = 0;
+    compute_vision_position_ids(seq_id, kv_offset, tokens,
+                                time_pos_ids, height_pos_ids, width_pos_ids,
+                                final_pos);
+
+    // The position offset for decode = (final M-RoPE position) - (total tokens + kv_offset)
+    // This is the "rope_deltas" equivalent from Python
+    decode_position_offset_[seq_id] = final_pos - static_cast<int32_t>(total_tokens) - kv_offset;
+    LLAMA_LOG_INFO("%s: total_tokens=%zu kv_offset=%d final_pos=%d decode_position_offset=%d\n",
+                   __func__, total_tokens, kv_offset, final_pos,
+                   decode_position_offset_[seq_id]);
+
+    // Pad position IDs to full prefill rounds
+    size_t rounds = (total_tokens + prefill_length_ - 1) / prefill_length_;
+    size_t padded_size = rounds * prefill_length_;
+    time_pos_ids.resize(padded_size, time_pos_ids.empty() ? 0 : time_pos_ids.back());
+    height_pos_ids.resize(padded_size, height_pos_ids.empty() ? 0 : height_pos_ids.back());
+    width_pos_ids.resize(padded_size, width_pos_ids.empty() ? 0 : width_pos_ids.back());
+
+    int32_t valid_length = kv_offset;
+    int32_t current_length = 0;
+
+    auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
+    auto &emb_cache = embedding_cache_[seq_id];
+
+    for (size_t round = 0; round < rounds; ++round) {
+        size_t round_start = round * prefill_length_;
+        size_t remaining = total_tokens > round_start ? total_tokens - round_start : 0;
+        current_length = remaining >= static_cast<size_t>(prefill_length_)
+                             ? prefill_length_
+                             : static_cast<int>(remaining);
+
+        // Copy cached embeddings into prefill input
+        memset(input_data.Data(), 0, input_data.MemSize());
+        size_t emb_start = round_start * n_embd_;
+        size_t copy_bytes = current_length * n_embd_ * sizeof(int16_t);
+        std::memcpy(input_data.Data(), emb_cache.data() + emb_start, copy_bytes);
+
+        // Set valid_length and current_length
+        if (!prefill_valid_length_name_.empty()) {
+            auto vl = prefill_input_map_.at(prefill_valid_length_name_);
+            set_input_data(vl, n_prefill_batch_, valid_length);
+            prefill_model_->SetInput(prefill_valid_length_name_, vl);
+        }
+        if (!prefill_current_length_name_.empty()) {
+            auto cl = prefill_input_map_.at(prefill_current_length_name_);
+            set_input_data(cl, n_prefill_batch_, current_length);
+            prefill_model_->SetInput(prefill_current_length_name_, cl);
+        }
+
+        // Set 3D position IDs (sub-slice for this round)
+        size_t pos_offset = round_start;
+        if (!prefill_time_pos_name_.empty()) {
+            auto tensor = prefill_input_map_.at(prefill_time_pos_name_);
+            std::vector<int32_t> slice(time_pos_ids.begin() + pos_offset,
+                                       time_pos_ids.begin() + pos_offset + prefill_length_);
+            set_input_data(tensor, slice);
+            prefill_model_->SetInput(prefill_time_pos_name_, tensor);
+        }
+        if (!prefill_height_pos_name_.empty()) {
+            auto tensor = prefill_input_map_.at(prefill_height_pos_name_);
+            std::vector<int32_t> slice(height_pos_ids.begin() + pos_offset,
+                                       height_pos_ids.begin() + pos_offset + prefill_length_);
+            set_input_data(tensor, slice);
+            prefill_model_->SetInput(prefill_height_pos_name_, tensor);
+        }
+        if (!prefill_width_pos_name_.empty()) {
+            auto tensor = prefill_input_map_.at(prefill_width_pos_name_);
+            std::vector<int32_t> slice(width_pos_ids.begin() + pos_offset,
+                                       width_pos_ids.begin() + pos_offset + prefill_length_);
+            set_input_data(tensor, slice);
+            prefill_model_->SetInput(prefill_width_pos_name_, tensor);
+        }
+        if (!prefill_linear_mask_name_.empty()) {
+            auto linear_mask = prefill_input_map_.at(prefill_linear_mask_name_);
+            set_linear_attn_mask(linear_mask, prefill_length_, current_length);
+            prefill_model_->SetInput(prefill_linear_mask_name_, linear_mask);
+        }
+
+        PERF_START(PREFILL_SETINPUT_ONCE);
+        if (round == 0) {
+            for (const auto &pair : lora_map) {
+                if (prefill_input_map_.count(pair.first) > 0) {
+                    auto lora_mask = prefill_input_map_[pair.first];
+                    lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
+                                                           lora_mask_float_.MemSize());
+                    lora_mask_float_.CastTo(lora_mask);
+                    prefill_model_->SetInput(pair.first, lora_mask);
+                }
+            }
+        }
+        prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
+        if (round == 0) {
+            set_state_cache_for_prefill(seq_id);
+            set_kv_cache_for_prefill(seq_id);
+        }
+        PERF_STOP(PREFILL_SETINPUT_ONCE);
+
+        PERF_START(PREFILL_RUN_ONCE);
+        prefill_model_->Run();
+        prefill_model_->Sync();
+        PERF_STOP(PREFILL_RUN_ONCE);
+
+        if (abort_callback_ != nullptr && abort_callback_(abort_callback_data_)) {
+            LLAMA_LOG_INFO("%s: aborted seq_id=%d\n", __func__, seq_id);
+            clear_vision_cache(seq_id);
+            return 2;
+        }
+
+        valid_length += current_length;
+    }
+
+    decode_valid_length_[seq_id] = kv_offset + static_cast<int32_t>(total_tokens);
+
+    PERF_START(PREFILL_GETOUTPUT);
+    tcim::Tensor prefill_output_data =
+        prefill_model_->GetOutput(prefill_output_names_[0]);
+    auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
+    prefill_output_data.CastTo(prefill_output_float);
+    PERF_STOP(PREFILL_GETOUTPUT);
+    if (logits != nullptr) {
+        memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+    }
+
+    if (memory_) {
+        memory_->seq_add(seq_id, 0, 0, static_cast<int32_t>(total_tokens));
+    }
+
+    // Update snapshot (vision prefill doesn't support prefix reuse yet)
+    {
+        auto &snapshot = prefill_snapshots_[seq_id];
+        snapshot.tokens.clear();
+        // store a sentinel for the vision portion so history length matches
+        for (size_t i = 0; i < total_tokens; i++) {
+            snapshot.tokens.push_back(0);
+        }
+        if (valid_length > 0) {
+            save_state_checkpoint(seq_id, valid_length);
+        }
+        snapshot.last_processed_pos = valid_length;
+        snapshot.valid = true;
+    }
+
+    clear_vision_cache(seq_id);
+    LLAMA_LOG_INFO("%s: done seq_id=%d total_tokens=%zu\n",
+                   __func__, seq_id, total_tokens);
     return 0;
 }
 
@@ -931,7 +1225,8 @@ int HoumoQwen35LLM::set_decode_rope_and_mask(const std::vector<int> &seq_ids) {
             batch_id = 0;
         }
         int valid_length = decode_valid_length_[seq_id];
-        auto position_ids = build_rope_position_ids(valid_length, 1);
+        int position = valid_length + decode_position_offset_[seq_id];
+        auto position_ids = build_rope_position_ids(position, 1);
         auto time_name = resolve_batch_name(decode_time_pos_names_, batch_id);
         auto height_name = resolve_batch_name(decode_height_pos_names_, batch_id);
         auto width_name = resolve_batch_name(decode_width_pos_names_, batch_id);

@@ -4054,9 +4054,23 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
             return ctx->model.mm_1_b->ne[0];
         case PROJECTOR_TYPE_QWEN3VL:
             // main path + deepstack paths
+            // ugly..FIXME: @guoxing.xu
             if (clip_is_hmm(ctx)) {
-                // 4=3+1, embedding + three deepstack_embeding
-                return ctx->model.hparams.projection_dim * 4;
+                // gguf general.basename 是否是qwen3.5
+                if (ctx->ctx_gguf == nullptr) {
+                    return ctx->model.hparams.projection_dim * 4;
+                }
+                int id = gguf_find_key(ctx->ctx_gguf.get(),"general.basename"); 
+                LOG_INF("gguf_find_key for general.basename returns id=%d\n", id);
+                if (id < 0) {
+                    return ctx->model.hparams.projection_dim * 4;
+                }
+                if (std::string(gguf_get_val_str(ctx->ctx_gguf.get(), id)).find("Qwen3.5") != std::string::npos) {
+                    return ctx->model.hparams.projection_dim;
+                } else {
+                    //qwen3 vl 4=3+1, embedding + three deepstack_embeding
+                    return ctx->model.hparams.projection_dim * 4;
+                }
             }
             return ctx->model.mm_1_b->ne[0] * (1 + ctx->model.n_deepstack_layers);
         case PROJECTOR_TYPE_GEMMA3:
