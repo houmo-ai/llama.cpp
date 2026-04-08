@@ -112,70 +112,6 @@ static const char * gguf_type_name_short(enum gguf_type type) {
     }
 }
 
-static bool gguf_ex_write(const std::string & fname) {
-    struct gguf_context * ctx = gguf_init_empty();
-
-    gguf_set_val_u8 (ctx, "some.parameter.uint8", 0x12);
-    gguf_set_val_i8 (ctx, "some.parameter.int8", -0x13);
-    gguf_set_val_u16(ctx, "some.parameter.uint16", 0x1234);
-    gguf_set_val_i16(ctx, "some.parameter.int16", -0x1235);
-    gguf_set_val_u32(ctx, "some.parameter.uint32", 0x12345678);
-    gguf_set_val_i32(ctx, "some.parameter.int32", -0x12345679);
-    gguf_set_val_f32(ctx, "some.parameter.float32", 0.123456789f);
-    gguf_set_val_u64(ctx, "some.parameter.uint64", 0x123456789abcdef0ull);
-    gguf_set_val_i64(ctx, "some.parameter.int64", -0x123456789abcdef1ll);
-    gguf_set_val_f64(ctx, "some.parameter.float64", 0.1234567890123456789);
-    gguf_set_val_bool(ctx, "some.parameter.bool", true);
-    gguf_set_val_str (ctx, "some.parameter.string", "hello world");
-
-    gguf_set_arr_data(ctx, "some.parameter.arr.i16", GGUF_TYPE_INT16, std::vector<int16_t>{ 1, 2, 3, 4, }.data(), 4);
-    gguf_set_arr_data(ctx, "some.parameter.arr.f32", GGUF_TYPE_FLOAT32, std::vector<float>{ 3.145f, 2.718f, 1.414f, }.data(), 3);
-    gguf_set_arr_str (ctx, "some.parameter.arr.str", std::vector<const char *>{ "hello", "world", "!" }.data(), 3);
-
-    struct ggml_init_params params = {
-        /*.mem_size =*/ 128ull*1024ull*1024ull,
-        /*.mem_buffer =*/ NULL,
-        /*.no_alloc =*/ false,
-    };
-
-    struct ggml_context * ctx_data = ggml_init(params);
-
-    const int n_tensors = 10;
-
-    // tensor infos
-    for (int i = 0; i < n_tensors; ++i) {
-        const std::string name = "tensor_" + to_string(i);
-
-        int64_t ne[GGML_MAX_DIMS] = { 1 };
-        int32_t n_dims = rand() % GGML_MAX_DIMS + 1;
-
-        for (int j = 0; j < n_dims; ++j) {
-            ne[j] = rand() % 10 + 1;
-        }
-
-        struct ggml_tensor * cur = ggml_new_tensor(ctx_data, GGML_TYPE_F32, n_dims, ne);
-        ggml_set_name(cur, name.c_str());
-
-        {
-            float * data = (float *) cur->data;
-            for (int j = 0; j < ggml_nelements(cur); ++j) {
-                data[j] = 100 + i;
-            }
-        }
-
-        gguf_add_tensor(ctx, cur);
-    }
-
-    gguf_write_to_file(ctx, fname.c_str(), false);
-
-    printf("%s: wrote file '%s'\n", __func__, fname.c_str());
-
-    ggml_free(ctx_data);
-    gguf_free(ctx);
-
-    return true;
-}
-
 // 读取并按照 gguf-dump 风格打印
 static bool gguf_ex_read_0(const std::string & fname) {
     struct gguf_init_params params = {
@@ -243,26 +179,79 @@ static bool gguf_ex_read_0(const std::string & fname) {
     return true;
 }
 
+// 按 key 读取对应值
+static bool gguf_ex_read_key(const std::string & fname, const std::string & key) {
+    struct gguf_init_params params = {
+        /*.no_alloc = */ false,
+        /*.ctx = */ NULL,
+    };
+
+    struct gguf_context * ctx = gguf_init_from_file(fname.c_str(), params);
+
+    if (!ctx) {
+        fprintf(stderr, "%s: failed to load '%s'\n", __func__, fname.c_str());
+        return false;
+    }
+
+    const int64_t key_id = gguf_find_key(ctx, key.c_str());
+    if (key_id < 0) {
+        fprintf(stderr, "%s: key not found: %s\n", __func__, key.c_str());
+        gguf_free(ctx);
+        return false;
+    }
+
+    const std::string val = gguf_kv_to_str(ctx, key_id, false);
+    printf("%s\n", val.c_str());
+
+    gguf_free(ctx);
+    return true;
+}
+
 int main(int argc, char ** argv) {
     std::setlocale(LC_NUMERIC, "C");
 
-    if (argc < 3) {
-        printf("usage: %s data.gguf r|w\n", argv[0]);
+    if (argc < 2) {
+        printf("usage: %s data.gguf [r] [-k keyword]\n", argv[0]);
+        printf("default mode: r\n");
         printf("r: read and dump data.gguf file (print key-value pairs and tensor info)\n");
-        printf("w: write data.gguf file\n");
+        printf("r -k keyword: print the value of the specified keyword\n");
         return -1;
     }
 
-    srand(123456);
-
     const std::string fname(argv[1]);
-    const std::string mode (argv[2]);
+    std::string mode = "r";
+    std::string keyword;
 
-    GGML_ASSERT((mode == "r" || mode == "w") && "mode must be r or w");
+    int argi = 2;
+    if (argc > argi && std::string(argv[argi]) == "r") {
+        mode = argv[argi];
+        argi++;
+    } else if (argc > argi && std::string(argv[argi]) == "w") {
+        fprintf(stderr, "error: w mode is not supported\n");
+        return -1;
+    }
 
-    if (mode == "w") {
-        GGML_ASSERT(gguf_ex_write(fname) && "failed to write gguf file");
-    } else if (mode == "r") {
+    while (argi < argc) {
+        const std::string arg = argv[argi];
+        if (arg == "-k") {
+            if (argi + 1 >= argc) {
+                fprintf(stderr, "error: missing value after -k\n");
+                return -1;
+            }
+            keyword = argv[argi + 1];
+            argi += 2;
+            continue;
+        }
+
+        fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
+        return -1;
+    }
+
+    GGML_ASSERT(mode == "r" && "mode must be r");
+
+    if (!keyword.empty()) {
+        GGML_ASSERT(gguf_ex_read_key(fname, keyword) && "failed to read keyword from gguf file");
+    } else {
         GGML_ASSERT(gguf_ex_read_0(fname) && "failed to read gguf file");
     }
 

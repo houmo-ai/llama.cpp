@@ -207,6 +207,9 @@ void HouMoLLModel::Impl::prefill_input_init() {
     if (prefill_model_ == nullptr) {
         return;
     }
+    if (prefill_input_map_.size() > 0) {
+        return;
+    }
     for (size_t idx = 0; idx < prefill_model_->GetInputNum(); idx++) {
         auto input_name = prefill_model_->GetInputName(idx);
         LLAMA_LOG_DEBUG("%s: prefill input_name: %s\n", __func__,
@@ -242,6 +245,9 @@ void HouMoLLModel::Impl::prefill_output_init() {
     if (prefill_model_ == nullptr) {
         return;
     }
+    if (prefill_output_map_.size() > 0) {
+        return;
+    }
     int output_num = prefill_model_->GetOutputNum();
     for (int idx = 0; idx < output_num; idx++) {
         auto output_name = prefill_model_->GetOutputName(idx);
@@ -261,6 +267,10 @@ void HouMoLLModel::Impl::decode_input_init() {
     if (decode_model_ == nullptr) {
         return;
     }
+    if (decode_input_map_.size() > 0) {
+        return;
+    }
+
     size_t input_num_decode = decode_model_->GetInputNum();
     for (size_t idx = 0; idx < input_num_decode; idx++) {
         auto input_name = decode_model_->GetInputName(idx);
@@ -299,6 +309,9 @@ void HouMoLLModel::Impl::decode_input_init() {
 void HouMoLLModel::Impl::decode_output_init() {
     // 填充decode 的output
     if (decode_model_ == nullptr) {
+        return;
+    }
+    if (decode_output_map_.size() > 0) {
         return;
     }
     int output_num_decode = decode_model_->GetOutputNum();
@@ -518,6 +531,10 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
     int kv_cache_count = n_blocks_;
     if (arch_name.find("qwen35") != std::string::npos) {
         kv_cache_count = n_blocks_ / 4;
+    }
+    if (size != kv_cache_.size()) {
+        LLAMA_LOG_INFO("%s: initialize kv cache, size = %d\n", __func__, size);
+        kv_cache_.clear();
     }
     for (int i = 0; i < size; i++) {
         kv_cache_item item;

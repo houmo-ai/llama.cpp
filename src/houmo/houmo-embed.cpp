@@ -53,6 +53,9 @@ void HouMoEmbed::houmo_init(houmo_memory_i *memory, int seq_max,
     abort_callback_data_ = abort_callback_data;
     abort_callback_ = abort_callback;
     size_t input_num = embed_model_->GetInputNum();
+    if (input_map_.size() > 0) {
+        return;
+    }
     for (size_t idx = 0; idx < input_num; idx++) {
         auto input_name = embed_model_->GetInputName(idx);
         auto input_info = embed_model_->GetInputInfo(input_name).AsContiguous();

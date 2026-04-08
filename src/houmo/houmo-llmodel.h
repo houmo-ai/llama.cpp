@@ -27,7 +27,7 @@ class HouMoLLModel {
     ~HouMoLLModel();
 
     bool houmo_load(llama_model_loader & ml, std::vector<int> device_ids);
-    void houmo_init(houmo_memory_i *memory, int seq_max = 4,
+    void houmo_init(houmo_memory_i *memory, int seq_max = 8,
           ggml_abort_callback abort_callback = nullptr,
           void *abort_callback_data = nullptr);
     int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
@@ -225,7 +225,7 @@ protected:
   std::string kBlockCountEx = ".block_count";
   std::string kSpliteCount = "split.tensors.count";
   std::string kHmmInfo = "hmm.info";
-  int kSeqMax = 4; // maximum sequence number for single-card model
+  int kSeqMax = 8; // maximum sequence number for single-card model
   int device_num_ = 1;
   std::vector<int> device_ids_ = {0};
   bool enable_lazy_mode_ = false;
