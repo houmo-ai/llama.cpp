@@ -34,18 +34,20 @@ std::vector<uint16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
         // 仅循环new_cache_length次
         for (int i = 0; i < new_cache_length; ++i) {
             if (is_local) {
-                // start_idx = i if old_cache_length + i > window else 0
-                int start_idx = (old_cache_length + i > sliding_window_) ? i : 0;
-                // end_idx = min(start_idx + window, old_cache_length + i + 1)
-                int end_idx = std::min(start_idx + sliding_window_, old_cache_length + i + 1);
-                // LLAMA_LOG_DEBUG("%s: i = %d, start_idx = %d, end_idx = %d\n",
-                //                __func__, i, start_idx, end_idx);
+                // 对应 Python _gen_mask_v2(attention_max_length=sliding_window_):
+                //   b_valid_length = min(valid_length, attention_max_length - 1)
+                //   causal:  tril(diagonal=b_valid)         → visible if j <= i + b_valid
+                //   window:  tril(diagonal=b_valid - sw)    → masked  if j <= i + b_valid - sw
+                //   combined visible: i + b_valid - sw + 1 <= j <= i + b_valid
+                int b_valid = std::min(old_cache_length, sliding_window_ - 1);
+                int start_idx = std::max(0, i + b_valid - sliding_window_ + 1);
+                int end_idx   = std::min(width - 1, i + b_valid);
+                LLAMA_LOG_DEBUG("%s: i = %d, b_valid = %d, start_idx = %d, end_idx = %d\n",
+                               __func__, i, b_valid, start_idx, end_idx);
 
-                for (int j = start_idx; j < end_idx; ++j) {
-                    if (j >= width)
-                        break;
+                for (int j = start_idx; j <= end_idx; ++j) {
                     int idx = b * 1 * fill_length * width + i * width + j;
-                    mask_tensor[idx] = 0.0f;
+                    mask_tensor[idx] = 0;
                 }
             } else {
                 // -------- 全局掩码（global mask） --------
@@ -223,10 +225,6 @@ int HouMoGPTOSS::set_attentions_for_prefill(int current_length, int valid_length
     std::string name = prefill_model_->GetInputName(3);
     auto& local_mask_input_data = prefill_input_map_.at(name);
     auto prefill_local_mask_host = generate_mask_f16(1, current_length, valid_length, true);
-    // LLAMA_LOG_DEBUG("%s: current_length = %d, valid_length = %d, "
-    //                "prefill_local_mask_host.size() = %zu\n",
-    //                __func__, current_length, valid_length,
-    //                prefill_local_mask_host.size());
     local_mask_input_data.Buffer().CopyFromHost(
         prefill_local_mask_host.data(), local_mask_input_data.MemSize());
     prefill_model_->SetInput(name, local_mask_input_data);
