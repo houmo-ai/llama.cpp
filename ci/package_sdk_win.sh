@@ -113,9 +113,7 @@ package_llama() {
 
     cp third_party/houmo/lib/*.dll "$release_dir/bin/" || true
     # not check.
-    cp -r third_party/houmo/lib/bin "$release_dir/bin/"
-    cp third_party/libtorch/lib/*.dll* "$release_dir/bin/" || true
-
+    cp third_party/houmo/bin/readhmm.exe "$release_dir/scripts/" || true
     # 复制可执行文件
     cp build/bin/Release/llama-server* "$release_dir/bin/" || true
     cp build/bin/Release/llama-gguf-split* "$release_dir/bin/" || true
@@ -123,7 +121,6 @@ package_llama() {
     cp tools/server/qwen3_nonthinking.jinja "$release_dir/bin/" || true
     cp build/bin/Release/llama-gguf* "$release_dir/bin/" || true
     cp build/bin/Release/llama-bench* "$release_dir/bin/" || true
-    cp ci/run_llama_server_win.* "$release_dir/bin/" || true
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
     cp requirements/requirements-convert_hm_to_gguf.txt "$release_dir/scripts/" || true

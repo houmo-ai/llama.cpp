@@ -532,7 +532,7 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
     if (arch_name.find("qwen35") != std::string::npos) {
         kv_cache_count = n_blocks_ / 4;
     }
-    if (size != kv_cache_.size()) {
+    if ((size_t)size != kv_cache_.size()) {
         LLAMA_LOG_INFO("%s: initialize kv cache, size = %d\n", __func__, size);
         kv_cache_.clear();
     }
@@ -613,7 +613,7 @@ int HouMoLLModel::Impl::set_input_for_decode(std::vector<llama_token> &batches,
     try {
         embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
     } catch (...) {
-        std::cerr << "error get embedding batch\n";
+        LLAMA_LOG_ERROR("%s: failed to get embedding batch\n", __func__);
         return -1;
     }
     decode_model_->SetInput(decode_model_->GetInputName(0), input_data);
