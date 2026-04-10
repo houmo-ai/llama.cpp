@@ -941,6 +941,7 @@ static struct llama_model * llama_model_load_from_file_impl(
             switch (ggml_backend_dev_type(dev)) {
                 case GGML_BACKEND_DEVICE_TYPE_CPU:
                 case GGML_BACKEND_DEVICE_TYPE_ACCEL:
+                case GGML_BACKEND_DEVICE_TYPE_HM_ACCEL:
                     // skip CPU backends since they are handled separately
                     break;
 
