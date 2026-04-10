@@ -99,6 +99,9 @@ struct mtmd_context_params {
     // callback function passed over to mtmd proper
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
+
+    // NULL-terminated list of devices to use for offloading (if NULL, index 0 are used)
+    ggml_backend_dev_t * devices;
 };
 
 MTMD_API const char * mtmd_default_marker(void);
@@ -224,7 +227,7 @@ MTMD_API int32_t mtmd_encode_chunk(mtmd_context * ctx,
 
 // get output embeddings from the last encode pass
 // the reading size (in bytes) is equal to:
-// llama_model_n_embd_inp(model) * mtmd_input_chunk_get_n_tokens(chunk) * sizeof(float)
+// llama_model_n_embd(model) * mtmd_input_chunk_get_n_tokens(chunk) * sizeof(float)
 MTMD_API float * mtmd_get_output_embd(mtmd_context * ctx);
 
 // Set callback for all future logging events.
@@ -235,6 +238,10 @@ MTMD_API void mtmd_log_set(ggml_log_callback log_callback, void * user_data);
 
 // test function, to be used in test-mtmd-c-api.c
 MTMD_API mtmd_input_chunks * mtmd_test_create_input_chunks(void);
+
+// add by guoxing.xu only for HOUMO
+MTMD_API int32_t mtmd_vision_height(const mtmd_context * ctx);
+MTMD_API int32_t mtmd_vision_width(const mtmd_context * ctx);
 
 #ifdef __cplusplus
 } // extern "C"

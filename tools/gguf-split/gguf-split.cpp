@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cinttypes>
 #include <climits>
-#include <clocale>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -193,12 +192,12 @@ static void zeros(std::ofstream & file, size_t n) {
 }
 
 struct split_strategy {
-    const split_params params;
+    split_params params;
     std::ifstream & f_input;
     struct gguf_context * ctx_gguf;
     struct ggml_context * ctx_meta = NULL;
-    const int n_tensors;
-
+    int n_tensors;
+    bool is_hmm = false;
     // one ctx_out per one output file
     std::vector<struct gguf_context *> ctx_outs;
 
@@ -214,7 +213,22 @@ struct split_strategy {
         ctx_gguf(ctx_gguf),
         ctx_meta(ctx_meta),
         n_tensors(gguf_get_n_tensors(ctx_gguf)) {
-
+        is_hmm = gguf_find_key(ctx_gguf, "is_hmm") != -1;
+        if (is_hmm) {
+            this->params.n_split_tensors = 1;
+            this->params.mode = MODE_TENSOR;
+            // 跳过json和txt文件
+            int skip_count = 0;
+            for (int i = 0; i < n_tensors; ++i) {
+                std::string tensor_name = gguf_get_tensor_name(ctx_gguf, i);
+                if (is_hmm && (tensor_name.find(".json") != std::string::npos ||
+                            tensor_name.find(".txt") != std::string::npos ||
+                            tensor_name.find(".jinja") != std::string::npos)) {
+                    skip_count++;
+                }
+            }
+            n_tensors -= skip_count;
+        }
         // because we need to know list of tensors for each file in advance, we will build all the ctx_out for all output splits
         int i_split = -1;
         struct gguf_context * ctx_out = NULL;
@@ -248,6 +262,7 @@ struct split_strategy {
         // process tensors one by one
         size_t curr_tensors_size = 0; // current size by counting only tensors size (without metadata)
         for (int i = 0; i < n_tensors; ++i) {
+            std::string tensor_name = gguf_get_tensor_name(ctx_gguf, i);
             struct ggml_tensor * t = ggml_get_tensor(ctx_meta, gguf_get_tensor_name(ctx_gguf, i));
             // calculate the "imaginary" size = the current size + next tensor size
             size_t n_bytes = GGML_PAD(ggml_nbytes(t), GGUF_DEFAULT_ALIGNMENT);
@@ -265,6 +280,9 @@ struct split_strategy {
         ctx_outs.push_back(ctx_out);
 
         // set the correct n_split for all ctx_out
+        if (is_hmm) {
+            return;
+        }
         for (auto & ctx : ctx_outs) {
             gguf_set_val_u16(ctx, LLM_KV_SPLIT_COUNT, ctx_outs.size());
         }
@@ -320,8 +338,10 @@ struct split_strategy {
 
             // write metadata
             std::vector<uint8_t> data(gguf_get_meta_size(ctx_out));
-            gguf_get_meta_data(ctx_out, data.data());
-            fout.write((const char *)data.data(), data.size());
+            if (!is_hmm || (is_hmm && i_split == 0)) {
+                gguf_get_meta_data(ctx_out, data.data());
+                fout.write((const char *)data.data(), data.size());
+            }
 
             // write tensors
             for (int i = 0; i < gguf_get_n_tensors(ctx_out); ++i) {
@@ -337,7 +357,9 @@ struct split_strategy {
 
                 // copy tensor from input to output file
                 copy_file_to_file(f_input, fout, offset, n_bytes);
-                zeros(fout, GGML_PAD(n_bytes, GGUF_DEFAULT_ALIGNMENT) - n_bytes);
+                if (!is_hmm || (is_hmm && i_split == 0)) {
+                    zeros(fout, GGML_PAD(n_bytes, GGUF_DEFAULT_ALIGNMENT) - n_bytes);
+                }
             }
 
             printf("done\n");
@@ -568,8 +590,6 @@ static void gguf_merge(const split_params & split_params) {
 }
 
 int main(int argc, const char ** argv) {
-    std::setlocale(LC_NUMERIC, "C");
-
     split_params params;
     split_params_parse(argc, argv, params);
 

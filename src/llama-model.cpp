@@ -15,7 +15,7 @@
 #include "ggml-cpp.h"
 
 #include "models/models.h"
-
+#include "houmo-llmodel.h"
 #include <algorithm>
 #include <cassert>
 #include <cfloat>
@@ -7573,6 +7573,20 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     }
 
     return true;
+}
+
+bool llama_model::load_hmmodels(llama_model_loader & ml) {
+    if (hm_llmodel == nullptr) {
+        hm_llmodel = std::make_shared<HouMoLLModel>();
+    }
+    std::vector<int> device_ids;
+    for (auto device: devices) {
+        if (ggml_backend_dev_name(device)) {
+            int id = std::stoi(ggml_backend_dev_name(device));
+            device_ids.push_back(id);
+        }
+    }
+    return hm_llmodel->houmo_load(ml, device_ids);
 }
 
 std::string llama_model::arch_name() const {

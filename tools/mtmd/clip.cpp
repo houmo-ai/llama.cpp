@@ -1002,7 +1002,8 @@ struct clip_model_loader {
 
         const bool is_vision = model.modality == CLIP_MODALITY_VISION;
         const bool is_audio  = model.modality == CLIP_MODALITY_AUDIO;
-
+        // 获取is_hmm 表示
+        get_bool("is_hmm", hparams.is_hmm, false);
         // other hparams
         {
             const char * prefix = is_vision ? "vision" : "audio";
@@ -2170,11 +2171,13 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
         if (loader.has_vision) {
             ctx_vision = new clip_ctx(ctx_params);
             loader.load_hparams(ctx_vision->model, CLIP_MODALITY_VISION);
-            loader.load_tensors(*ctx_vision);
-            if (ctx_params.warmup) {
-                loader.warmup(*ctx_vision);
-            }
+            if (!clip_is_hmm(ctx_vision)) {
 
+                loader.load_tensors(*ctx_vision);
+                if (ctx_params.warmup) {
+                    loader.warmup(*ctx_vision);
+                }
+            }
             // TODO: we don't support audio for Gemma 3N, but GGUF contains audio tensors
             // we can remove this check when we implement audio support for Gemma 3N
             skip_audio = ctx_vision->model.proj_type == PROJECTOR_TYPE_GEMMA3NV;
@@ -2660,6 +2663,9 @@ struct llava_uhd {
         // no pinpoints, dynamically calculate the grid size (e.g. minicpmv)
 
         auto best_size    = get_best_resize(original_size, slice_size, patch_size, !has_slices);
+        if (clip_is_hmm(ctx)) {
+            best_size = clip_image_size{slice_size, slice_size};
+        }
         res.overview_size = best_size;
 
         {
@@ -2670,6 +2676,9 @@ struct llava_uhd {
 
             auto best_grid   = get_best_grid(max_slice_nums, multiple, log_ratio);
             auto refine_size = get_refine_size(original_size, best_grid, slice_size, patch_size, true);
+            if (clip_is_hmm(ctx)) {
+                refine_size = clip_image_size{slice_size * best_grid.width, slice_size * best_grid.height};
+            }
             res.grid_size    = best_grid;
             res.refined_size = refine_size;
 
@@ -2991,6 +3000,15 @@ bool clip_image_preprocess(struct clip_ctx * ctx, const clip_image_u8 * img, str
                 for (size_t i = 0; i < imgs.size(); ++i) {
                     // clip_image_save_to_bmp(*imgs[i], "slice_" + std::to_string(i) + ".bmp");
                     clip_image_f32_ptr res(clip_image_f32_init());
+                    if (clip_is_hmm(ctx)) {
+                        // hmm，not mean & std
+                        params.image_mean [0] = 0.0f;
+                        params.image_mean [1] = 0.0f;
+                        params.image_mean [2] = 0.0f;
+                        params.image_std [0] = 1.0f;
+                        params.image_std [1] = 1.0f;
+                        params.image_std [2] = 1.0f;
+                    } 
                     normalize_image_u8_to_f32(*imgs[i], *res, params.image_mean, params.image_std);
                     res_imgs->entries.push_back(std::move(res));
                 }
@@ -4019,16 +4037,41 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
         case PROJECTOR_TYPE_MLP_NORM:
             return ctx->model.mm_3_b->ne[0];
         case PROJECTOR_TYPE_MINICPMV:
+            if (clip_is_hmm(ctx)) {
+                return ctx->model.hparams.projection_dim;
+            }
             return ctx->model.mm_model_proj->ne[0];
         case PROJECTOR_TYPE_GLM_EDGE:
             return ctx->model.mm_model_mlp_3_w->ne[1];
         case PROJECTOR_TYPE_QWEN2VL:
         case PROJECTOR_TYPE_QWEN25VL:
+            if (clip_is_hmm(ctx)) {
+                return ctx->model.hparams.projection_dim;
+            }
+            return ctx->model.mm_1_b->ne[0];
         case PROJECTOR_TYPE_JANUS_PRO:
         case PROJECTOR_TYPE_YOUTUVL:
             return ctx->model.mm_1_b->ne[0];
         case PROJECTOR_TYPE_QWEN3VL:
             // main path + deepstack paths
+            // ugly..FIXME: @guoxing.xu
+            if (clip_is_hmm(ctx)) {
+                // gguf general.basename 是否是qwen3.5
+                if (ctx->ctx_gguf == nullptr) {
+                    return ctx->model.hparams.projection_dim * 4;
+                }
+                int id = gguf_find_key(ctx->ctx_gguf.get(),"general.basename"); 
+                LOG_INF("gguf_find_key for general.basename returns id=%d\n", id);
+                if (id < 0) {
+                    return ctx->model.hparams.projection_dim * 4;
+                }
+                if (std::string(gguf_get_val_str(ctx->ctx_gguf.get(), id)).find("Qwen3.5") != std::string::npos) {
+                    return ctx->model.hparams.projection_dim;
+                } else {
+                    //qwen3 vl 4=3+1, embedding + three deepstack_embeding
+                    return ctx->model.hparams.projection_dim * 4;
+                }
+            }
             return ctx->model.mm_1_b->ne[0] * (1 + ctx->model.n_deepstack_layers);
         case PROJECTOR_TYPE_GEMMA3:
         case PROJECTOR_TYPE_GEMMA3NV:
@@ -4113,6 +4156,9 @@ bool clip_encode_float_image (struct clip_ctx * ctx, int n_threads, float * img,
     clip_img.ny = h;
     clip_image_encode(ctx, n_threads, &clip_img, vec);
     return true;
+}
+bool clip_is_hmm(const struct clip_ctx * ctx) {
+    return ctx->model.hparams.is_hmm;
 }
 
 //

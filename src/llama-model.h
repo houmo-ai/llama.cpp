@@ -17,7 +17,7 @@
 struct llama_cparams;
 struct llama_ubatch;
 struct llama_model_loader;
-
+class  HouMoLLModel;
 // available models
 enum llm_type {
     LLM_TYPE_UNKNOWN,
@@ -460,7 +460,7 @@ struct llama_model {
 
     llama_hparams hparams = {};
     llama_vocab   vocab;
-
+    std::shared_ptr<HouMoLLModel> hm_llmodel = nullptr;
     // for classifier models
     std::vector<std::string> classifier_labels;
 
@@ -525,6 +525,8 @@ struct llama_model {
     void load_hparams(llama_model_loader & ml);
     void load_vocab  (llama_model_loader & ml);
     bool load_tensors(llama_model_loader & ml); // returns false if cancelled by progress_callback
+    // TODO: @guoxing.xu check again.
+    bool load_hmmodels(llama_model_loader & ml);
 
     std::string arch_name() const;
     std::string type_name() const;

@@ -2048,6 +2048,9 @@ static bool test_gen(llama_context * ctx, int n_gen, int n_threads) {
     const int32_t       n_vocab = llama_vocab_n_tokens(vocab);
 
     llama_token token = llama_vocab_get_add_bos(vocab) ? llama_vocab_bos(vocab) : std::rand() % n_vocab;
+    //FIXME: decode the first token to initialize the kv cache
+    // will removed later.
+    llama_decode(ctx, llama_batch_get_one(&token, 2));
 
     for (int i = 0; i < n_gen; i++) {
         int res = llama_decode(ctx, llama_batch_get_one(&token, 1));
@@ -2163,7 +2166,8 @@ int main(int argc, char ** argv) {
             if (lmodel) {
                 llama_model_free(lmodel);
             }
-
+            printf("\n\n================================\n\n");
+            printf("llama-bench: benchmark %d/%zu: loading model '%s'\n", params_idx, params_count, inst.model.c_str());
             lmodel = llama_model_load_from_file(inst.model.c_str(), inst.to_llama_mparams());
             if (lmodel == NULL) {
                 fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, inst.model.c_str());

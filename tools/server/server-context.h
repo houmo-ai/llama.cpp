@@ -43,9 +43,15 @@ struct server_context_meta {
     enum llama_vocab_type model_vocab_type;
     int32_t model_vocab_n_tokens;
     int32_t model_n_ctx_train;
+    int32_t model_n_ctx;
     int32_t model_n_embd_inp;
     uint64_t model_n_params;
     uint64_t model_size;
+    bool allow_audio;
+    bool allow_image;
+    int32_t vision_width;
+    int32_t vision_height;
+    std::string model_desc;
 };
 
 struct server_context {

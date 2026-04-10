@@ -2,7 +2,7 @@
 #include "clip-impl.h"
 #include "mtmd.h"
 #include "mtmd-audio.h"
-
+#include "houmo-vision.h"
 #include "llama.h"
 
 // fix problem with std::min and std::max
@@ -114,11 +114,13 @@ mtmd_context_params mtmd_context_params_default() {
         /* image_max_tokens  */ -1,
         /* cb_eval           */ nullptr,
         /* cb_eval_user_data */ nullptr,
+        /* devices           */ nullptr,
     };
     return params;
 }
 
 struct mtmd_context {
+    HoumoVision * hm_vision = nullptr; // for HMM-based vision models
     struct clip_ctx * ctx_v; // vision
     struct clip_ctx * ctx_a; // audio
     const struct llama_model * text_model;
@@ -190,6 +192,29 @@ struct mtmd_context {
             throw std::runtime_error(string_format("Failed to load CLIP model from %s\n", mmproj_fname));
         }
 
+        if (clip_is_hmm(ctx_v)) {
+            std::vector<int> device_ids;
+            if (ctx_params.devices != nullptr) {
+                LOG_INF("device is not null...");
+                for (int i = 0; ctx_params.devices[i] != nullptr; i++) {
+                    ggml_backend_dev_t device = ctx_params.devices[i];
+                    const char *dev_name = ggml_backend_dev_name(device);
+                    if (dev_name) {
+                        int id = std::stoi(dev_name);
+                        LOG_INF ("MTMD set %s \n", dev_name);
+                        device_ids.push_back(id);
+                    }
+                }
+            }
+            if (clip_is_minicpmv(ctx_v))
+                hm_vision = new HoumoMinicpmVision();
+            else 
+                hm_vision = new HoumoQwenVision();
+            if (!hm_vision->init(mmproj_fname, device_ids))
+                throw std::runtime_error(string_format(
+                    "Failed to load HMM model from %s\n", mmproj_fname));
+        }
+
         // if both vision and audio mmproj are present, we need to validate their n_embd
         if (ctx_v && ctx_a) {
             int n_embd_v = clip_n_mmproj_embd(ctx_v);
@@ -204,7 +229,7 @@ struct mtmd_context {
         // since we already validate n_embd of vision and audio mmproj,
         // we can safely assume that they are the same
         int n_embd_clip = clip_n_mmproj_embd(ctx_v ? ctx_v : ctx_a);
-        if (n_embd_text != n_embd_clip) {
+        if (n_embd_text != n_embd_clip && n_embd_text * 4 != n_embd_clip) {
             throw std::runtime_error(string_format(
                 "mismatch between text model (n_embd = %d) and mmproj (n_embd = %d)\n"
                 "hint: you may be using wrong mmproj\n",
@@ -567,15 +592,21 @@ struct mtmd_tokenizer {
             img_u8->ny = bitmap->ny;
             img_u8->buf.resize(bitmap->data.size());
             std::memcpy(img_u8->buf.data(), bitmap->data.data(), img_u8->nx * img_u8->ny * 3);
-
+            LOG_DBG("%s:==== image size: %d x %d\n", __func__, img_u8->nx, img_u8->ny);
             // preprocess image
             clip_image_f32_batch batch_f32;
-            bool ok = clip_image_preprocess(ctx->ctx_v, img_u8.get(), &batch_f32);
-            if (!ok) {
-                LOG_ERR("Unable to preprocess image\n");
-                return 2;
+            if (clip_is_hmm(ctx->ctx_v) && !clip_is_minicpmv(ctx->ctx_v)) {
+                LOG_DBG("%s: image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
+                clip_image_f32_ptr img_f32(clip_image_f32_init());
+                ctx->hm_vision->image_resize(img_u8, img_f32);
+                batch_f32.entries.push_back(std::move(img_f32));
+            } else {
+                bool ok = clip_image_preprocess(ctx->ctx_v, img_u8.get(), &batch_f32);
+                if (!ok) {
+                    LOG_ERR("Unable to preprocess image\n");
+                    return 2;
+                }
             }
-
             // handle llava-uhd style preprocessing
             const bool has_tiling_grid = batch_f32.grid_x > 0 && batch_f32.grid_y > 0;
             if (
@@ -865,6 +896,12 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
                 ctx->image_embd_v.data() + i*n_mmproj_embd*n_tokens_per_image);
         }
     } else {
+        if (clip_is_hmm(ctx->ctx_v)) {
+            // FIXME: 只处理第一张图片
+            const clip_image_f32_ptr & imgs = image_tokens->batch_f32.entries[0];
+            return ctx->hm_vision->encoding(imgs->buf, ctx->image_embd_v) ? 0
+                                                                          : 1;
+        }
         ok = clip_image_batch_encode(
             ctx_clip,
             ctx->n_threads,
@@ -1153,4 +1190,20 @@ mtmd_input_chunks * mtmd_test_create_input_chunks() {
 void mtmd_log_set(ggml_log_callback log_callback, void * user_data) {
     g_logger_state.log_callback = log_callback ? log_callback : clip_log_callback_default;
     g_logger_state.log_callback_user_data = user_data;
+}
+
+int32_t mtmd_vision_height(const mtmd_context *ctx) {
+    if (ctx->hm_vision) {
+        return ctx->hm_vision->image_height();
+    } else {
+        return 0;
+    }
+}
+
+int32_t mtmd_vision_width(const mtmd_context *ctx) {
+    if (ctx->hm_vision) {
+        return ctx->hm_vision->image_width();
+    } else {
+        return 0;
+    }
 }

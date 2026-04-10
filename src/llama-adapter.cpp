@@ -3,7 +3,7 @@
 #include "llama-impl.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
-
+#include "houmo-llmodel.h"
 #include <map>
 #include <cassert>
 #include <sstream>
@@ -148,7 +148,10 @@ llama_adapter_lora_weight * llama_adapter_lora::get_weight(ggml_tensor * w) {
 
 static void llama_adapter_lora_init_impl(llama_model & model, const char * path_lora, llama_adapter_lora & adapter) {
     LLAMA_LOG_INFO("%s: loading lora adapter from '%s' ...\n", __func__, path_lora);
-
+    if (model.hm_llmodel != nullptr) {
+        model.hm_llmodel->lora_init(std::string(path_lora), &adapter);
+        return;
+    }
     ggml_context * ctx_init;
     gguf_init_params meta_gguf_params = {
         /* .no_alloc = */ true,

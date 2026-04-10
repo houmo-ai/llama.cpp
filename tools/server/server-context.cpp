@@ -1,23 +1,3 @@
-#include "server-context.h"
-#include "server-common.h"
-#include "server-http.h"
-#include "server-task.h"
-#include "server-queue.h"
-
-#include "common.h"
-#include "llama.h"
-#include "log.h"
-#include "sampling.h"
-#include "speculative.h"
-#include "mtmd.h"
-#include "mtmd-helper.h"
-
-#include <algorithm>
-#include <cstddef>
-#include <cinttypes>
-#include <memory>
-#include <filesystem>
-
 // fix problem with std::min and std::max
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -26,6 +6,28 @@
 #endif
 #include <windows.h>
 #endif
+#include "server-context.h"
+#include "server-common.h"
+#include "server-http.h"
+#include "server-task.h"
+#include "server-queue.h"
+
+#include "arg.h"
+#include "common.h"
+#include "llama.h"
+#include "log.h"
+#include "sampling.h"
+#include "speculative.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
+#include "info_printer.h"
+#include "time-perf.h"
+#include <cstddef>
+#include <cinttypes>
+#include <memory>
+#include <unordered_set>
+#include <filesystem>
+
 
 using json = nlohmann::ordered_json;
 
@@ -156,6 +158,9 @@ struct server_slot {
 
     double t_prompt_processing; // ms
     double t_token_generation;  // ms
+    double t_image_processing;  // ms
+    int32_t n_images = 0;
+    int32_t n_image_tokens = 0;
 
     std::function<void(int /* id_slot */)> callback_on_release;
 
@@ -375,24 +380,59 @@ struct server_slot {
     }
 
     void print_timings() const {
-        const double t_prompt        =       t_prompt_processing / n_prompt_tokens_processed;
-        const double n_prompt_second = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
+        double t_prompt        =       t_prompt_processing / n_prompt_tokens_processed;
+        double n_prompt_second = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
 
         const double t_gen        =       t_token_generation / n_decoded;
         const double n_gen_second = 1e3 / t_token_generation * n_decoded;
-
+        const double percent_used = (n_prompt_tokens_processed + n_decoded) / (double)n_ctx * 100.0;
+        PerfRegistry::Instance().PrintAll();
+        if (n_image_tokens > 0 && n_images > 0) {
+            double t_prompt_processing_no_image = t_prompt_processing - t_image_processing;
+            t_prompt        = t_prompt_processing_no_image / n_prompt_tokens_processed;
+            n_prompt_second = 1e3 / t_prompt_processing_no_image * n_prompt_tokens_processed;
+            SLT_INF(*this,
+                    "\n====================================================================================================\n"
+                    "=image   eval time = %10.2f ms / %5d images (%8.2f ms per image, %9d tokens per image)\n"
+                    "=prefill eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
+                    "=decoder eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
+                    "=total   eval time = %10.2f ms\n"
+                    "=context %d/%d (%f%%)\n"
+                    "====================================================================================================\n",
+                    t_image_processing, n_images, t_image_processing / n_images, n_image_tokens / n_images,
+                    t_prompt_processing_no_image, n_prompt_tokens_processed, t_prompt, n_prompt_second,
+                    t_token_generation, n_decoded, t_gen, n_gen_second,
+                    t_prompt_processing + t_token_generation,
+                    (n_prompt_tokens_processed + n_decoded), n_ctx, percent_used);
+        } else {
+            SLT_INF(*this,
+                    "\n====================================================================================================\n"
+                    "=prefill eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
+                    "=decoder eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
+                    "=total   eval time = %10.2f ms\n"
+                    "=context %d/%d (%f%%)\n"
+                    "====================================================================================================\n",
+                    t_prompt_processing, n_prompt_tokens_processed, t_prompt, n_prompt_second,
+                    t_token_generation, n_decoded, t_gen, n_gen_second,
+                    t_prompt_processing + t_token_generation,
+                    (n_prompt_tokens_processed + n_decoded), n_ctx, percent_used);
+        }
+        double e2e_latency = (t_prompt_processing + t_token_generation)/1000;
         SLT_INF(*this,
-                "\n"
-                "prompt eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
-                "       eval time = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)\n"
-                "      total time = %10.2f ms / %5d tokens\n",
-                t_prompt_processing, n_prompt_tokens_processed, t_prompt, n_prompt_second,
-                t_token_generation, n_decoded, t_gen, n_gen_second,
-                t_prompt_processing + t_token_generation, n_prompt_tokens_processed + n_decoded);
+                "\n====================================================================================================\n"
+                "=Model Context Lenght                   = %5d tokens\n"
+                "=Prompt Tokens Processed                = %5d tokens\n"
+                "=TTFT(Time to First Token)              = %8.2f ms\n"
+                "=TOPT(Time Per Output Token             = %8.2f ms\n"
+                "=E2E Latency (End-to-End Latency)       = %8.2f s\n"
+                "=E2E TPS (End-to-End Tokens Per Second) = %8.2f tokens/s\n"
+                "====================================================================================================\n",
+                n_ctx, n_prompt_tokens_processed, t_prompt_processing, t_gen, e2e_latency, n_decoded / e2e_latency);
 
         if (n_draft_total > 0) {
             const float draft_ratio = (float) n_draft_accepted / n_draft_total;
-            SLT_CNT(*this,
+            SLT_INF(*this,
+                    "\n"
                     "draft acceptance rate = %0.5f (%5d accepted / %5d generated)\n",
                     draft_ratio, n_draft_accepted, n_draft_total
             );
@@ -532,7 +572,7 @@ public:
     llama_model * model = nullptr;
     mtmd_context * mctx = nullptr;
     const llama_vocab * vocab = nullptr;
-
+    bool is_hmm = false;
     server_queue    queue_tasks;
     server_response queue_results;
 
@@ -546,7 +586,9 @@ public:
             destroy();
         }
     }
-
+    int32_t get_n_ctx() const {
+        return n_ctx;
+    }
 private:
     // note: accessing these fields outside of this class is not thread-safe
     // use server_context methods instead
@@ -624,7 +666,6 @@ private:
         bool is_resume = sleeping;
 
         SRV_INF("loading model '%s'\n", params.model.path.c_str());
-
         params_base = params;
 
         llama_init = common_init_from_params(params_base);
@@ -693,6 +734,9 @@ private:
             mparams.warmup           = params_base.warmup;
             mparams.image_min_tokens = params_base.image_min_tokens;
             mparams.image_max_tokens = params_base.image_max_tokens;
+            if (!params.devices.empty()) {
+                mparams.devices = params_base.devices.data();
+            }
 
             mctx = mtmd_init_from_file(mmproj_path.c_str(), model, mparams);
             if (mctx == nullptr) {
@@ -840,7 +884,6 @@ private:
         if (!is_resume) {
             return init();
         }
-
         return true;
     }
 
@@ -2148,22 +2191,45 @@ private:
                     if (slot.state == SLOT_STATE_STARTED) {
                         slot.t_start_process_prompt = ggml_time_us();
                         slot.t_start_generation = 0;
-
+                        slot.t_image_processing = 0.0f;
+                        slot.n_image_tokens = 0;
+                        slot.n_images = 0;
                         slot.state = SLOT_STATE_PROCESSING_PROMPT;
 
                         SLT_INF(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                 slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
 
                         // print prompt tokens (for debugging)
-                        /*if (1) {
+                        /**
+                        if (1) {
                             // first 16 tokens (avoid flooding logs)
                             for (int i = 0; i < std::min<int>(16, input_tokens.size()); i++) {
                                 SLT_DBG(slot, "prompt token %3d: %6d '%s'\n", i, input_tokens[i], common_token_to_piece(ctx, input_tokens[i]).c_str());
                             }
                         } else {
                             // all
+                            bool printstr = true;
                             for (int i = 0; i < (int) input_tokens.size(); i++) {
-                                SLT_DBG(slot, "prompt token %3d: %6d '%s'\n", i, input_tokens[i], common_token_to_piece(ctx, input_tokens[i]).c_str());
+                                if (printstr)
+                                SLT_INF(slot, "prompt token %3d: %6d '%s'\n", i, input_tokens[i], common_token_to_piece(ctx, input_tokens[i]).c_str());
+                                else
+                                SLT_INF(slot, "prompt token %3d: %6d\n", i, input_tokens[i]);
+
+                                if (input_tokens[i] ==151652)
+                                printstr= false;
+                                if (input_tokens[i]==151653)
+                                printstr= true;
+                            }
+                            printstr = true;
+                            for (int i = 0; i < (int) slot.prompt.tokens.size(); i++) {
+                                if (printstr)
+                                SLT_INF(slot, "slot.prompt.tokens token %3d: %6d '%s'\n", i, slot.prompt.tokens[i], common_token_to_piece(ctx, slot.prompt.tokens[i]).c_str());
+                                else
+                                SLT_INF(slot, "slot.prompt.tokens token %3d: %6d\n", i, slot.prompt.tokens[i]);
+                                if (slot.prompt.tokens[i] == 151652)
+                                printstr= false;
+                                if (slot.prompt.tokens[i] == 151653)
+                                printstr= true;
                             }
                         }*/
 
@@ -2303,7 +2369,9 @@ private:
                             // the largest pos_min required for a checkpoint to be useful
                             const auto pos_min_thold = std::max(0, pos_next - n_swa);
 
-                            if (n_past > 0 && n_past < slot.prompt.n_tokens()) {
+                            // note: disallow with mtmd contexts for now
+                            //       https://github.com/ggml-org/llama.cpp/issues/17043
+                            if (!is_hmm && !mctx && n_past > 0 && n_past < slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx), slot.id);
                                 if (pos_min == -1) {
                                     SLT_ERR(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min);
@@ -2455,6 +2523,8 @@ private:
                     if (slot.prompt.n_tokens() < slot.task->n_tokens() && input_tokens[slot.prompt.n_tokens()] == LLAMA_TOKEN_NULL) {
                         // process the image
                         size_t n_tokens_out = 0;
+                        time_t t0 = ggml_time_ms();
+
                         int32_t res = input_tokens.process_chunk(ctx, mctx, slot.prompt.n_tokens(), slot.prompt.tokens.pos_next(), slot.id, n_tokens_out);
                         if (res != 0) {
                             SLT_ERR(slot, "failed to process image, res = %d\n", res);
@@ -2462,7 +2532,9 @@ private:
                             slot.release();
                             continue;
                         }
-
+                        slot.t_image_processing += ggml_time_ms() - t0;
+                        slot.n_image_tokens += n_tokens_out;
+                        slot.n_images++;
                         slot.n_prompt_tokens_processed += n_tokens_out;
 
                         // add the image chunk to cache
@@ -2910,7 +2982,17 @@ server_context::server_context() : impl(new server_context_impl()) {}
 server_context::~server_context() = default;
 
 bool server_context::load_model(const common_params & params) {
-    return impl->load_model(params);
+    InfoPrinter info_printer;
+    auto ret = impl->load_model(params);
+    info_printer.print_process_memory_info();
+    server_context_meta meta = get_meta();
+    info_printer.print_model_info(meta);
+    char hmmstr[16] = {0};
+    if (llama_model_meta_val_str(impl->model, "is_hmm", hmmstr,
+                                 sizeof(hmmstr) / sizeof(char)) > 0) {
+        impl->is_hmm = true;
+    }
+    return ret;
 }
 
 void server_context::start_loop() {
@@ -2935,7 +3017,14 @@ server_context_meta server_context::get_meta() const {
     auto eos_id = llama_vocab_eos(impl->vocab);
     auto bos_token_str = bos_id != LLAMA_TOKEN_NULL ? common_token_to_piece(impl->ctx, bos_id, true) : "";
     auto eos_token_str = eos_id != LLAMA_TOKEN_NULL ? common_token_to_piece(impl->ctx, eos_id, true) : "";
-
+    char model_desc[128] = {0};
+    llama_model_desc(impl->model, model_desc, sizeof(model_desc)/sizeof(char));
+    int32_t vision_width = 0;
+    int32_t vision_height = 0;
+    if (impl->mctx) {
+        vision_width = mtmd_vision_width(impl->mctx);
+        vision_height = mtmd_vision_height(impl->mctx);
+    }
     return server_context_meta {
         /* build_info             */ build_info,
         /* model_name             */ impl->model_name,
@@ -2964,12 +3053,18 @@ server_context_meta server_context::get_meta() const {
         /* model_vocab_type       */ llama_vocab_type(impl->vocab),
         /* model_vocab_n_tokens   */ llama_vocab_n_tokens(impl->vocab),
         /* model_n_ctx_train      */ llama_model_n_ctx_train(impl->model),
+        /* model_n_ctx            */ impl->get_n_ctx(),
         /* model_n_embd_inp       */ llama_model_n_embd(impl->model),
         /* model_n_params         */ llama_model_n_params(impl->model),
         /* model_size             */ llama_model_size(impl->model),
+        /* allow_image            */ impl->chat_params.allow_image,
+        /* allow_audio            */ impl->chat_params.allow_audio,
+        /* model_vision_width     */ vision_width,
+        /* model_vision_height    */ vision_height,
+        /* model_desc             */ model_desc,
+
     };
 }
-
 
 
 // generator-like API for HTTP response generation
@@ -3017,7 +3112,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
 
         const auto & prompt = data.at("prompt");
         // TODO: this log can become very long, put it behind a flag or think about a more compact format
-        //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
+        SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
 
         // process prompt
         std::vector<server_tokens> inputs;
@@ -3704,7 +3799,6 @@ void server_routes::init_routes() {
 
     this->get_models = [this](const server_http_req &) {
         auto res = create_response(true);
-
         // this endpoint can be accessed during sleeping
         // the next LOC is to avoid someone accidentally use ctx_server
         bool ctx_server; // do NOT delete this line
@@ -3745,10 +3839,16 @@ void server_routes::init_routes() {
                     {"meta",     {
                         {"vocab_type",  meta->model_vocab_type},
                         {"n_vocab",     meta->model_vocab_n_tokens},
+                        {"n_ctx_length", meta->model_n_ctx},
                         {"n_ctx_train", meta->model_n_ctx_train},
                         {"n_embd",      meta->model_n_embd_inp},
                         {"n_params",    meta->model_n_params},
                         {"size",        meta->model_size},
+                        {"allow_image", meta->allow_image},
+                        {"allow_audio", meta->allow_audio},
+                        {"vision_width", meta->vision_width},
+                        {"vision_height", meta->vision_height},
+                        {"model_desc",    meta->model_desc},
                     }},
                 },
             }}

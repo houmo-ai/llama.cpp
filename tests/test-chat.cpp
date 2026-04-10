@@ -2575,6 +2575,24 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
                 { "special_function_with_opt", R"({"arg1": 1, "arg2": 2})", {} },
             })
             .run();
+
+        // Edge cases
+
+        // "<|channel|>commentary to=assistant" before reasoning
+        tst.test(
+               "<|channel|>commentary to=assistant<|channel|>analysis<|message|>I'm\nthinking<|end|><|start|>assistant<|channel|>final<|message|>Hello, world!\nWhat's "
+               "up?")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect(message_assist_thoughts)
+            .run();
+
+        // "<|channel|>commentary to=assistant" before final message
+        tst.test(
+               "<|channel|>analysis<|message|>I'm\nthinking<|end|><|start|>assistant<|channel|>commentary to=assistant<|channel|>final<|message|>Hello, world!\nWhat's "
+               "up?")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect(message_assist_thoughts)
+            .run();
     }
 
     {

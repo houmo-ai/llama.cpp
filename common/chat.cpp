@@ -984,20 +984,23 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
 
         auto the_end = END | p.end();
 
+        // Occasionally, gpt-oss-20b will prefix channels with this commentary
+        auto stray_commentary = p.optional(p.literal(CHANNEL_COMMENTARY) + p.optional(p.literal(" to=assistant")));
+
         const std::string analysis_header  = CHANNEL_ANALYSIS + MESSAGE;
         auto              segment_content  = p.until(END);
         auto              analysis_segment = extract_reasoning ?
-                                                 p.literal(analysis_header) + p.reasoning(segment_content) + p.until(END) + the_end :
-                                                 p.content(analysis_header + p.until(END) + the_end);
+                                                 stray_commentary + p.literal(analysis_header) + p.reasoning(segment_content) + p.until(END) + the_end :
+                                                 p.content(stray_commentary + analysis_header + p.until(END) + the_end);
 
         auto channel_header_content = p.until_one_of({ " to=functions.", MESSAGE });
         auto content_header         = p.choice({ p.literal(CHANNEL_COMMENTARY), p.literal(CHANNEL_FINAL) });
-        auto content_segment        = p.rule("content-segment", content_header + channel_header_content + MESSAGE +
+        auto content_segment        = p.rule("content-segment", stray_commentary + content_header + channel_header_content + MESSAGE +
                                                                     p.content(segment_content) + the_end);
 
         if (!inputs.json_schema.is_null()) {
-            auto final_header = p.literal(CHANNEL_FINAL);
-            auto constraint   = p.optional(p.space() + p.literal(CONSTRAIN) + channel_header_content);
+            auto final_header = stray_commentary + p.literal(CHANNEL_FINAL);
+            auto constraint   = p.optional(p.space() + p.optional(p.literal(CONSTRAIN)) + channel_header_content);
             return p.optional(analysis_segment) + final_header + constraint + MESSAGE +
                    p.content(p.schema(p.json(), "response-format", inputs.json_schema));
         }
@@ -1020,7 +1023,7 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
                 auto func_name = p.literal(" to=functions.") + p.tool_name(p.literal(name));
 
                 auto channel    = p.literal(CHANNEL_COMMENTARY) | p.literal(CHANNEL_ANALYSIS);
-                auto constraint = p.space() + p.optional(p.literal(CONSTRAIN) + channel_header_content);
+                auto constraint = p.space() + p.optional(p.literal(CONSTRAIN)) + channel_header_content;
                 auto args       = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
 
                 // Pattern 1: recipient in role header
@@ -1063,7 +1066,8 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^(?:<\\|start\\|>assistant\\s*)?(\\s+to=functions)"               },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "(?:<\\|end\\|>)(?:<\\|start\\|>assistant\\s*)?(\\s+to=functions)" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN,
-             "(?:<\\|start\\|>assistant\\s*)?(<\\|channel\\|>(?:commentary|analysis)\\s+to=functions)"                }
+             "(?:<\\|start\\|>assistant\\s*)?(<\\|channel\\|>(?:commentary|analysis)\\s+to=functions)"                },
+            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=functions$"         }
         };
     }
 
@@ -1650,8 +1654,15 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             }
             return msg;
         }
-        throw std::runtime_error(std::string("Failed to parse input at pos ") + std::to_string(result.end) + ": " +
-                                 input.substr(result.end));
+        const auto fail_suffix = result.end < input.size() ? input.substr(result.end) : std::string();
+        LOG_WRN("PEG parse failed at pos %zu, falling back to raw content: %s\n",
+            result.end,
+            fail_suffix.c_str());
+
+        common_chat_msg msg;
+        msg.role = "assistant";
+        msg.content = input;
+        return msg;
     }
 
     common_chat_msg msg;

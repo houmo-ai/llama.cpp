@@ -871,6 +871,12 @@ static int llama_model_load(struct gguf_context * metadata, llama_model_set_tens
             LLAMA_LOG_INFO("%s: vocab only - skipping tensors\n", __func__);
             return 0;
         }
+        model.hparams.is_hmm = model.gguf_kv.count("is_hmm") > 0;
+        LLAMA_LOG_INFO("%s:%d: loading hmmodes %d\n", __func__, __LINE__, model.hparams.is_hmm);
+        if (model.hparams.is_hmm) {
+            model.load_hmmodels(ml);
+            return 0;
+        }
 
         if (!model.load_tensors(ml)) {
             return -2;
@@ -935,6 +941,7 @@ static struct llama_model * llama_model_load_from_file_impl(
             switch (ggml_backend_dev_type(dev)) {
                 case GGML_BACKEND_DEVICE_TYPE_CPU:
                 case GGML_BACKEND_DEVICE_TYPE_ACCEL:
+                case GGML_BACKEND_DEVICE_TYPE_HM_ACCEL:
                     // skip CPU backends since they are handled separately
                     break;
 

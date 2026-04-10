@@ -117,6 +117,8 @@ struct task_result_state {
         , oai_resp_reasoning_id("rs_" + random_string())
         , oai_resp_message_id("msg_" + random_string()) {}
 
+
+    bool utf8_sanitize_safe(std::string& s);
     // parse partial tool calls and update the internal state
     common_chat_msg update_chat_msg(
         const std::string & text_added,

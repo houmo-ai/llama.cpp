@@ -36,6 +36,13 @@ add_library(llama
             unicode-data.cpp
             unicode.cpp
             unicode.h
+            houmo/houmo-llmodel.cpp
+            houmo/houmo-gptoss.cpp
+            houmo/houmo-qwenllm.cpp
+            houmo/houmo-qwen35llm.cpp
+            houmo/houmo-vllmodel.cpp
+            houmo/houmo-embed.cpp
+            houmo/houmo-embedding_layer.cpp
             models/afmoe.cpp
             models/apertus.cpp
             models/arcee.cpp
@@ -150,17 +157,16 @@ add_library(llama
             models/xverse.cpp
             )
 
-set_target_properties(llama PROPERTIES
-    VERSION ${LLAMA_INSTALL_VERSION}
-    SOVERSION 0
-    MACHO_CURRENT_VERSION 0 # keep macOS linker from seeing oversized version number
-)
+# set_target_properties(llama PROPERTIES
+#     VERSION ${LLAMA_INSTALL_VERSION}
+#     SOVERSION 0
+# )
 
-target_include_directories(llama PRIVATE .)
-target_include_directories(llama PUBLIC ../include)
-target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+target_include_directories(llama PRIVATE . houmo)
+target_include_directories(llama PUBLIC ../include ../vendor ../common ${HOUMO_TCIM_RUNTIME_PATH}/include)
+target_compile_features   (llama PUBLIC cxx_std_17) # don't bump
 
-target_link_libraries(llama PUBLIC ggml)
+target_link_libraries(llama PUBLIC ggml ${HOUMO_RUNTIME_LIBRARIES})
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)

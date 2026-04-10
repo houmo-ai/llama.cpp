@@ -119,3 +119,7 @@ void clip_image_f32_batch_add_mel(struct clip_image_f32_batch * batch, int n_mel
 bool clip_has_vision_encoder(const struct clip_ctx * ctx);
 bool clip_has_audio_encoder(const struct clip_ctx * ctx);
 bool clip_has_whisper_encoder(const struct clip_ctx * ctx);
+
+// 判断是否是hmm模型
+// HMM模型是指后摩的vision模型
+bool clip_is_hmm(const struct clip_ctx * ctx);

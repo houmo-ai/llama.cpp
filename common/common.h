@@ -190,7 +190,7 @@ struct common_params_sampling {
     float   xtc_probability    = 0.00f;  // 0.0 = disabled
     float   xtc_threshold      = 0.10f;  // > 0.5 disables XTC
     float   typ_p              = 1.00f;  // typical_p, 1.0 = disabled
-    float   temp               = 0.80f;  // <= 0.0 to sample greedily, 0.0 to not output probabilities
+    float   temp               = 0.00f;  // <= 0.0 to sample greedily, 0.0 to not output probabilities
     float   dynatemp_range     = 0.00f;  // 0.0 = disabled
     float   dynatemp_exponent  = 1.00f;  // controls how entropy maps to temperature in dynamic temperature sampler
     int32_t penalty_last_n     = 64;     // last n tokens to penalize (0 = disable penalty, -1 = context size)
@@ -383,7 +383,7 @@ struct common_params {
     int32_t n_gpu_layers       = -1;   // number of layers to store in VRAM, -1 is auto, <= -2 is all
     int32_t main_gpu           = 0;    // the GPU that is used for scratch and small tensors
     float   tensor_split[128]  = {0};  // how split tensors should be distributed across GPUs
-    bool    fit_params         = true; // whether to fit unset model/context parameters to free device memory
+    bool    fit_params         = false; // whether to fit unset model/context parameters to free device memory
     int32_t fit_params_min_ctx = 4096; // minimum context size to set when trying to reduce memory use
 
     // margin per device in bytes for fitting parameters to free memory:
@@ -519,7 +519,7 @@ struct common_params {
     std::string cls_sep    = "\t";  // separator of classification sequences
 
     // server params
-    int32_t port                = 8080;          // server listens on this network port
+    int32_t port                = 17701;          // server listens on this network port
     int32_t timeout_read        = 600;           // http read timeout in seconds
     int32_t timeout_write       = timeout_read;  // http write timeout in seconds
     int32_t n_threads_http      = -1;    // number of threads to process HTTP requests (TODO: support threadpool)
@@ -527,9 +527,9 @@ struct common_params {
     bool    cache_prompt        = true;  // whether to enable prompt caching
     int32_t n_ctx_checkpoints   = 32;     // max number of context checkpoints per slot
     int32_t checkpoint_every_nt = 8192;   // make a checkpoint every n tokens during prefill
-    int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
+    int32_t cache_ram_mib       = 0;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
 
-    std::string hostname      = "127.0.0.1";
+    std::string hostname      = "0.0.0.0";
     std::string public_path   = "";                                                                         // NOLINT
     std::string api_prefix    = "";                                                                         // NOLINT
     std::string chat_template = "";                                                                         // NOLINT
