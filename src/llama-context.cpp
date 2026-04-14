@@ -32,6 +32,7 @@ void llama_context::houmo_init(int32_t seq_max) {
     cparams.kv_unified = true;
     if (hm_llmodel->is_embedding()) {
         memory = nullptr;
+        cparams.n_ubatch = cparams.n_batch = cparams.n_ctx_seq;
     }
     // graph outputs buffer
     {

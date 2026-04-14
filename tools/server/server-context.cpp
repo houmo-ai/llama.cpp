@@ -2255,7 +2255,7 @@ private:
                         }
 
                         if (!slot.can_split()) {
-                            if (!is_hmm && slot.task->n_tokens() > n_ubatch) {
+                            if (slot.task->n_tokens() > n_ubatch) {
                                 send_error(slot,
                                            string_format(
                                                "input (%d tokens) is too large to process. increase the physical batch "
