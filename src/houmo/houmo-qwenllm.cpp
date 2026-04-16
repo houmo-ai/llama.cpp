@@ -152,13 +152,23 @@ int HoumoQwenLLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                  prefill_valid_length);
         prefill_model_->SetInput(prefill_model_->GetInputName(2),
                                  prefill_current_length);
-        set_kv_cache_for_prefill(seq_id);
+        if (round == 0)
+            set_kv_cache_for_prefill(seq_id);
         PERF_STOP(PREFILL_SETINPUT_ONCE);
         PERF_START(PREFILL_RUN_ONCE);
-        prefill_model_->Run();
+        auto status = prefill_model_->Run();
+        if (status != tcim::Status::OK) {
+            LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
+                            __func__, static_cast<int>(status));
+            return -1;
+        }
         prefill_model_->Sync();
         PERF_STOP(PREFILL_RUN_ONCE);
         valid_length += current_length;
+        if (abort_callback_ != nullptr && abort_callback_(abort_callback_data_)) {
+            LLAMA_LOG_INFO("%s: abort_callback_ is called. seq_id = %d\n", __func__, seq_id);
+            return 2;
+        }
     }
     decode_valid_length_[seq_id] = kv_offset + (int32_t)process_tokens;
     PERF_START(PREFILL_GETOUTPUT);

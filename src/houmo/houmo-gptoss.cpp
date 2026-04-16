@@ -135,10 +135,20 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         prefill_model_->SetInput(prefill_model_->GetInputName(2),
                                  prefill_current_length);
         set_attentions_for_prefill(current_length, valid_length);
-        set_kv_cache_for_prefill(seq_id);
-        prefill_model_->Run();
+        if (round == 0)
+            set_kv_cache_for_prefill(seq_id);
+        auto status = prefill_model_->Run();
+        if (status != tcim::Status::OK) {
+            LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
+                            __func__, static_cast<int>(status));
+            return -1;
+        }
         prefill_model_->Sync();
-        valid_length += prefill_length_;
+        valid_length += current_length;
+        if (abort_callback_ != nullptr && abort_callback_(abort_callback_data_)) {
+            LLAMA_LOG_INFO("%s: abort_callback_ is called. seq_id = %d\n", __func__, seq_id);
+            return 2;
+        }
     }
     // update decode valid length and optionally copy logits
     decode_valid_length_[seq_id] = static_cast<int32_t>(input_echo_len) + kv_offset;

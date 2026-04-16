@@ -144,7 +144,11 @@ int HouMoEmbed::houmo_embedding(
     embed_model_->SetInput(embed_model_->GetInputName(0), input);
     embed_model_->SetInput(embed_model_->GetInputName(1), token_type_ids);
     embed_model_->SetInput(embed_model_->GetInputName(2), attention_mask);
-    embed_model_->Run();
+    if (auto status = embed_model_->Run(); status != tcim::Status::OK) {
+        LLAMA_LOG_ERROR("%s: embed_model_->Run() failed, result = %d\n",
+                        __func__, static_cast<int>(status));
+        return -1;
+    }
     embed_model_->Sync();
 
     auto output = embed_model_->GetOutput(embed_model_->GetOutputName(0));

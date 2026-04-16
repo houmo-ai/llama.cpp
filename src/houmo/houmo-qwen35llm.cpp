@@ -846,7 +846,12 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         PERF_STOP(PREFILL_SETINPUT_ONCE);
 
         PERF_START(PREFILL_RUN_ONCE);
-        prefill_model_->Run();
+        auto status = prefill_model_->Run();
+        if (status != tcim::Status::OK) {
+            LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
+                            __func__, static_cast<int>(status));
+            return -1;
+        }
         prefill_model_->Sync();
         PERF_STOP(PREFILL_RUN_ONCE);
         valid_length += current_length;
