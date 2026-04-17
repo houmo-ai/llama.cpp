@@ -170,6 +170,15 @@ public:
     // the next position after n_tokens. if n_tokens < 0, return the next position after all tokens.
     llama_pos pos_next(int64_t n_tokens = -1) const;
 
+    // houmo fork: the next idx (linear token slot, 1 slot per embedding
+    // including image placeholders). This matches the value that
+    // houmo_memory_i / HouMo*LLModel track internally; call this instead of
+    // pos_next() at the boundary to the NPU backend (seq_rm / seq_add /
+    // common_batch_add / process_chunk) when running on the houmo backend.
+    llama_pos idx_next(int64_t n_tokens = -1) const {
+        return n_tokens < 0 ? (llama_pos) tokens.size() : (llama_pos) n_tokens;
+    }
+
     // number of tokens with position < max_pos
     size_t size_up_to_pos(llama_pos max_pos) const;
 

@@ -236,7 +236,6 @@ llama_pos server_tokens::pos_next(int64_t n_tokens) const {
         if (n_tokens < 0) {
             return tokens.size();
         }
-
         return n_tokens;
     }
 
@@ -262,7 +261,6 @@ llama_pos server_tokens::pos_next(int64_t n_tokens) const {
             const auto & chunk = media_it->second;
             const llama_pos n_pos = mtmd_input_chunk_get_n_pos(chunk.get());
             const size_t n_tok = mtmd_input_chunk_get_n_tokens(chunk.get());
-
             pos += n_pos;
             idx += n_tok;
         } else {
@@ -270,7 +268,6 @@ llama_pos server_tokens::pos_next(int64_t n_tokens) const {
             idx++;
         }
     }
-
     return pos;
 }
 
