@@ -265,10 +265,158 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
         float *logits_out = logits[i];
         float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
                             batch_id * n_vocab;
-        memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+        if (logits_out != nullptr) {
+            memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+        }
         if (memory_) {
             memory_->seq_add(seq_ids[i], 0, 0, 1);
         }
+    }
+    return 0;
+}
+
+int HoumoQwenLLM::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+                               std::vector<float *> &logits_out) {
+    if (tokens.size() != logits_out.size()) {
+        LLAMA_LOG_ERROR("%s: tokens.size(%zu) != logits_out.size(%zu)\n",
+                        __func__, tokens.size(), logits_out.size());
+        return -1;
+    }
+    const int k = (int)tokens.size();
+    if (k <= 0) {
+        return 0;
+    }
+
+    // 判断 decode 图的输入形状是否支持 [1, k, n_embedding] 批量验证：
+    //   - 维度 >= 3
+    //   - shape[0] == 1 (单序列)
+    //   - shape[1] >= k (序列长度维度足以容纳 k 个 token)
+    // 若不满足，则退化为逐 token 调用 houmo_decode。
+    int graph_seq_len = 1;
+    bool batched_capable = false;
+    if (decode_model_ != nullptr && !decode_input_map_.empty()) {
+        auto input_name = decode_model_->GetInputName(0);
+        auto it = decode_input_map_.find(input_name);
+        if (it != decode_input_map_.end()) {
+            auto shape = it->second.Info().Shape();
+            if (shape.size() >= 3 && shape[0] == 1 && shape[1] > 1 &&
+                (int64_t)k <= shape[1]) {
+                graph_seq_len = (int)shape[1];
+                batched_capable = true;
+            }
+        }
+    }
+
+    if (!batched_capable) {
+        // 退化路径：一个 token 一个 token 调用 houmo_decode
+        std::vector<int> seq_ids = {seq_id};
+        for (int i = 0; i < k; ++i) {
+            std::vector<llama_token> one = {tokens[i]};
+            std::vector<float *> one_logits = {logits_out[i]};
+            int ret = houmo_decode(one, seq_ids, one_logits);
+            if (ret != 0) {
+                LLAMA_LOG_ERROR("%s: fallback houmo_decode failed at i=%d\n",
+                                __func__, i);
+                return ret;
+            }
+        }
+        return 0;
+    }
+
+    // 批量路径：一次 decode 处理 k 个 token
+    LLAMA_LOG_DEBUG("%s: batched verify, seq_id=%d k=%d graph_seq_len=%d\n",
+                    __func__, seq_id, k, graph_seq_len);
+    decode_valid_length_[seq_id] = memory_->seq_pos_min(seq_id);
+    const int base_pos = decode_valid_length_[seq_id];
+    if (base_pos + k > context_length_) {
+        LLAMA_LOG_WARN("%s: base_pos(%d) + k(%d) exceeds context_length_(%d)\n",
+                       __func__, base_pos, k, context_length_);
+        return 1;
+    }
+
+    PERF_START(DECODE_SETINPUT);
+    // 1. 填充 k 个 token 的 embedding 到输入张量 [1, graph_seq_len, n_embd]
+    //    未使用的尾部位置保持原有内容（由 causal mask + valid_length 屏蔽）。
+    auto input_name = decode_model_->GetInputName(0);
+    auto input_data = decode_input_map_.at(input_name);
+    try {
+        embedding_layer_->get_embedding_batch(tokens, input_data.Data());
+    } catch (...) {
+        LLAMA_LOG_ERROR("%s: get_embedding_batch failed\n", __func__);
+        return -1;
+    }
+    decode_model_->SetInput(input_name, input_data);
+
+    // 2. 设置 valid_length / current_length
+    //    valid_length = 当前已有的历史 token 数 (base_pos)
+    //    current_length = 本次新增 token 数 (k)
+    if (decode_valid_length_names_.size() != 1 ||
+        decode_current_length_names_.size() != 1) {
+        LLAMA_LOG_ERROR("%s: batched verify requires single valid/current "
+                        "length inputs, got %zu/%zu\n",
+                        __func__, decode_valid_length_names_.size(),
+                        decode_current_length_names_.size());
+        return -1;
+    }
+    {
+        auto valid_tensor =
+            decode_input_map_.at(decode_valid_length_names_[0]);
+        set_input_data(valid_tensor, 1, base_pos);
+        decode_model_->SetInput(decode_valid_length_names_[0], valid_tensor);
+
+        auto current_tensor =
+            decode_input_map_.at(decode_current_length_names_[0]);
+        set_input_data(current_tensor, 1, k);
+        decode_model_->SetInput(decode_current_length_names_[0],
+                                current_tensor);
+    }
+
+    // 3. 设置 kv cache (复用单 batch 逻辑)
+    std::vector<int> seq_ids_one = {seq_id};
+    set_kv_cache_for_decode(seq_ids_one);
+
+    // 4. lora mask
+    for (const auto &pair : lora_map) {
+        if (decode_input_map_.count(pair.first) > 0) {
+            auto lora_mask = decode_input_map_[pair.first];
+            lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
+                                                   lora_mask_float_.MemSize());
+            lora_mask_float_.CastTo(lora_mask);
+            decode_model_->SetInput(pair.first, lora_mask);
+        }
+    }
+    PERF_STOP(DECODE_SETINPUT);
+
+    // 5. run & sync
+    PERF_START(DECODE_RUN);
+    decode_model_->Run();
+    decode_model_->Sync();
+    PERF_STOP(DECODE_RUN);
+
+    // 6. 取输出、转浮点
+    PERF_START(DECODE_GETOUTPUT);
+    tcim::Tensor decode_data =
+        decode_model_->GetOutput(decode_output_names_[0]);
+    auto &decode_output_float = decode_output_map_[decode_output_names_[0]];
+    decode_data.CastTo(decode_output_float);
+    // 输出形状 [1, graph_seq_len, n_vocab]
+    auto total_floats = decode_output_float.MemSize() / sizeof(float);
+    auto n_vocab = total_floats / (size_t)graph_seq_len;
+    PERF_STOP(DECODE_GETOUTPUT);
+
+    // 7. 复制每个位置的 logits
+    float *base_ptr = static_cast<float *>(decode_output_float.Data());
+    for (int i = 0; i < k; ++i) {
+        if (logits_out[i] != nullptr) {
+            memcpy(logits_out[i], base_ptr + (size_t)i * n_vocab,
+                   n_vocab * sizeof(float));
+        }
+    }
+
+    // 8. 更新 KV / valid_length：本次提交了 k 个 token
+    decode_valid_length_[seq_id] = base_pos + k;
+    if (memory_) {
+        memory_->seq_add(seq_id, 0, 0, k);
     }
     return 0;
 }

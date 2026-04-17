@@ -778,6 +778,11 @@ int HouMoLLModel::houmo_decode(std::vector<llama_token> &batches,
     return impl_->houmo_decode(batches, seq_ids, logits);
 }
 
+int HouMoLLModel::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+                               std::vector<float *> &logits_out) {
+    return impl_->houmo_verify(tokens, seq_id, logits_out);
+}
+
 int HouMoLLModel::n_decode_batch() { return impl_->n_decode_batch(); }
 
 int HouMoLLModel::n_prefill_batch() { return impl_->n_prefill_batch(); }

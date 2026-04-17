@@ -1415,104 +1415,135 @@ static std::string common_token_to_piece(const struct llama_vocab * vocab, llama
 }
 
 int llama_context::houmo_decode(const llama_batch &batch) {
-    int ret = 0;
-    std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
+    auto & hm_llmodel = model.hm_llmodel;
     const int32_t n_vocab = model.vocab.n_tokens();
-    // 输入的是数据，当前只支持prefill阶段是embdding
+
+    // 纯 embedding 输入：仅支持 prefill 阶段
     if (batch.embd != nullptr) {
-        int seq_id = 0;
-        if (batch.seq_id != nullptr)
-            seq_id = batch.seq_id[0][0];
+        const int seq_id = batch.seq_id ? batch.seq_id[0][0] : 0;
         return hm_llmodel->houmo_prefill(batch.embd, batch.n_tokens, seq_id, nullptr);
     }
-    // 记录每个序列
-    int n_parallel = 1;
-    std::map<int, std::vector<llama_token>> seqid_token_map;
-    std::map<int, int> seqid_pos_map;
-    int pos = 0;
-    // 恢复不同seq的tokens, 没有序列信息默认seq_id=0
-    int seq_id = 0;
-    // reserve output buffer
-    if (batch.seq_id == nullptr) {
-        // 单序列推理
-        for (int j = 0; j < batch.n_tokens; j++) {
-            if (seqid_token_map.count(seq_id) == 0)
-                seqid_token_map[seq_id] = std::vector<llama_token>();
-            seqid_token_map[seq_id].push_back(batch.token[j]);
-        }
-        // keep last output only
-        output_ids[batch.n_tokens - 1] = seq_id;
-    } else {
-        // 多序列推理
-        for (int j = 0; j < batch.n_tokens; j++) {
+
+    struct token_entry {
+        llama_token token;
+        int         batch_idx;
+        bool        needs_logits;
+    };
+
+    // 1. 按 seq_id 分桶（无 seq_id 信息时统一归入 seq_id = 0），同时按 batch.logits
+    //    标记 needs_logits。与 llama_batch_allocr::init 对齐：batch.logits == nullptr
+    //    时兜底为"整个 batch 的最后一个 token 出 logits"（而不是每个 seq 末位）。
+    std::map<int, std::vector<token_entry>> seqid_entries;
+    const bool fallback_last = (batch.logits == nullptr);
+    for (int j = 0; j < batch.n_tokens; j++) {
+        const bool need = fallback_last
+            ? (j == batch.n_tokens - 1)
+            : (batch.logits[j] == 1);
+        if (batch.seq_id == nullptr) {
+            seqid_entries[0].push_back({batch.token[j], j, need});
+        } else {
             for (int s = 0; s < batch.n_seq_id[j]; s++) {
-                seq_id = batch.seq_id[j][s];
-                if (seqid_token_map.count(seq_id) == 0)
-                    seqid_token_map[seq_id] = std::vector<llama_token>();
-                seqid_token_map[seq_id].push_back(batch.token[j]);
-                // 记录不同序列的logits位置
-                if (batch.logits && batch.logits[j] == 1) {
-                    output_ids[j] = pos;
-                    seqid_pos_map[seq_id] = pos;
-                    pos++;
-                }
+                seqid_entries[batch.seq_id[j][s]].push_back({batch.token[j], j, need});
             }
-        }
-    }
-    n_parallel = seqid_token_map.size();
-
-    int n_outputs_all = n_parallel;
-    std::vector<llama_token> decode_batches;
-    std::vector<int > seq_ids;
-    // 先计算已经存在的decode
-    for (auto &[k, v] : seqid_token_map) {
-        // prefill阶段
-        if (v.size() == 1) {
-            // 缓存需要decode的batch
-            decode_batches.push_back(v[0]);
-            seq_ids.push_back(k);
-        }
-    }
-    for (size_t i = 0; i < decode_batches.size();
-         i += hm_llmodel->n_decode_batch()) {
-        int n_decode_batch =
-            std::min(hm_llmodel->n_decode_batch(), (int)decode_batches.size());
-        std::vector<llama_token> decode_batch(decode_batches.begin() + i,
-                                              decode_batches.begin() + i +
-                                                  n_decode_batch);
-        std::vector<int> seq_id(seq_ids.begin() + i,
-                                seq_ids.begin() + i + n_decode_batch);
-        std::vector<float *> logits_ptrs;
-        for (auto seq : seq_id) {
-            logits_ptrs.push_back(logits.data + seqid_pos_map[seq] * n_vocab);
-        }
-        ret = hm_llmodel->houmo_decode(decode_batch, seq_id, logits_ptrs);
-        if (ret != 0) {
-            return ret;
         }
     }
 
-    // 再计算需要prefill的seq
-    for (auto &[k, v] : seqid_token_map) {
-        // prefill阶段
-        if (v.size() > 1) {
-            float * logits_out = nullptr;
-            if (seqid_pos_map.count(k) > 0 || batch.logits == nullptr)
-                logits_out = logits.data + seqid_pos_map[k] * n_vocab;
-            ret = hm_llmodel->houmo_prefill(v, k, logits_out);
-            if (ret != 0) {
-                return ret;
-            }
-            for (size_t i = 0; i < v.size(); i++) {
-                LLAMA_LOG_DEBUG("%s", common_token_to_piece(&model.vocab, v[i], true).c_str());
-            }
+    // 3. reserve 输出 buffer。按 cparams.n_batch 预留，保证 buffer 容量固定为
+    //    worst-case 大小，避免不同 batch 之间反复 realloc（output_reserve 内部
+    //    prev_size < new_size 才重新 alloc），也避免小尺寸 reserve 引入的边界副作用。
+    //    注意：output_reserve 内部会 std::fill(output_ids, -1)，必须先于下面的
+    //    output_ids[j] = ... 写入。
+    int n_outputs_all = 0;
+    for (const auto & kv : seqid_entries) {
+        for (const auto & e : kv.second) if (e.needs_logits) n_outputs_all++;
+    }
+
+    if ((uint32_t)output_reserve(
+            std::max<uint32_t>(cparams.n_batch, (uint32_t)n_outputs_all)) <
+        (uint32_t)n_outputs_all) {
+        LLAMA_LOG_ERROR("%s: could not reserve space for %d outputs\n",
+                        __func__, n_outputs_all);
+        return -2;
+    }
+
+    // 4. 分配 logits pos：output_ids[batch_idx] 存压缩后的 0..n_outputs-1，
+    //    这样 get_logits_ith(i) 里的 j >= n_outputs 检查才会通过。
+    //    logits buffer 按 cparams.n_batch 预留，行号上界 < n_outputs_all <= n_batch，安全。
+    int pos = 0;
+    for (auto & kv : seqid_entries) {
+        for (auto & e : kv.second) {
+            if (e.needs_logits) output_ids[e.batch_idx] = pos++;
         }
     }
+    auto logits_ptr_for = [&](const token_entry & e) -> float * {
+        return e.needs_logits ? logits.data + output_ids[e.batch_idx] * n_vocab : nullptr;
+    };
+
+    // 5. 分发（先所有 decode，再所有 prefill/verify）
+    //    - 单 token 序列           → houmo_decode（按 n_decode_batch 分块）
+    //    - 多 token，≤1 位置 logits → houmo_prefill
+    //    - 多 token，多位置 logits  → houmo_verify（speculative 验证）
+    int ret = 0;
+
+    // 5a. 先把所有单 token 序列累积后按 n_decode_batch 分块下发
+    {
+        std::vector<llama_token> dec_tokens;
+        std::vector<int>         dec_seqs;
+        std::vector<float *>     dec_logits;
+        for (auto & [sid, entries] : seqid_entries) {
+            if (entries.size() != 1) continue;
+            dec_tokens.push_back(entries[0].token);
+            dec_seqs.push_back(sid);
+            dec_logits.push_back(logits_ptr_for(entries[0]));
+        }
+        const int B = hm_llmodel->n_decode_batch();
+        for (size_t i = 0; i < dec_tokens.size(); i += B) {
+            const int n = std::min((int)(dec_tokens.size() - i), B);
+            std::vector<llama_token> tb(dec_tokens.begin() + i, dec_tokens.begin() + i + n);
+            std::vector<int>         sb(dec_seqs.begin()   + i, dec_seqs.begin()   + i + n);
+            std::vector<float *>     lb(dec_logits.begin() + i, dec_logits.begin() + i + n);
+            ret = hm_llmodel->houmo_decode(tb, sb, lb);
+            if (ret != 0) return ret;
+        }
+    }
+
+    // 5b. 再处理多 token 序列，每个序列单独走 prefill 或 verify
+    for (auto & [sid, entries] : seqid_entries) {
+        if (entries.size() <= 1) continue;
+
+        int n_logits_needed = 0;
+        for (const auto & e : entries) if (e.needs_logits) n_logits_needed++;
+
+        std::vector<llama_token> toks;
+        toks.reserve(entries.size());
+        for (const auto & e : entries) toks.push_back(e.token);
+
+        if (n_logits_needed <= 1) {
+            float * out = nullptr;
+            for (const auto & e : entries) {
+                if (e.needs_logits) { out = logits_ptr_for(e); break; }
+            }
+            ret = hm_llmodel->houmo_prefill(toks, sid, out);
+        } else {
+            // speculative 验证：多位置同时要 logits。后端若不支持批量验证会
+            // fallback 到逐 token prefill（~k× 慢，算法负收益）。
+            std::vector<float *> lgts;
+            lgts.reserve(entries.size());
+            for (const auto & e : entries) lgts.push_back(logits_ptr_for(e));
+            LLAMA_LOG_DEBUG("%s: seq_id %d uses houmo_verify for %d positions\n",
+                            __func__, sid, n_logits_needed);
+            ret = hm_llmodel->houmo_verify(toks, sid, lgts);
+        }
+        if (ret != 0) return ret;
+
+        for (const auto & e : entries) {
+            LLAMA_LOG_DEBUG("%s", common_token_to_piece(&model.vocab, e.token, true).c_str());
+        }
+    }
+
     n_outputs = n_outputs_all;
-    if (abort_callback && abort_callback(abort_callback_data)) {
-        return 2;
-    }
-    return ret;
+    if (abort_callback && abort_callback(abort_callback_data)) return 2;
+    return 0;
 }
 
 int llama_context::houmo_embedding(const llama_batch &batch) {

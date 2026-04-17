@@ -354,7 +354,9 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
         float *logits_out = logits[i];
         float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
                             batch_id * n_vocab;
-        memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+        if (logits_out != nullptr) {
+            memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+        }
         memory_->seq_add(batch_id, 0, 0, 1);
     }
     return 0;

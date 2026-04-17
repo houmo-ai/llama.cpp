@@ -36,6 +36,27 @@ class HouMoLLModel {
                       float *logits);
     int houmo_decode(std::vector<llama_token> &batches,
                      std::vector<int> &seq_ids, std::vector<float *> logits);
+    /**
+     * @brief Verify k draft tokens for the same sequence in a single NPU forward.
+     * @details Equivalent to prefill(k tokens) but returns the logits of every
+     * position in @p tokens (not only the last one). Used for speculative
+     * decoding verification where the target model has to sample from each
+     * of the k draft positions.
+     *
+     * Semantics:
+     *   - All @p tokens belong to the same @p seq_id and are placed at
+     *     consecutive positions base..base+k-1 where base = current KV length.
+     *   - logits_out.size() must equal tokens.size().
+     *   - logits_out[i] may be nullptr to skip writing that position.
+     *   - On success KV state advances by k tokens; caller is responsible for
+     *     rolling back rejected tail if needed.
+     *
+     * Default implementation falls back to a per-token houmo_prefill loop
+     * (correct but slow, ~k× the cost). Backends that can emit per-position
+     * logits from a single forward should override it.
+     */
+    int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+                     std::vector<float *> &logits_out);
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings);
     bool is_embedding();
@@ -93,6 +114,27 @@ public:
   virtual int houmo_decode(std::vector<llama_token> &batches,
                            std::vector<int> &seq_ids,
                            std::vector<float *> logits) = 0;
+  /**
+   * @brief Batched verification for speculative decoding.
+   * @details See HouMoLLModel::houmo_verify. Default fallback implementation
+   * repeatedly calls houmo_prefill with a single token — correct but ~k×
+   * slower than a proper one-shot implementation. Backends should override
+   * this when they can produce per-position logits in a single forward.
+   */
+  virtual int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+                           std::vector<float *> &logits_out) {
+      if (tokens.size() != logits_out.size()) {
+          return -1;
+      }
+      for (size_t i = 0; i < tokens.size(); ++i) {
+          std::vector<llama_token> one = {tokens[i]};
+          int ret = houmo_prefill(one, seq_id, logits_out[i]);
+          if (ret != 0) {
+              return ret;
+          }
+      }
+      return 0;
+  }
   virtual bool is_embedding() {
     return false;
   }
