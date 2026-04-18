@@ -544,6 +544,76 @@ void HoumoQwen35LLM::set_linear_attn_mask(tcim::Tensor &tensor, int fill_length,
     }
 }
 
+int HoumoQwen35LLM::run_prefill_round(int seq_id,
+                                      tcim::Tensor &input_data,
+                                      int32_t valid_length,
+                                      int32_t current_length,
+                                      const int32_t *time_pos_slice,
+                                      const int32_t *height_pos_slice,
+                                      const int32_t *width_pos_slice,
+                                      bool is_first_round) {
+    if (!prefill_valid_length_name_.empty()) {
+        auto vl = prefill_input_map_.at(prefill_valid_length_name_);
+        set_input_data(vl, n_prefill_batch_, valid_length);
+        prefill_model_->SetInput(prefill_valid_length_name_, vl);
+    }
+    if (!prefill_current_length_name_.empty()) {
+        auto cl = prefill_input_map_.at(prefill_current_length_name_);
+        set_input_data(cl, n_prefill_batch_, current_length);
+        prefill_model_->SetInput(prefill_current_length_name_, cl);
+    }
+
+    auto bind_pos = [&](const std::string &name, const int32_t *slice) {
+        if (name.empty() || slice == nullptr) {
+            return;
+        }
+        auto tensor = prefill_input_map_.at(name);
+        std::vector<int32_t> v(slice, slice + prefill_length_);
+        set_input_data(tensor, v);
+        prefill_model_->SetInput(name, tensor);
+    };
+    bind_pos(prefill_time_pos_name_, time_pos_slice);
+    bind_pos(prefill_height_pos_name_, height_pos_slice);
+    bind_pos(prefill_width_pos_name_, width_pos_slice);
+
+    if (!prefill_linear_mask_name_.empty()) {
+        auto linear_mask = prefill_input_map_.at(prefill_linear_mask_name_);
+        set_linear_attn_mask(linear_mask, prefill_length_, current_length);
+        prefill_model_->SetInput(prefill_linear_mask_name_, linear_mask);
+    }
+
+    PERF_START(PREFILL_SETINPUT_ONCE);
+    if (is_first_round) {
+        for (const auto &pair : lora_map) {
+            if (prefill_input_map_.count(pair.first) > 0) {
+                auto lora_mask = prefill_input_map_[pair.first];
+                lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
+                                                       lora_mask_float_.MemSize());
+                lora_mask_float_.CastTo(lora_mask);
+                prefill_model_->SetInput(pair.first, lora_mask);
+            }
+        }
+    }
+    prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
+    if (is_first_round) {
+        set_state_cache_for_prefill(seq_id);
+        set_kv_cache_for_prefill(seq_id);
+    }
+    PERF_STOP(PREFILL_SETINPUT_ONCE);
+
+    PERF_START(PREFILL_RUN_ONCE);
+    auto status = prefill_model_->Run();
+    if (status != tcim::Status::OK) {
+        PERF_STOP(PREFILL_RUN_ONCE);
+        LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
+                        __func__, static_cast<int>(status));
+        return -1;
+    }
+    prefill_model_->Sync();
+    PERF_STOP(PREFILL_RUN_ONCE);
+    return 0;
+}
+
 int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                  float *logits) {
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
@@ -581,7 +651,8 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             embedding_layer_->get_embedding_batch(
                 tokens.data(), tokens.size(), cache.data() + cur);
             pending_chunks_[seq_id].push_back(
-                {static_cast<int>(tokens.size()), /*is_vision=*/false, 0, 0});
+                {static_cast<int>(tokens.size()), /*is_vision=*/false, 0, 0,
+                 tokens});
             LLAMA_LOG_INFO("%s: cached %zu text tokens for seq_id=%d (vision flow)\n",
                            __func__, tokens.size(), seq_id);
         }
@@ -665,7 +736,28 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             // state cache is sequential and must see ALL tokens.
             int rollback_pos = (best_ckpt > 0) ? best_ckpt : 0;
 
-            if (rollback_pos < kv_offset) {
+            // Sentinel guard: history positions in
+            // [0 .. first_safe_position) may be vision-sentinel zeros
+            // (placeholders for image embeddings), which cannot be replayed
+            // through the text embedding path.  If our rollback would land
+            // before first_safe_position the gap would contain sentinels
+            // and produce wrong state — treat this case as "unrecoverable"
+            // and degrade gracefully.
+            const int first_safe_pos = snap_iter->second.first_safe_position;
+            const bool sentinel_block =
+                (rollback_pos < first_safe_pos) && (kv_offset > 0);
+
+            if (sentinel_block) {
+                LLAMA_LOG_WARN(
+                    "%s: rollback_pos=%d < first_safe_position=%d for "
+                    "seq_id=%d (vision sentinels in gap), refusing replay; "
+                    "state will be inaccurate\n",
+                    __func__, rollback_pos, first_safe_pos, seq_id);
+                effective_tokens = tokens;
+                state_cache_initialized_[seq_id] = false;
+                snap_iter->second.valid = false;
+                snap_iter->second.checkpoints.clear();
+            } else if (rollback_pos < kv_offset) {
                 // Need gap tokens [rollback_pos .. kv_offset).
                 if (static_cast<size_t>(kv_offset) <= saved_history.size()) {
                     std::vector<llama_token> gap(
@@ -757,6 +849,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             snap_iter->second.valid = false;
             snap_iter->second.checkpoints.clear();
             snap_iter->second.last_processed_pos = 0;
+            snap_iter->second.first_safe_position = 0;
         }
     } else {
         // No state cache — use tokens as-is.
@@ -813,69 +906,13 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         embedding_layer_->get_embedding_batch(token_ptr, current_length,
                                              input_data.Data());
 
-        if (!prefill_valid_length_name_.empty()) {
-            auto prefill_valid_length = prefill_input_map_.at(prefill_valid_length_name_);
-            set_input_data(prefill_valid_length, n_prefill_batch_, valid_length);
-            prefill_model_->SetInput(prefill_valid_length_name_, prefill_valid_length);
-        }
-        if (!prefill_current_length_name_.empty()) {
-            auto prefill_current_length = prefill_input_map_.at(prefill_current_length_name_);
-            set_input_data(prefill_current_length, n_prefill_batch_, current_length);
-            prefill_model_->SetInput(prefill_current_length_name_, prefill_current_length);
-        }
-
         auto position_ids = build_rope_position_ids(valid_length, prefill_length_);
-        if (!prefill_time_pos_name_.empty()) {
-            auto time_pos = prefill_input_map_.at(prefill_time_pos_name_);
-            set_input_data(time_pos, position_ids);
-            prefill_model_->SetInput(prefill_time_pos_name_, time_pos);
-        }
-        if (!prefill_height_pos_name_.empty()) {
-            auto height_pos = prefill_input_map_.at(prefill_height_pos_name_);
-            set_input_data(height_pos, position_ids);
-            prefill_model_->SetInput(prefill_height_pos_name_, height_pos);
-        }
-        if (!prefill_width_pos_name_.empty()) {
-            auto width_pos = prefill_input_map_.at(prefill_width_pos_name_);
-            set_input_data(width_pos, position_ids);
-            prefill_model_->SetInput(prefill_width_pos_name_, width_pos);
-        }
-        if (!prefill_linear_mask_name_.empty()) {
-            auto linear_mask = prefill_input_map_.at(prefill_linear_mask_name_);
-            set_linear_attn_mask(linear_mask, prefill_length_, current_length);
-            prefill_model_->SetInput(prefill_linear_mask_name_, linear_mask);
-        }
-
-        PERF_START(PREFILL_SETINPUT_ONCE);
-        // Only set LoRA masks in the first round - they don't change across rounds
-        if (round == 0) {
-            for (const auto &pair : lora_map) {
-                if (prefill_input_map_.count(pair.first) > 0) {
-                    auto lora_mask = prefill_input_map_[pair.first];
-                    lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
-                                                           lora_mask_float_.MemSize());
-                    lora_mask_float_.CastTo(lora_mask);
-                    prefill_model_->SetInput(pair.first, lora_mask);
-                }
-            }
-        }
-        prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
-        // Only set state cache and KV cache in the first round - they persist across rounds
-        if (round == 0) {
-            set_state_cache_for_prefill(seq_id);
-            set_kv_cache_for_prefill(seq_id);
-        }
-        PERF_STOP(PREFILL_SETINPUT_ONCE);
-
-        PERF_START(PREFILL_RUN_ONCE);
-        auto status = prefill_model_->Run();
-        if (status != tcim::Status::OK) {
-            LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
-                            __func__, static_cast<int>(status));
+        if (run_prefill_round(seq_id, input_data, valid_length, current_length,
+                              position_ids.data(), position_ids.data(),
+                              position_ids.data(),
+                              /*is_first_round=*/round == 0) != 0) {
             return -1;
         }
-        prefill_model_->Sync();
-        PERF_STOP(PREFILL_RUN_ONCE);
         valid_length += current_length;
 
         // Save a checkpoint when the distance from the nearest existing
@@ -1000,8 +1037,9 @@ int HoumoQwen35LLM::houmo_prefill(const float *embeddings, int n_tokens,
     cache.resize(cur + data_elems);
     std::memcpy(cache.data() + cur, ptr + embedding_offset, data_bytes);
 
-    // Track chunk info
-    pending_chunks_[seq_id].push_back({n_tokens, /*is_vision=*/true, nx, ny});
+    // Track chunk info (vision chunk has no real token ids)
+    pending_chunks_[seq_id].push_back(
+        {n_tokens, /*is_vision=*/true, nx, ny, {}});
 
     return 0;
 }
@@ -1064,13 +1102,23 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         embedding_layer_->get_embedding_batch(
             tokens.data(), tokens.size(), cache.data() + cur);
         pending_chunks_[seq_id].push_back(
-            {static_cast<int>(tokens.size()), /*is_vision=*/false, 0, 0});
+            {static_cast<int>(tokens.size()), /*is_vision=*/false, 0, 0,
+             tokens});
     }
 
-    // Compute total tokens
+    // Compute total tokens, and the local position right after the LAST
+    // vision chunk completes.  Token positions in the snapshot covered by
+    // text-only suffix [last_vision_end_local .. total_tokens) are safe to
+    // replay (real ids), while [0 .. last_vision_end_local) may contain
+    // vision sentinels — checkpoints that fall before last_vision_end_local
+    // must NOT be used as a rollback point for gap replay.
     size_t total_tokens = 0;
+    size_t last_vision_end_local = 0;
     for (auto &chunk : pending_chunks_[seq_id]) {
         total_tokens += chunk.size;
+        if (chunk.is_vision) {
+            last_vision_end_local = total_tokens;
+        }
     }
 
     int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
@@ -1090,6 +1138,7 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
             snap_iter->second.valid = false;
             snap_iter->second.checkpoints.clear();
             snap_iter->second.last_processed_pos = 0;
+            snap_iter->second.first_safe_position = 0;
         }
     }
 
@@ -1107,25 +1156,48 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
                    __func__, total_tokens, kv_offset, final_pos,
                    decode_position_offset_[seq_id]);
 
-    // Pad position IDs to full prefill rounds
-    size_t rounds = (total_tokens + prefill_length_ - 1) / prefill_length_;
-    size_t padded_size = rounds * prefill_length_;
+    // Pad position IDs.  We use a variable-step round loop below so the
+    // start of any round is bounded by total_tokens, and each slice reads
+    // prefill_length_ entries.  Pad enough to cover the worst case where
+    // the last round started just before total_tokens.
+    size_t padded_size = total_tokens + prefill_length_;
     time_pos_ids.resize(padded_size, time_pos_ids.empty() ? 0 : time_pos_ids.back());
     height_pos_ids.resize(padded_size, height_pos_ids.empty() ? 0 : height_pos_ids.back());
     width_pos_ids.resize(padded_size, width_pos_ids.empty() ? 0 : width_pos_ids.back());
 
     int32_t valid_length = kv_offset;
     int32_t current_length = 0;
+    // Absolute position at which the last vision chunk ends.  Once a round
+    // boundary reaches or passes this position, the trailing state cache is
+    // safe to checkpoint for future regenerate / prefix-reuse, because the
+    // suffix [safe_pos_abs .. total_end) contains only real text tokens.
+    const int32_t safe_pos_abs =
+        kv_offset + static_cast<int32_t>(last_vision_end_local);
+    const int32_t total_end =
+        kv_offset + static_cast<int32_t>(total_tokens);
+    bool safe_ckpt_saved = false;
 
     auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
     auto &emb_cache = embedding_cache_[seq_id];
 
-    for (size_t round = 0; round < rounds; ++round) {
-        size_t round_start = round * prefill_length_;
-        size_t remaining = total_tokens > round_start ? total_tokens - round_start : 0;
-        current_length = remaining >= static_cast<size_t>(prefill_length_)
-                             ? prefill_length_
-                             : static_cast<int>(remaining);
+    // Variable-step round loop:
+    // - Each step processes at most prefill_length_ valid tokens.
+    // - The step never crosses last_vision_end_local, so we get a clean
+    //   round boundary right after the vision portion.  Without this
+    //   forced break, a single-round prefill (total_tokens <= prefill_length_)
+    //   would leave us no chance to snapshot the post-vision state.
+    size_t cursor = 0;
+    size_t round_idx = 0;
+    while (cursor < total_tokens) {
+        size_t step = std::min<size_t>(prefill_length_, total_tokens - cursor);
+        if (last_vision_end_local > 0 &&
+            cursor < last_vision_end_local &&
+            cursor + step > last_vision_end_local) {
+            step = last_vision_end_local - cursor;
+        }
+        size_t round_start = cursor;
+        current_length = static_cast<int>(step);
+        const bool is_first_round = (round_idx == 0);
 
         // Copy cached embeddings into prefill input
         memset(input_data.Data(), 0, input_data.MemSize());
@@ -1133,70 +1205,14 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         size_t copy_bytes = current_length * n_embd_ * sizeof(int16_t);
         std::memcpy(input_data.Data(), emb_cache.data() + emb_start, copy_bytes);
 
-        // Set valid_length and current_length
-        if (!prefill_valid_length_name_.empty()) {
-            auto vl = prefill_input_map_.at(prefill_valid_length_name_);
-            set_input_data(vl, n_prefill_batch_, valid_length);
-            prefill_model_->SetInput(prefill_valid_length_name_, vl);
+        if (run_prefill_round(seq_id, input_data, valid_length, current_length,
+                              time_pos_ids.data() + round_start,
+                              height_pos_ids.data() + round_start,
+                              width_pos_ids.data() + round_start,
+                              is_first_round) != 0) {
+            clear_vision_cache(seq_id);
+            return -1;
         }
-        if (!prefill_current_length_name_.empty()) {
-            auto cl = prefill_input_map_.at(prefill_current_length_name_);
-            set_input_data(cl, n_prefill_batch_, current_length);
-            prefill_model_->SetInput(prefill_current_length_name_, cl);
-        }
-
-        // Set 3D position IDs (sub-slice for this round)
-        size_t pos_offset = round_start;
-        if (!prefill_time_pos_name_.empty()) {
-            auto tensor = prefill_input_map_.at(prefill_time_pos_name_);
-            std::vector<int32_t> slice(time_pos_ids.begin() + pos_offset,
-                                       time_pos_ids.begin() + pos_offset + prefill_length_);
-            set_input_data(tensor, slice);
-            prefill_model_->SetInput(prefill_time_pos_name_, tensor);
-        }
-        if (!prefill_height_pos_name_.empty()) {
-            auto tensor = prefill_input_map_.at(prefill_height_pos_name_);
-            std::vector<int32_t> slice(height_pos_ids.begin() + pos_offset,
-                                       height_pos_ids.begin() + pos_offset + prefill_length_);
-            set_input_data(tensor, slice);
-            prefill_model_->SetInput(prefill_height_pos_name_, tensor);
-        }
-        if (!prefill_width_pos_name_.empty()) {
-            auto tensor = prefill_input_map_.at(prefill_width_pos_name_);
-            std::vector<int32_t> slice(width_pos_ids.begin() + pos_offset,
-                                       width_pos_ids.begin() + pos_offset + prefill_length_);
-            set_input_data(tensor, slice);
-            prefill_model_->SetInput(prefill_width_pos_name_, tensor);
-        }
-        if (!prefill_linear_mask_name_.empty()) {
-            auto linear_mask = prefill_input_map_.at(prefill_linear_mask_name_);
-            set_linear_attn_mask(linear_mask, prefill_length_, current_length);
-            prefill_model_->SetInput(prefill_linear_mask_name_, linear_mask);
-        }
-
-        PERF_START(PREFILL_SETINPUT_ONCE);
-        if (round == 0) {
-            for (const auto &pair : lora_map) {
-                if (prefill_input_map_.count(pair.first) > 0) {
-                    auto lora_mask = prefill_input_map_[pair.first];
-                    lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
-                                                           lora_mask_float_.MemSize());
-                    lora_mask_float_.CastTo(lora_mask);
-                    prefill_model_->SetInput(pair.first, lora_mask);
-                }
-            }
-        }
-        prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
-        if (round == 0) {
-            set_state_cache_for_prefill(seq_id);
-            set_kv_cache_for_prefill(seq_id);
-        }
-        PERF_STOP(PREFILL_SETINPUT_ONCE);
-
-        PERF_START(PREFILL_RUN_ONCE);
-        prefill_model_->Run();
-        prefill_model_->Sync();
-        PERF_STOP(PREFILL_RUN_ONCE);
 
         if (abort_callback_ != nullptr && abort_callback_(abort_callback_data_)) {
             LLAMA_LOG_INFO("%s: aborted seq_id=%d\n", __func__, seq_id);
@@ -1205,6 +1221,24 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         }
 
         valid_length += current_length;
+        cursor += step;
+        ++round_idx;
+
+        // Save a safe checkpoint as soon as we cross the end of the last
+        // vision chunk, provided some text still follows (otherwise the
+        // end-of-prefill checkpoint already covers this exact position).
+        // The variable-step loop above guarantees there is a round
+        // boundary at safe_pos_abs, so this branch fires reliably even
+        // when total_tokens fits in a single prefill_length_ window.
+        if (!safe_ckpt_saved && last_vision_end_local > 0 &&
+            valid_length >= safe_pos_abs && valid_length < total_end) {
+            save_state_checkpoint(seq_id, valid_length);
+            safe_ckpt_saved = true;
+            LLAMA_LOG_INFO(
+                "%s: saved safe post-vision checkpoint seq_id=%d pos=%d "
+                "(safe_pos_abs=%d total_end=%d)\n",
+                __func__, seq_id, valid_length, safe_pos_abs, total_end);
+        }
     }
 
     decode_valid_length_[seq_id] = kv_offset + static_cast<int32_t>(total_tokens);
@@ -1223,14 +1257,43 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         memory_->seq_add(seq_id, 0, 0, static_cast<int32_t>(total_tokens));
     }
 
-    // Update snapshot (vision prefill doesn't support prefix reuse yet)
+    // Update snapshot.  Vision prefill always restarts state from 0 above
+    // (kv_offset > 0 is supported but state is reset), so the snapshot
+    // history is rebuilt from scratch from pending_chunks_:
+    //   - text chunks contribute their real token ids
+    //   - vision chunks contribute sentinel zeros of equal length
+    // first_safe_position marks where vision sentinels end, so future text
+    // prefills know they cannot roll back further than this without
+    // corrupting state-cache replay.
     {
         auto &snapshot = prefill_snapshots_[seq_id];
         snapshot.tokens.clear();
-        // store a sentinel for the vision portion so history length matches
-        for (size_t i = 0; i < total_tokens; i++) {
-            snapshot.tokens.push_back(0);
+        snapshot.tokens.reserve(total_tokens);
+        for (auto &chunk : pending_chunks_[seq_id]) {
+            if (chunk.is_vision) {
+                snapshot.tokens.insert(snapshot.tokens.end(),
+                                       static_cast<size_t>(chunk.size),
+                                       static_cast<llama_token>(0));
+            } else {
+                // Defensive: text chunks should have stored their ids.
+                if (static_cast<int>(chunk.text_tokens.size()) ==
+                    chunk.size) {
+                    snapshot.tokens.insert(snapshot.tokens.end(),
+                                           chunk.text_tokens.begin(),
+                                           chunk.text_tokens.end());
+                } else {
+                    LLAMA_LOG_WARN(
+                        "%s: text chunk missing token ids (have %zu need %d) "
+                        "seq_id=%d, padding with sentinels\n",
+                        __func__, chunk.text_tokens.size(), chunk.size,
+                        seq_id);
+                    snapshot.tokens.insert(snapshot.tokens.end(),
+                                           static_cast<size_t>(chunk.size),
+                                           static_cast<llama_token>(0));
+                }
+            }
         }
+        snapshot.first_safe_position = static_cast<int>(last_vision_end_local);
         if (valid_length > 0) {
             save_state_checkpoint(seq_id, valid_length);
         }
