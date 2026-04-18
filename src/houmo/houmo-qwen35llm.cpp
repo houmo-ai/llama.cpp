@@ -550,8 +550,29 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                    seq_id, tokens.size());
 
     // ---- Vision multi-call caching ----
-    // When logits is nullptr, cache text embeddings for later combined processing.
-    if (logits == nullptr) {
+    // Only cache text embeddings when this sequence is already in a
+    // multimodal flow (i.e. at least one vision chunk has been received
+    // via the embd overload).  Pure-text prompts that llama.cpp chunks
+    // into multiple batches — where only the last batch carries logits —
+    // must NOT enter the vision cache path, otherwise:
+    //   1. The prefill loop is bypassed, so no intermediate state
+    //      checkpoints are saved;
+    //   2. The final vision path stores a sentinel-zero token history,
+    //      making gap replay for future prefix reuse impossible.
+    // For such pure-text continuation batches, fall through to the normal
+    // text prefill path.  It already supports `logits==nullptr` (skipping
+    // the memcpy to logits) and maintains snapshot history + checkpoints.
+    auto has_vision_chunk = [&]() {
+        auto it = pending_chunks_.find(seq_id);
+        if (it == pending_chunks_.end()) return false;
+        for (const auto & c : it->second) {
+            if (c.is_vision) return true;
+        }
+        return false;
+    };
+
+    if (logits == nullptr && has_vision_chunk()) {
+        // Text chunk interleaved between vision chunks — cache it.
         if (!tokens.empty()) {
             auto &cache = embedding_cache_[seq_id];
             size_t cur = cache.size();
@@ -561,14 +582,15 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                 tokens.data(), tokens.size(), cache.data() + cur);
             pending_chunks_[seq_id].push_back(
                 {static_cast<int>(tokens.size()), /*is_vision=*/false, 0, 0});
-            LLAMA_LOG_INFO("%s: cached %zu text tokens for seq_id=%d\n",
+            LLAMA_LOG_INFO("%s: cached %zu text tokens for seq_id=%d (vision flow)\n",
                            __func__, tokens.size(), seq_id);
         }
         return 0;
     }
 
-    // When logits is non-null and we have pending vision/text cache, use vision path.
-    if (!pending_chunks_[seq_id].empty()) {
+    // When logits is non-null and a vision chunk is pending, flush via
+    // vision path (handles M-RoPE, cached embeddings, etc.).
+    if (logits != nullptr && has_vision_chunk()) {
         return houmo_prefill_vision(tokens, seq_id, logits);
     }
     // ---- End vision caching ----

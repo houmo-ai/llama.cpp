@@ -2121,7 +2121,7 @@ private:
 
                 // add the sampled token to the batch
                 slot.i_batch_dft.push_back(batch.n_tokens);
-                common_batch_add(batch, slot.sampled, slot.prompt.tokens.pos_next(), { slot.id }, true);
+                common_batch_add(batch, slot.sampled, is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next(), { slot.id }, true);
                 slot.prompt.tokens.push_back(slot.sampled);
 
                 if (slot.task->params.speculative.n_min > (int) draft.size()) {
@@ -2137,7 +2137,7 @@ private:
                     // add all drafted tokens to the batch
                     for (size_t i = 0; i < draft.size(); i++) {
                         slot.i_batch_dft.push_back(batch.n_tokens);
-                        common_batch_add(batch, draft[i], slot.prompt.tokens.pos_next(), { slot.id }, true);
+                        common_batch_add(batch, draft[i], is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next(), { slot.id }, true);
                         slot.prompt.tokens.push_back(draft[i]);
                     }
                     slot.drafted = std::move(draft);
@@ -2146,7 +2146,7 @@ private:
                 // no speculative decoding
                 slot.i_batch = batch.n_tokens;
 
-                common_batch_add(batch, slot.sampled, slot.prompt.tokens.pos_next(), { slot.id }, true);
+                common_batch_add(batch, slot.sampled, is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next(), { slot.id }, true);
 
                 slot.prompt.tokens.push_back(slot.sampled);
 
@@ -2504,7 +2504,7 @@ private:
                     }
 
                     // truncate any tokens that are beyond n_past for this slot
-                    const llama_pos p0 = slot.prompt.tokens.pos_next();
+                    const llama_pos p0 = is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next();
 
                     SLT_INF(slot, "n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
@@ -2525,7 +2525,7 @@ private:
                         size_t n_tokens_out = 0;
                         time_t t0 = ggml_time_ms();
 
-                        int32_t res = input_tokens.process_chunk(ctx, mctx, slot.prompt.n_tokens(), slot.prompt.tokens.pos_next(), slot.id, n_tokens_out);
+                        int32_t res = input_tokens.process_chunk(ctx, mctx, slot.prompt.n_tokens(), is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next(), slot.id, n_tokens_out);
                         if (res != 0) {
                             SLT_ERR(slot, "failed to process image, res = %d\n", res);
                             send_error(slot, "failed to process image", ERROR_TYPE_SERVER);
@@ -2594,7 +2594,7 @@ private:
                         // embedding requires all tokens in the batch to be output
                         common_batch_add(batch,
                             cur_tok,
-                            slot.prompt.tokens.pos_next(),
+                            is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next(),
                             { slot.id },
                             slot.task->need_embd());
                         slot.prompt.tokens.push_back(cur_tok);
