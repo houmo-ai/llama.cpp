@@ -48,6 +48,20 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
                                                  int length) const;
     int set_decode_rope_and_mask(const std::vector<int> &seq_ids);
 
+    // 执行一轮 prefill。
+    // - input_data：本轮 embeddings（文本走 embedding_layer_，vision 从 cache memcpy）
+    // - *_pos_slice：每个指针至少 prefill_length_ 个 int32_t；三者相同即退化为 1D RoPE
+    // - is_first_round：仅首轮绑定 LoRA mask 与 state/KV cache
+    // 返回 0 成功，-1 表示 Run() 失败。
+    int run_prefill_round(int seq_id,
+                          tcim::Tensor &input_data,
+                          int32_t valid_length,
+                          int32_t current_length,
+                          const int32_t *time_pos_slice,
+                          const int32_t *height_pos_slice,
+                          const int32_t *width_pos_slice,
+                          bool is_first_round);
+
     // State checkpoint helpers for prefix cache reuse
     int find_common_prefix_length(const std::vector<llama_token> &saved,
                                   const std::vector<llama_token> &incoming) const;
@@ -74,6 +88,9 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
         bool is_vision; // true = vision embedding, false = text
         int nx;         // grid width after merge (only for vision)
         int ny;         // grid height after merge (only for vision)
+        // 文本 chunk 的真实 token ids；vision chunk 为空。
+        // vision flush 后用于回填 snapshot.tokens，便于后续重生成/前缀复用。
+        std::vector<llama_token> text_tokens;
     };
     std::map<int, std::vector<int16_t>> embedding_cache_; // accumulated embeddings (fp16)
     std::map<int, std::vector<ChunkInfo>> pending_chunks_; // chunk types
@@ -136,6 +153,10 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
         std::map<int, StateCheckpoint> checkpoints;    // position -> checkpoint
         int last_processed_pos = 0;                    // state cache valid up to this position
         bool valid = false;
+        // tokens 中保证为真实 token id 的最小绝对位置。
+        // [0, first_safe_position) 可能是代表 vision embedding 的占位 0，
+        // 不能作为 gap-replay 起点。0 表示整段历史均为真实文本。
+        int first_safe_position = 0;
     };
     std::map<int, PrefillSnapshot> prefill_snapshots_;
 };
