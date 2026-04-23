@@ -141,8 +141,6 @@ $SUDO sed -i "/^${MARKER_START}/,/^${MARKER_END}/d" "${BASHRC_FILE}" || error "�
 cat <<EOF | $SUDO tee -a "${BASHRC_FILE}" >/dev/null
 ${MARKER_START}
 # llama-server 环境变量（自动生成，请勿手动修改）
-export LD_LIBRARY_PATH=${LLAMA_LIB_DIR}:\${LD_LIBRARY_PATH:-}
-export TCIM_RUNTIME_PATH=${INSTALL_DIR}
 export PATH=${INSTALL_DIR}/bin:\${PATH:-}
 ${MARKER_END}
 EOF

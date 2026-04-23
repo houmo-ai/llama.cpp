@@ -423,7 +423,7 @@ struct server_slot {
                 "=Model Context Lenght                   = %5d tokens\n"
                 "=Prompt Tokens Processed                = %5d tokens\n"
                 "=TTFT(Time to First Token)              = %8.2f ms\n"
-                "=TOPT(Time Per Output Token             = %8.2f ms\n"
+                "=TPOT(Time Per Output Token             = %8.2f ms\n"
                 "=E2E Latency (End-to-End Latency)       = %8.2f s\n"
                 "=E2E TPS (End-to-End Tokens Per Second) = %8.2f tokens/s\n"
                 "====================================================================================================\n",
