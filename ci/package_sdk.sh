@@ -184,13 +184,11 @@ function package_ollama() {
     mkdir -p release/${PLATFORM}_${ARCH}/HLAWOllama
     mkdir -p release/${PLATFORM}_${ARCH}/HLAWOllama/bin
     mkdir -p release/${PLATFORM}_${ARCH}/HLAWOllama/lib
-    mkdir -p release/${PLATFORM}_${ARCH}/HLAWOllama/modelfiles
     download_file "$ollama_url" "release/${PLATFORM}_${ARCH}/HLAWOllama/bin/hlaw_ollama"
     cp -r $llama_release_dir/bin/llama-server release/${PLATFORM}_${ARCH}/HLAWOllama/bin/
     cp -r $llama_release_dir/lib/*.so* release/${PLATFORM}_${ARCH}/HLAWOllama/lib/
-    cp tools/ollama/install_ollama.sh release/${PLATFORM}_${ARCH}/HLAWOllama/
-    cp tools/ollama/uninstall_ollama.sh release/${PLATFORM}_${ARCH}/HLAWOllama/
-    cp tools/ollama/qwen3.modelfile release/${PLATFORM}_${ARCH}/HLAWOllama/modelfiles/
+    cp ci/install_ollama.sh release/${PLATFORM}_${ARCH}/HLAWOllama/
+    cp ci/uninstall_ollama.sh release/${PLATFORM}_${ARCH}/HLAWOllama/
 
     makeself --gzip --target "/opt/HLAWOllama"\
             "./release/${PLATFORM}_${ARCH}/HLAWOllama" \
