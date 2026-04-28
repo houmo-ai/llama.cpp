@@ -5,7 +5,7 @@ available() { command -v $1 >/dev/null; }
 error() { echo "错误: $*" >&2; exit 1; }
 SUDO=
 if [ "$(id -u)" -ne 0 ]; then
-    # Running as root, no need for sudo
+    # Running as non-root, sudo is required for privileged operations
     if ! available sudo; then
         error "This script requires superuser permissions. Please re-run as root."
     fi
@@ -33,12 +33,12 @@ else
 fi
 # 获取当前执行脚本的用户
 EFFECTIVE_USER="$(id -un)"
-if [ "$EFFECTIVE_USER" = "root" ]; then
-    echo "当前以 root 用户执行"
-    CURRENT_USER="root"
-elif [ -n "$SUDO_USER" ]; then
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
     echo "当前通过 sudo 执行，原始用户：$SUDO_USER"
     CURRENT_USER="$SUDO_USER"
+elif [ "$EFFECTIVE_USER" = "root" ]; then
+    echo "当前以 root 用户执行"
+    CURRENT_USER="root"
 else
     echo "未通过 sudo 执行，当前用户：${USER:-$EFFECTIVE_USER}"
     CURRENT_USER="${USER:-$EFFECTIVE_USER}"
@@ -98,12 +98,19 @@ echo "服务文件已成功创建：${SERVICE_FILE_PATH}"
 # 定义特征注释（用于标记需要清理的区块）
 MARKER_START="# HLAWOllama start"
 MARKER_END="# HLAWOllama end"
+
+# 在需要时以实际用户身份修改其 .bashrc，避免 root 拥有者污染
+RUN_AS_CURRENT_USER=()
+if [ "$(id -un)" != "$CURRENT_USER" ]; then
+    RUN_AS_CURRENT_USER=(sudo -u "$CURRENT_USER")
+fi
+
 # 先删除 .bashrc 中已有的该区块（如果存在）
 # 使用 sed 命令删除标记之间的内容（包括标记本身）
-$SUDO touch "${BASHRC_PATH}"
-$SUDO sed -i "/${MARKER_START}/,/${MARKER_END}/d" "${BASHRC_PATH}"
+"${RUN_AS_CURRENT_USER[@]}" touch "${BASHRC_PATH}"
+"${RUN_AS_CURRENT_USER[@]}" sed -i "/${MARKER_START}/,/${MARKER_END}/d" "${BASHRC_PATH}"
 # 再写入新的环境变量（带标记，方便下次清理）
-cat <<EOF >> "${BASHRC_PATH}"
+cat <<EOF | "${RUN_AS_CURRENT_USER[@]}" tee -a "${BASHRC_PATH}" > /dev/null
 ${MARKER_START}
 export PATH=${INSTALL_DIR}/bin:\${PATH}
 ${MARKER_END}
