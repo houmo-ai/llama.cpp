@@ -1,7 +1,9 @@
 #include "houmo-qwen35llm.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <climits>
+#include <cstdlib>
 #include <cstring>
 #include "ggml.h"
 #include "llama-impl.h"
@@ -159,6 +161,21 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
     }
     resolve_input_names();
     init_state_cache(seq_max);
+
+    if (const char *env = std::getenv("LLAMA_CHECKPOINT_INTERVAL")) {
+        errno = 0;
+        char *end = nullptr;
+        long v = std::strtol(env, &end, 10);
+        if (errno == 0 && end != env && *end == '\0' && v > 0 && v <= 4096) {
+            checkpoint_min_interval_ = static_cast<int>(v);
+            LLAMA_LOG_INFO("%s: set checkpoint_min_interval_ from env LLAMA_CHECKPOINT_INTERVAL=%d\n",
+                           __func__, checkpoint_min_interval_);
+        } else {
+            LLAMA_LOG_WARN("%s: invalid LLAMA_CHECKPOINT_INTERVAL='%s', keep default=%d\n",
+                           __func__, env, checkpoint_min_interval_);
+        }
+    }
+
 }
 
 void HoumoQwen35LLM::resolve_input_names() {
@@ -493,6 +510,52 @@ void HoumoQwen35LLM::restore_zero_state(int seq_id) {
     }
 }
 
+void HoumoQwen35LLM::trim_snapshot_to_kv_offset(int seq_id,
+                                                int32_t kv_offset) {
+    auto snap_iter = prefill_snapshots_.find(seq_id);
+    if (snap_iter == prefill_snapshots_.end()) {
+        return;
+    }
+
+    auto &snapshot = snap_iter->second;
+    const int32_t trim_pos = std::max<int32_t>(0, kv_offset);
+
+    bool changed = false;
+    const size_t trim_size = static_cast<size_t>(trim_pos);
+
+    if (snapshot.tokens.size() > trim_size) {
+        snapshot.tokens.resize(trim_size);
+        changed = true;
+    }
+
+    auto erase_begin = snapshot.checkpoints.upper_bound(trim_pos);
+    if (erase_begin != snapshot.checkpoints.end()) {
+        snapshot.checkpoints.erase(erase_begin, snapshot.checkpoints.end());
+        changed = true;
+    }
+
+    // IMPORTANT: do NOT clamp last_processed_pos here.
+    // last_processed_pos reflects where state tensors actually are.
+    // memory_seq_rm() only truncates KV/memory, it does not rewind state
+    // tensors. If we force last_processed_pos down to kv_offset, a later
+    // prefill may mis-detect "continuation" and skip required rollback/
+    // replay, causing duplicated-token state advance.
+
+    if (snapshot.first_safe_position > trim_pos) {
+        snapshot.first_safe_position = trim_pos;
+        changed = true;
+    }
+
+    if (changed) {
+        LLAMA_LOG_INFO(
+            "%s: trimmed snapshot by boundary seq_id=%d valid_length=%d "
+            "tokens=%zu ckpts=%zu state_pos=%d first_safe_position=%d\n",
+            __func__, seq_id, trim_pos, snapshot.tokens.size(),
+            snapshot.checkpoints.size(), snapshot.last_processed_pos,
+            snapshot.first_safe_position);
+    }
+}
+
 std::vector<int32_t> HoumoQwen35LLM::build_rope_position_ids(int valid_length,
                                                              int length) const {
     std::vector<int32_t> position_ids(static_cast<size_t>(length), 0);
@@ -552,6 +615,9 @@ int HoumoQwen35LLM::run_prefill_round(int seq_id,
                                       const int32_t *height_pos_slice,
                                       const int32_t *width_pos_slice,
                                       bool is_first_round) {
+    LLAMA_LOG_INFO("%s: seq_id=%d, valid_length=%d, current_length=%d, is_first_round=%d\n",
+                   __func__, seq_id, valid_length, current_length,
+                   is_first_round);
     if (!prefill_valid_length_name_.empty()) {
         auto vl = prefill_input_map_.at(prefill_valid_length_name_);
         set_input_data(vl, n_prefill_batch_, valid_length);
@@ -751,12 +817,13 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                 LLAMA_LOG_WARN(
                     "%s: rollback_pos=%d < first_safe_position=%d for "
                     "seq_id=%d (vision sentinels in gap), refusing replay; "
-                    "state will be inaccurate\n",
+                    "state will be inaccurate. should never come here\n",
                     __func__, rollback_pos, first_safe_pos, seq_id);
                 effective_tokens = tokens;
-                state_cache_initialized_[seq_id] = false;
+                state_cache_initialized_[seq_id] = true;
                 snap_iter->second.valid = false;
                 snap_iter->second.checkpoints.clear();
+                snap_iter->second.first_safe_position = 0;
             } else if (rollback_pos < kv_offset) {
                 // Need gap tokens [rollback_pos .. kv_offset).
                 if (static_cast<size_t>(kv_offset) <= saved_history.size()) {
@@ -794,16 +861,17 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                         gap.size(), effective_tokens.size(),
                         effective_kv_offset);
                 } else {
-                    // History too short to fill gap — can't recover.
-                    // Reset state and process from kv_offset (state will
-                    // be inaccurate but it's the best we can do).
+                    // History too short to fill gap — degrade gracefully.
                     LLAMA_LOG_WARN(
                         "%s: saved history too short (%zu) to fill gap "
-                        "[%d..%d) for seq_id=%d, state will be inaccurate\n",
+                        "[%d..%d) for seq_id=%d, refusing replay; state may be inaccurate. should never come here\n",
                         __func__, saved_history.size(),
                         rollback_pos, kv_offset, seq_id);
                     effective_tokens = tokens;
-                    state_cache_initialized_[seq_id] = false;
+                    state_cache_initialized_[seq_id] = true;
+                    snap_iter->second.valid = false;
+                    snap_iter->second.checkpoints.clear();
+                    snap_iter->second.first_safe_position = 0;
                 }
                 snap_iter->second.valid = false;
                 if (best_ckpt <= 0) {
@@ -834,11 +902,16 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             if (kv_offset > 0) {
                 LLAMA_LOG_WARN(
                     "%s: no snapshot for seq_id=%d but kv_offset=%d, "
-                    "cannot retrieve prefix tokens, state inaccurate\n",
+                    "cannot retrieve prefix tokens, refusing replay; "
+                    "state may be inaccurate. should never come here!!!\n",
                     __func__, seq_id, kv_offset);
             }
             effective_tokens = tokens;
-            state_cache_initialized_[seq_id] = false;
+            state_cache_initialized_[seq_id] = true;
+            auto snap_iter2 = prefill_snapshots_.find(seq_id);
+            if (snap_iter2 != prefill_snapshots_.end()) {
+                snap_iter2->second.first_safe_position = 0;
+            }
         }
     } else if (!state_cache_names_.empty() && kv_offset == 0) {
         // Fresh start — reset state.
@@ -856,6 +929,25 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         effective_tokens = tokens;
     }
     // ---- end state cache checkpoint reuse ----
+
+    // Prefill executes from effective_kv_offset, which is the actual
+    // valid_length fed into prefill rounds. Clean snapshot metadata to this
+    // boundary before running rounds so stale token/checkpoint/sentinel
+    // markers beyond valid_length do not affect subsequent decisions.
+    if (!state_cache_names_.empty()) {
+        trim_snapshot_to_kv_offset(seq_id, effective_kv_offset);
+        auto snap_iter2 = prefill_snapshots_.find(seq_id);
+        if (snap_iter2 != prefill_snapshots_.end()) {
+            LLAMA_LOG_INFO(
+                "%s: cleanup-by-valid_length seq_id=%d kv_offset=%d "
+                "effective_kv_offset=%d first_safe_position=%d "
+                "history=%zu ckpts=%zu\n",
+                __func__, seq_id, kv_offset, effective_kv_offset,
+                snap_iter2->second.first_safe_position,
+                snap_iter2->second.tokens.size(),
+                snap_iter2->second.checkpoints.size());
+        }
+    }
 
     // Mark state as needing zero-init if effective_kv_offset is 0
     if (!state_cache_names_.empty() && effective_kv_offset == 0) {
@@ -883,6 +975,11 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         }
         snapshot.tokens.insert(snapshot.tokens.end(),
                                tokens.begin(), tokens.end());
+        if (effective_kv_offset == 0) {
+            // Pure-text prefill rebuilt from position 0; any prior
+            // vision-sentinel boundary is stale and must be cleared.
+            snapshot.first_safe_position = 0;
+        }
         snapshot.last_processed_pos = effective_kv_offset;
         snapshot.valid = true;
         decode_valid_length_[seq_id] = effective_kv_offset;
@@ -990,6 +1087,12 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         snapshot.tokens.insert(snapshot.tokens.end(),
                                effective_tokens.begin(),
                                effective_tokens.end());
+
+        if (effective_kv_offset == 0) {
+            // Text prefill from offset 0 rebuilds history with real text
+            // token ids, so any previous vision sentinel guard is stale.
+            snapshot.first_safe_position = 0;
+        }
 
         // Save a checkpoint at the prefill end position so that the next
         // conversation turn can reuse state up to this point.

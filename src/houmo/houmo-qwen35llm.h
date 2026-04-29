@@ -68,6 +68,7 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     void save_state_checkpoint(int seq_id, int position);
     int find_and_restore_best_checkpoint(int seq_id, int max_position);
     void restore_zero_state(int seq_id);
+    void trim_snapshot_to_kv_offset(int seq_id, int32_t kv_offset);
 
     // Vision support
     int houmo_prefill_vision(std::vector<llama_token> &tokens, int seq_id,
