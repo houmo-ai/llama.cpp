@@ -732,13 +732,14 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
     // ---- End vision caching ----
 
-    // Pure text path — reset vision position offset
-    decode_position_offset_[seq_id] = 0;
-
     // kv_offset: how many tokens the KV cache already has (prefix reuse
     // computed by the outer layer).  The incoming `tokens` do NOT include
     // those prefix tokens — they have already been stripped.
     int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
+
+    if (kv_offset == 0) {
+        decode_position_offset_[seq_id] = 0;
+    }
 
     // ---- state cache checkpoint reuse ----
     // The outer layer reuses kv_offset tokens of KV cache.  But the state
@@ -1003,7 +1004,8 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         embedding_layer_->get_embedding_batch(token_ptr, current_length,
                                              input_data.Data());
 
-        auto position_ids = build_rope_position_ids(valid_length, prefill_length_);
+        int prefill_position_base = valid_length + decode_position_offset_[seq_id];
+        auto position_ids = build_rope_position_ids(prefill_position_base, prefill_length_);
         if (run_prefill_round(seq_id, input_data, valid_length, current_length,
                               position_ids.data(), position_ids.data(),
                               position_ids.data(),
@@ -1370,8 +1372,21 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
     // corrupting state-cache replay.
     {
         auto &snapshot = prefill_snapshots_[seq_id];
-        snapshot.tokens.clear();
-        snapshot.tokens.reserve(total_tokens);
+        if (kv_offset > 0) {
+            if (snapshot.tokens.size() >= static_cast<size_t>(kv_offset)) {
+                snapshot.tokens.resize(static_cast<size_t>(kv_offset));
+            } else {
+                LLAMA_LOG_WARN(
+                    "%s: existing snapshot history (%zu) shorter than "
+                    "kv_offset (%d) for seq_id=%d, padding with sentinels\n",
+                    __func__, snapshot.tokens.size(), kv_offset, seq_id);
+                snapshot.tokens.resize(static_cast<size_t>(kv_offset),
+                                       static_cast<llama_token>(0));
+            }
+        } else {
+            snapshot.tokens.clear();
+        }
+        snapshot.tokens.reserve(static_cast<size_t>(kv_offset) + total_tokens);
         for (auto &chunk : pending_chunks_[seq_id]) {
             if (chunk.is_vision) {
                 snapshot.tokens.insert(snapshot.tokens.end(),
@@ -1396,7 +1411,10 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
                 }
             }
         }
-        snapshot.first_safe_position = static_cast<int>(last_vision_end_local);
+        // first_safe_position is also an ABSOLUTE position — translate the
+        // local end-of-vision marker into the snapshot coordinate space.
+        snapshot.first_safe_position =
+            kv_offset + static_cast<int>(last_vision_end_local);
         if (valid_length > 0) {
             save_state_checkpoint(seq_id, valid_length);
         }
@@ -1428,16 +1446,22 @@ int HoumoQwen35LLM::set_decode_rope_and_mask(const std::vector<int> &seq_ids) {
         if (!time_name.empty()) {
             auto tensor = decode_input_map_.at(time_name);
             set_input_data(tensor, position_ids);
+            LLAMA_LOG_DEBUG("%s: seq_id=%d batch_id=%d time_pos=%d\n", __func__,
+                            seq_id, batch_id, position_ids[0]);
             decode_model_->SetInput(time_name, tensor);
         }
         if (!height_name.empty()) {
             auto tensor = decode_input_map_.at(height_name);
             set_input_data(tensor, position_ids);
+            LLAMA_LOG_DEBUG("%s: seq_id=%d batch_id=%d height_pos=%d\n",
+                            __func__, seq_id, batch_id, position_ids[0]);
             decode_model_->SetInput(height_name, tensor);
         }
         if (!width_name.empty()) {
             auto tensor = decode_input_map_.at(width_name);
             set_input_data(tensor, position_ids);
+            LLAMA_LOG_DEBUG("%s: seq_id=%d batch_id=%d width_pos=%d\n", __func__,
+                           seq_id, batch_id, position_ids[0]);
             decode_model_->SetInput(width_name, tensor);
         }
         if (!mask_name.empty()) {
