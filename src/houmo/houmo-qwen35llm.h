@@ -146,12 +146,20 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
 
     struct StateCheckpoint {
         int position = 0;                           // token position after processing
-        std::vector<tcim::Tensor> state_tensors;    // copies of device state (host or device per checkpoint_storage_)
+        bool used = false;                          // slot occupancy flag (pool-managed)
+        // Pre-allocated state tensor buffers — owned by the slot for the
+        // entire snapshot lifetime.  save/restore only memcpy via CopyTo,
+        // avoiding per-checkpoint alloc/free that fragments memory.
+        std::vector<tcim::Tensor> state_tensors;
     };
 
     struct PrefillSnapshot {
         std::vector<llama_token> tokens;               // cumulative tokens processed
-        std::map<int, StateCheckpoint> checkpoints;    // position -> checkpoint
+        // Fixed-size pre-allocated checkpoint pool (size == checkpoint_max_count_).
+        // Slots are reused via the used flag — no dynamic alloc/free per save.
+        std::vector<StateCheckpoint> checkpoint_pool;
+        // Position → pool slot index for ordered lookup (upper_bound, gap eviction).
+        std::map<int, size_t> checkpoint_index;
         int last_processed_pos = 0;                    // state cache valid up to this position
         bool valid = false;
         // tokens 中保证为真实 token id 的最小绝对位置。
@@ -160,4 +168,19 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
         int first_safe_position = 0;
     };
     std::map<int, PrefillSnapshot> prefill_snapshots_;
+
+    // Mark all slots as free and clear the index.  Pre-allocated tensor
+    // buffers are kept — only the occupancy bookkeeping is reset.
+    void clear_all_checkpoints(PrefillSnapshot &snapshot);
+    // Allocate the pre-allocated checkpoint pool for one seq_id.  Called from
+    // init_state_cache after state_cache_names_/checkpoint_tensor_indices_
+    // are built.  Allocates checkpoint_max_count_ slots, each with Cloned
+    // (kDevice) or host-allocated (kHost) tensors of the right shape.
+    void init_checkpoint_pool(int seq_id);
+    // Find a free slot (or evict the gap-best in-use slot) and return its
+    // index inside snapshot.checkpoint_pool.  Caller is responsible for
+    // populating the slot and inserting into checkpoint_index.
+    size_t acquire_checkpoint_slot(PrefillSnapshot &snapshot, int position);
+    // Mark all slots whose position > after_pos as free and erase from index.
+    void release_checkpoints_after(PrefillSnapshot &snapshot, int after_pos);
 };

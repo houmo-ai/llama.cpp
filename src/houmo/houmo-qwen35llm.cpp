@@ -292,7 +292,143 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
         auto &snap = prefill_snapshots_[seq_id];
         snap.last_processed_pos = 0;
         snap.valid = true;
+        // Pre-allocate checkpoint pool once — slots are reused across all
+        // save/restore operations to avoid heap fragmentation.
+        init_checkpoint_pool(seq_id);
     }
+}
+
+void HoumoQwen35LLM::init_checkpoint_pool(int seq_id) {
+    if (decode_model_ == nullptr || checkpoint_tensor_indices_.empty() ||
+        checkpoint_max_count_ == 0) {
+        return;
+    }
+    checkpoint_max_count_ = std::min(
+        checkpoint_max_count_,
+        static_cast<size_t>(n_context_length() / checkpoint_min_interval_));
+    auto &snapshot = prefill_snapshots_[seq_id];
+    snapshot.checkpoint_pool.clear();
+    snapshot.checkpoint_index.clear();
+    snapshot.checkpoint_pool.resize(checkpoint_max_count_);
+    size_t allocated_slots = 0;
+    bool alloc_failed = false;
+    for (auto &slot : snapshot.checkpoint_pool) {
+        slot.used = false;
+        slot.position = -1;
+        slot.state_tensors.clear();
+        slot.state_tensors.reserve(checkpoint_tensor_indices_.size());
+        for (size_t idx : checkpoint_tensor_indices_) {
+            const auto &name = state_cache_names_[idx];
+            auto src = decode_model_->GetDevInput(name);
+            tcim::Tensor dst;
+            if (checkpoint_storage_ == CheckpointStorage::kDevice) {
+                // Independent device-side buffer of matching shape/dtype.
+                dst = src.Clone();
+            } else {
+                // ToHost(true) yields a contiguous host copy of matching
+                // shape — content is irrelevant, will be overwritten by
+                // CopyTo on first save.
+                dst = src.ToHost(true);
+            }
+            if (dst.GetInitStatus() != tcim::Status::OK) {
+                LLAMA_LOG_WARN("%s: failed to pre-allocate checkpoint tensor "
+                               "seq_id=%d name=%s storage=%s — stopping pool "
+                               "growth at %zu slot(s)\n",
+                               __func__, seq_id, name.c_str(),
+                               checkpoint_storage_ == CheckpointStorage::kDevice
+                                   ? "device" : "host",
+                               allocated_slots);
+                alloc_failed = true;
+                break;
+            }
+            slot.state_tensors.push_back(std::move(dst));
+        }
+        if (alloc_failed) {
+            // Drop the partially-filled current slot.
+            slot.state_tensors.clear();
+            break;
+        }
+        ++allocated_slots;
+    }
+    // Shrink pool to successfully allocated slots; keep checkpoint feature
+    // enabled if at least one slot was allocated.
+    if (allocated_slots < snapshot.checkpoint_pool.size()) {
+        snapshot.checkpoint_pool.resize(allocated_slots);
+    }
+    LLAMA_LOG_INFO("%s: pre-allocated checkpoint pool seq_id=%d slots=%zu "
+                   "tensors_per_slot=%zu storage=%s\n",
+                   __func__, seq_id, snapshot.checkpoint_pool.size(),
+                   checkpoint_tensor_indices_.size(),
+                   checkpoint_storage_ == CheckpointStorage::kDevice
+                       ? "device" : "host");
+}
+
+size_t HoumoQwen35LLM::acquire_checkpoint_slot(PrefillSnapshot &snapshot,
+                                                int position) {
+    // Prefer a free slot — no eviction needed.
+    for (size_t i = 0; i < snapshot.checkpoint_pool.size(); ++i) {
+        if (!snapshot.checkpoint_pool[i].used) {
+            return i;
+        }
+    }
+    // All slots in use — evict the in-use slot whose distance to its nearest
+    // neighbor (by position) is smallest, but never the lowest or highest
+    // checkpoint (preserve maximal rollback range).
+    auto &index = snapshot.checkpoint_index;
+    auto best_evict = index.end();
+    int best_gap = INT_MAX;
+    for (auto it = index.begin(); it != index.end(); ++it) {
+        if (it == index.begin()) continue;
+        auto next = std::next(it);
+        if (next == index.end()) continue;
+        auto prev = std::prev(it);
+        int gap = std::min(it->first - prev->first, next->first - it->first);
+        if (gap < best_gap) {
+            best_gap = gap;
+            best_evict = it;
+        }
+    }
+    // Fallback: if pool size <= 2 (degenerate), evict the closest neighbor
+    // of `position` to keep the spread balanced.
+    if (best_evict == index.end()) {
+        int best_dist = INT_MAX;
+        for (auto it = index.begin(); it != index.end(); ++it) {
+            int d = std::abs(it->first - position);
+            if (d < best_dist) {
+                best_dist = d;
+                best_evict = it;
+            }
+        }
+    }
+    size_t slot_idx = best_evict->second;
+    LLAMA_LOG_INFO("%s: evicting checkpoint pos=%d slot=%zu (pool full, "
+                   "max=%zu)\n",
+                   __func__, best_evict->first, slot_idx,
+                   checkpoint_max_count_);
+    snapshot.checkpoint_pool[slot_idx].used = false;
+    index.erase(best_evict);
+    return slot_idx;
+}
+
+void HoumoQwen35LLM::release_checkpoints_after(PrefillSnapshot &snapshot,
+                                                int after_pos) {
+    auto &index = snapshot.checkpoint_index;
+    auto erase_begin = index.upper_bound(after_pos);
+    if (erase_begin == index.end()) {
+        return;
+    }
+    for (auto it = erase_begin; it != index.end(); ++it) {
+        snapshot.checkpoint_pool[it->second].used = false;
+    }
+    index.erase(erase_begin, index.end());
+}
+
+void HoumoQwen35LLM::clear_all_checkpoints(PrefillSnapshot &snapshot) {
+    for (auto &slot : snapshot.checkpoint_pool) {
+        slot.used = false;
+        slot.position = -1;
+    }
+    snapshot.checkpoint_index.clear();
 }
 
 void HoumoQwen35LLM::set_state_cache_for_prefill(int seq_id) {
@@ -364,74 +500,49 @@ void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
     if (cache_iter == state_cache_.end()) {
         return;
     }
+    auto snap_iter = prefill_snapshots_.find(seq_id);
+    if (snap_iter == prefill_snapshots_.end()) {
+        return;
+    }
+    auto &snapshot = snap_iter->second;
+    if (snapshot.checkpoint_pool.empty()) {
+        // Pool not pre-allocated (degenerate config) — nothing to do.
+        return;
+    }
     auto &tensors = cache_iter->second.tensors;
-    auto &snapshot = prefill_snapshots_[seq_id];
 
-    auto &ckpt = snapshot.checkpoints[position];
-    ckpt.position = position;
-    ckpt.state_tensors.clear();
-    ckpt.state_tensors.reserve(checkpoint_tensor_indices_.size());
+    // Erase stale checkpoints AFTER position first so those slots become
+    // candidates for reuse if the pool is full.
+    release_checkpoints_after(snapshot, position);
 
-    for (size_t idx : checkpoint_tensor_indices_) {
-        if (checkpoint_storage_ == CheckpointStorage::kDevice) {
-            // Device-side deep copy — fast device↔device transfer,
-            // but consumes extra device memory per checkpoint.
-            ckpt.state_tensors.push_back(tensors[idx].Clone());
-        } else {
-            // Host copy — use ToHost(true) to get a contiguous host copy
-            // that correctly handles device-specific strides and alignment.
-            ckpt.state_tensors.push_back(tensors[idx].ToHost(true));
-        }
+    // If a checkpoint already exists exactly at this position, reuse its slot.
+    size_t slot_idx;
+    auto existing = snapshot.checkpoint_index.find(position);
+    if (existing != snapshot.checkpoint_index.end()) {
+        slot_idx = existing->second;
+    } else {
+        slot_idx = acquire_checkpoint_slot(snapshot, position);
+        snapshot.checkpoint_index[position] = slot_idx;
     }
 
-    // Erase all checkpoints after this position — they are stale
-    // (e.g. from a previous longer sequence before rollback).
-    auto erase_begin = snapshot.checkpoints.upper_bound(position);
-    if (erase_begin != snapshot.checkpoints.end()) {
-        LLAMA_LOG_INFO("%s: erasing stale checkpoints seq_id=%d after pos=%d "
-                       "(count=%zu)\n",
-                       __func__, seq_id, position,
-                       static_cast<size_t>(std::distance(
-                           erase_begin, snapshot.checkpoints.end())));
-        snapshot.checkpoints.erase(erase_begin, snapshot.checkpoints.end());
+    auto &slot = snapshot.checkpoint_pool[slot_idx];
+    slot.position = position;
+    slot.used = true;
+
+    // Pre-allocated buffers — only memcpy, no alloc/free.
+    for (size_t ci = 0; ci < checkpoint_tensor_indices_.size(); ++ci) {
+        size_t ti = checkpoint_tensor_indices_[ci];
+        tensors[ti].CopyTo(slot.state_tensors[ci]);
     }
 
-    LLAMA_LOG_INFO("%s: saved checkpoint seq_id=%d pos=%d "
-                   "state_tensors=%zu storage=%s\n",
-                   __func__, seq_id, position, ckpt.state_tensors.size(),
+    LLAMA_LOG_INFO("%s: saved checkpoint seq_id=%d pos=%d slot=%zu "
+                   "state_tensors=%zu storage=%s in_use=%zu/%zu\n",
+                   __func__, seq_id, position, slot_idx,
+                   slot.state_tensors.size(),
                    checkpoint_storage_ == CheckpointStorage::kDevice
-                       ? "device" : "host");
-
-    // Evict if over budget — remove the checkpoint whose distance to its
-    // nearest neighbor is smallest (but never evict the first or last,
-    // which provide maximum rollback range).
-    if (snapshot.checkpoints.size() > checkpoint_max_count_ &&
-        snapshot.checkpoints.size() > 2) {
-        auto best_evict = snapshot.checkpoints.end();
-        int best_gap = INT_MAX;
-        for (auto it = snapshot.checkpoints.begin();
-             it != snapshot.checkpoints.end(); ++it) {
-            // Skip first and last.
-            if (it == snapshot.checkpoints.begin()) continue;
-            auto next = std::next(it);
-            if (next == snapshot.checkpoints.end()) continue;
-            auto prev = std::prev(it);
-            int gap = std::min(it->first - prev->first,
-                               next->first - it->first);
-            if (gap < best_gap) {
-                best_gap = gap;
-                best_evict = it;
-            }
-        }
-        if (best_evict != snapshot.checkpoints.end()) {
-            LLAMA_LOG_INFO("%s: evicting checkpoint seq_id=%d pos=%d "
-                           "(count=%zu, max=%zu)\n",
-                           __func__, seq_id, best_evict->first,
-                           snapshot.checkpoints.size(),
-                           checkpoint_max_count_);
-            snapshot.checkpoints.erase(best_evict);
-        }
-    }
+                       ? "device" : "host",
+                   snapshot.checkpoint_index.size(),
+                   snapshot.checkpoint_pool.size());
 }
 
 int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
@@ -440,23 +551,25 @@ int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
     if (snap_iter == prefill_snapshots_.end() || !snap_iter->second.valid) {
         return -1;
     }
-    auto &checkpoints = snap_iter->second.checkpoints;
-    if (checkpoints.empty()) {
+    auto &snapshot = snap_iter->second;
+    auto &index = snapshot.checkpoint_index;
+    if (index.empty()) {
         return -1;
     }
     // Find the highest checkpoint with position <= max_position
-    auto it = checkpoints.upper_bound(max_position);
-    if (it == checkpoints.begin()) {
+    auto it = index.upper_bound(max_position);
+    if (it == index.begin()) {
         return -1; // no checkpoint at or below max_position
     }
-    --it; // now points to highest key <= max_position
+    --it;
 
     auto cache_iter = state_cache_.find(seq_id);
     if (cache_iter == state_cache_.end()) {
         return -1;
     }
     auto &tensors = cache_iter->second.tensors;
-    auto &ckpt_tensors = it->second.state_tensors;
+    auto &slot = snapshot.checkpoint_pool[it->second];
+    auto &ckpt_tensors = slot.state_tensors;
     if (ckpt_tensors.size() != checkpoint_tensor_indices_.size()) {
         LLAMA_LOG_WARN("%s: checkpoint state_tensors size mismatch seq_id=%d "
                        "(%zu vs %zu)\n",
@@ -466,8 +579,6 @@ int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
     }
     for (size_t ci = 0; ci < checkpoint_tensor_indices_.size(); ++ci) {
         size_t ti = checkpoint_tensor_indices_[ci];
-        // Validate shape and data type (works for both host and device
-        // stored checkpoints).
         if (ckpt_tensors[ci].Info().Shape() != tensors[ti].Info().Shape() ||
             ckpt_tensors[ci].Info().DataType() != tensors[ti].Info().DataType()) {
             LLAMA_LOG_WARN("%s: checkpoint tensor %zu info mismatch "
@@ -475,23 +586,12 @@ int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
                            __func__, ci, seq_id);
             return -1;
         }
-        // CopyTo handles both host→device and device→device transfers,
-        // respecting stride/alignment differences.
         ckpt_tensors[ci].CopyTo(tensors[ti]);
     }
-    int restored_pos = it->second.position;
+    int restored_pos = slot.position;
 
-    // Erase all checkpoints after restored_pos — they are stale.
-    auto erase_begin = it;
-    ++erase_begin;
-    if (erase_begin != checkpoints.end()) {
-        size_t erase_count = static_cast<size_t>(
-            std::distance(erase_begin, checkpoints.end()));
-        LLAMA_LOG_INFO("%s: erasing stale checkpoints seq_id=%d after pos=%d "
-                       "(count=%zu)\n",
-                       __func__, seq_id, restored_pos, erase_count);
-        checkpoints.erase(erase_begin, checkpoints.end());
-    }
+    // Erase stale checkpoints after restored_pos (free slots, no realloc).
+    release_checkpoints_after(snapshot, restored_pos);
 
     LLAMA_LOG_INFO("%s: restored checkpoint seq_id=%d pos=%d "
                    "reused_tokens=%d (max_allowed=%d)\n",
@@ -528,9 +628,9 @@ void HoumoQwen35LLM::trim_snapshot_to_kv_offset(int seq_id,
         changed = true;
     }
 
-    auto erase_begin = snapshot.checkpoints.upper_bound(trim_pos);
-    if (erase_begin != snapshot.checkpoints.end()) {
-        snapshot.checkpoints.erase(erase_begin, snapshot.checkpoints.end());
+    if (snapshot.checkpoint_index.upper_bound(trim_pos) !=
+        snapshot.checkpoint_index.end()) {
+        release_checkpoints_after(snapshot, trim_pos);
         changed = true;
     }
 
@@ -551,7 +651,7 @@ void HoumoQwen35LLM::trim_snapshot_to_kv_offset(int seq_id,
             "%s: trimmed snapshot by boundary seq_id=%d valid_length=%d "
             "tokens=%zu ckpts=%zu state_pos=%d first_safe_position=%d\n",
             __func__, seq_id, trim_pos, snapshot.tokens.size(),
-            snapshot.checkpoints.size(), snapshot.last_processed_pos,
+            snapshot.checkpoint_index.size(), snapshot.last_processed_pos,
             snapshot.first_safe_position);
     }
 }
@@ -787,7 +887,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             const auto &saved_history = snap_iter->second.tokens;
             int best_ckpt = -1;
 
-            if (!snap_iter->second.checkpoints.empty()) {
+            if (!snap_iter->second.checkpoint_index.empty()) {
                 best_ckpt =
                     find_and_restore_best_checkpoint(seq_id, kv_offset);
             }
@@ -823,7 +923,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                 effective_tokens = tokens;
                 state_cache_initialized_[seq_id] = true;
                 snap_iter->second.valid = false;
-                snap_iter->second.checkpoints.clear();
+                clear_all_checkpoints(snap_iter->second);
                 snap_iter->second.first_safe_position = 0;
             } else if (rollback_pos < kv_offset) {
                 // Need gap tokens [rollback_pos .. kv_offset).
@@ -871,13 +971,13 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                     effective_tokens = tokens;
                     state_cache_initialized_[seq_id] = true;
                     snap_iter->second.valid = false;
-                    snap_iter->second.checkpoints.clear();
+                    clear_all_checkpoints(snap_iter->second);
                     snap_iter->second.first_safe_position = 0;
                 }
                 snap_iter->second.valid = false;
                 if (best_ckpt <= 0) {
                     // No usable checkpoint — clear all stale checkpoints.
-                    snap_iter->second.checkpoints.clear();
+                    clear_all_checkpoints(snap_iter->second);
                 }
                 // When best_ckpt > 0, find_and_restore_best_checkpoint
                 // already erased stale checkpoints after the restored
@@ -921,7 +1021,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         auto snap_iter = prefill_snapshots_.find(seq_id);
         if (snap_iter != prefill_snapshots_.end()) {
             snap_iter->second.valid = false;
-            snap_iter->second.checkpoints.clear();
+            clear_all_checkpoints(snap_iter->second);
             snap_iter->second.last_processed_pos = 0;
             snap_iter->second.first_safe_position = 0;
         }
@@ -946,7 +1046,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                 __func__, seq_id, kv_offset, effective_kv_offset,
                 snap_iter2->second.first_safe_position,
                 snap_iter2->second.tokens.size(),
-                snap_iter2->second.checkpoints.size());
+                snap_iter2->second.checkpoint_index.size());
         }
     }
 
@@ -1014,23 +1114,36 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         }
         valid_length += current_length;
 
-        // Save a checkpoint when the distance from the nearest existing
-        // checkpoint exceeds checkpoint_min_interval_.  Skip the last
-        // round — the end-of-prefill checkpoint covers it.
-        if (valid_length > 0 && rounds > 1 && round + 1 < rounds) {
-            auto &ckpts = prefill_snapshots_[seq_id].checkpoints;
-            bool should_save = ckpts.empty();
+        // Save a checkpoint after this round when:
+        //   a) Not the last round (last round state is unreliable due to chat
+        //      template token instability across turns).
+        //   b) Either the interval threshold is exceeded, OR this is the
+        //      second-to-last round (always ensure one stable checkpoint just
+        //      before the final round so future turns can reuse it).
+        if (valid_length > 0 && round + 1 < rounds) {
+            auto &ckpts = prefill_snapshots_[seq_id].checkpoint_index;
+            bool is_second_last = (round + 2 == rounds);
+            bool should_save = is_second_last && ckpts.find(valid_length) == ckpts.end();
             if (!should_save) {
-                auto it = ckpts.lower_bound(valid_length);
-                int dist = INT_MAX;
-                if (it != ckpts.end()) {
-                    dist = std::min(dist, it->first - valid_length);
+                bool by_interval = ckpts.empty();
+                if (!by_interval) {
+
+                    auto it = ckpts.upper_bound(valid_length);
+                    if (it != ckpts.end()) {
+                        LLAMA_LOG_ERROR(
+                            "%s: BUG: stale checkpoint pos=%d found after "
+                            "valid_length=%d for seq_id=%d — should "
+                            "have been released before this round\n",
+                            __func__, it->first, valid_length, seq_id);
+                    }
+                    int dist = INT_MAX;
+                    if (it != ckpts.begin()) {
+                        --it;
+                        dist = (int)valid_length - it->first;
+                    }
+                    by_interval = (dist >= checkpoint_min_interval_);
                 }
-                if (it != ckpts.begin()) {
-                    --it;
-                    dist = std::min(dist, valid_length - it->first);
-                }
-                should_save = (dist >= checkpoint_min_interval_);
+                should_save = by_interval;
             }
             if (should_save) {
                 save_state_checkpoint(seq_id, valid_length);
@@ -1096,11 +1209,6 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             snapshot.first_safe_position = 0;
         }
 
-        // Save a checkpoint at the prefill end position so that the next
-        // conversation turn can reuse state up to this point.
-        if (valid_length > 0) {
-            save_state_checkpoint(seq_id, valid_length);
-        }
         snapshot.last_processed_pos = valid_length;
         snapshot.valid = true;
     }
@@ -1241,7 +1349,7 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         auto snap_iter = prefill_snapshots_.find(seq_id);
         if (snap_iter != prefill_snapshots_.end()) {
             snap_iter->second.valid = false;
-            snap_iter->second.checkpoints.clear();
+            clear_all_checkpoints(snap_iter->second);
             snap_iter->second.last_processed_pos = 0;
             snap_iter->second.first_safe_position = 0;
         }
@@ -1612,7 +1720,7 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
 
             bool should_save = false;
             if (vl > 0) {
-                auto &ckpts = snapshot.checkpoints;
+                auto &ckpts = snapshot.checkpoint_index;
                 if (ckpts.empty()) {
                     should_save = true;
                 } else {
