@@ -242,11 +242,9 @@ def read_hmm_info(hmm_file: str) -> HmmInfo:
         # Set default values
         hmm_info.core_num = 2
         hmm_info.batch = 1
-
-    # Check if it's a hmms file to set device_num=2
-    if file_ext == '.hmms':
-        hmm_info.device_num = 2
-    else:
+        if file_ext == '.hmms':
+            hmm_info.device_num = 2
+    if hmm_info.device_num == 0:
         hmm_info.device_num = 1
 
     hmm_info.convert_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
