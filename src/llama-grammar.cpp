@@ -10,7 +10,7 @@
 #include <set>
 #include <stdexcept>
 
-#define MAX_REPETITION_THRESHOLD 1000000
+#define MAX_REPETITION_THRESHOLD 2000
 //
 // helpers
 //

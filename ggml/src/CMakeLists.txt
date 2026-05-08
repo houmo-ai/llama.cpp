@@ -200,17 +200,13 @@ add_library(ggml-base
             ggml.cpp
             ggml-alloc.c
             ggml-backend.cpp
+            ggml-backend-meta.cpp
             ggml-opt.cpp
             ggml-threading.cpp
             ggml-threading.h
             ggml-quants.c
             ggml-quants.h
             gguf.cpp)
-
-#set_target_properties(ggml-base PROPERTIES
-#    VERSION ${GGML_VERSION}
-#    SOVERSION ${GGML_VERSION_MAJOR}
-#)
 
 target_include_directories(ggml-base PRIVATE .)
 if (GGML_BACKEND_DL)
@@ -225,11 +221,6 @@ add_library(ggml
             ggml-backend-dl.cpp
             ggml-backend-reg.cpp)
 add_library(ggml::ggml ALIAS ggml)
-
-#set_target_properties(ggml PROPERTIES
-#    VERSION ${GGML_VERSION}
-#    SOVERSION ${GGML_VERSION_MAJOR}
-#)
 
 if (GGML_BACKEND_DIR)
     if (NOT GGML_BACKEND_DL)
@@ -268,15 +259,6 @@ function(ggml_add_backend_library backend)
     if (${BUILD_SHARED_LIBS})
         target_compile_definitions(${backend} PRIVATE GGML_BACKEND_BUILD)
         target_compile_definitions(${backend} PUBLIC  GGML_BACKEND_SHARED)
-    endif()
-
-    # Set versioning properties for all backend libraries
-    # Building a MODULE library with a version is not supported on macOS (https://gitlab.kitware.com/cmake/cmake/-/issues/20782)
-   if (NOT (APPLE AND GGML_BACKEND_DL))
-#        set_target_properties(${backend} PROPERTIES
-#            VERSION ${GGML_VERSION}
-#            SOVERSION ${GGML_VERSION_MAJOR}
-#        )
     endif()
 
     if(NOT GGML_AVAILABLE_BACKENDS)
@@ -460,12 +442,12 @@ ggml_add_backend(zDNN)
 ggml_add_backend(OpenCL)
 ggml_add_backend(Hexagon)
 ggml_add_backend(ZenDNN)
+ggml_add_backend(OPENVINO)
 
-# HoumoNPU backend - static linkage (always included)
+# HoumoNPU backend is linked statically so it is always available with this build.
 add_subdirectory(ggml-houmonpu)
 target_link_libraries(ggml PUBLIC houmonpu)
 target_compile_definitions(ggml PUBLIC GGML_USE_HOUMONPU)
-message(STATUS "Including HoumoNPU backend (static)")
 
 foreach (target ggml-base ggml)
     target_include_directories(${target} PUBLIC    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include> $<INSTALL_INTERFACE:include>)
@@ -474,11 +456,10 @@ endforeach()
 
 target_link_libraries(ggml-base PRIVATE Threads::Threads)
 
-find_library(MATH_LIBRARY m)
-if (MATH_LIBRARY)
-    if (NOT WIN32 OR NOT DEFINED ENV{ONEAPI_ROOT})
-        target_link_libraries(ggml-base PRIVATE m)
-    endif()
+if (DEFINED MATH_LIBRARY)
+    target_link_libraries(ggml-base PRIVATE ${MATH_LIBRARY})
+elseif (NOT WIN32 AND NOT DEFINED ENV{ONEAPI_ROOT})
+    target_link_libraries(ggml-base PRIVATE m)
 endif()
 
 if (CMAKE_SYSTEM_NAME MATCHES "Android")

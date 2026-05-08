@@ -97,9 +97,6 @@ struct clip_image_f32 * clip_image_f32_get_img(const struct clip_image_f32_batch
  */
 void clip_build_img_from_pixels(const unsigned char * rgb_pixels, int nx, int ny, struct clip_image_u8 * img);
 
-/** preprocess img and store the result in res_imgs, pad_to_square may be overridden to false depending on model configuration */
-bool clip_image_preprocess(struct clip_ctx * ctx, const struct clip_image_u8 * img, struct clip_image_f32_batch * res_imgs );
-
 struct ggml_tensor * clip_get_newline_tensor(const struct clip_ctx * ctx);
 
 bool clip_image_encode      (struct clip_ctx * ctx, int n_threads, struct clip_image_f32 * img, float * vec);
@@ -108,6 +105,7 @@ bool clip_image_batch_encode(struct clip_ctx * ctx, int n_threads, const struct 
 int clip_is_minicpmv(const struct clip_ctx * ctx);
 bool clip_is_glm(const struct clip_ctx * ctx);
 bool clip_is_llava(const struct clip_ctx * ctx);
+bool clip_is_hmm(const struct clip_ctx * ctx);
 // note for contributor: this clip_is_(model) pattern is deprecated
 //                       do NOT add new functions like this
 
@@ -119,7 +117,3 @@ void clip_image_f32_batch_add_mel(struct clip_image_f32_batch * batch, int n_mel
 bool clip_has_vision_encoder(const struct clip_ctx * ctx);
 bool clip_has_audio_encoder(const struct clip_ctx * ctx);
 bool clip_has_whisper_encoder(const struct clip_ctx * ctx);
-
-// 判断是否是hmm模型
-// HMM模型是指后摩的vision模型
-bool clip_is_hmm(const struct clip_ctx * ctx);

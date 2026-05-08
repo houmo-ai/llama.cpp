@@ -38,22 +38,26 @@ enum log_colors {
 
 // needed by the LOG_TMPL macro to avoid computing log arguments if the verbosity lower
 // set via common_log_set_verbosity()
-extern int common_log_verbosity_thold;
+int  common_log_get_verbosity_thold(void);
 
 void common_log_set_verbosity_thold(int verbosity); // not thread-safe
 
 void common_log_default_callback(enum ggml_log_level level, const char * text, void * user_data);
 
-typedef void (*common_log_cb_t)(enum ggml_log_level level, const char* text, void* data);
+typedef void (*common_log_cb_t)(enum ggml_log_level level, const char * text, void * data);
 
-void common_set_log_callback(common_log_cb_t log_cb, void* data);
+void common_set_log_callback(common_log_cb_t log_cb, void * data);
 
 // the common_log uses an internal worker thread to print/write log messages
 // when the worker thread is paused, incoming log messages are discarded
 struct common_log;
 
 struct common_log * common_log_init();
-struct common_log * common_log_main(); // singleton, automatically destroys itself on exit
+
+// Singleton, intentionally leaked to avoid Windows teardown hangs.
+// Call common_log_flush() before exit if you want to ensure all logs are flushed.
+struct common_log * common_log_main();
+
 void                common_log_pause (struct common_log * log); // pause  the worker thread, not thread-safe
 void                common_log_resume(struct common_log * log); // resume the worker thread, not thread-safe
 void                common_log_free  (struct common_log * log);
@@ -102,7 +106,7 @@ void common_log_flush         (struct common_log * log);                    // f
 
 #define LOG_TMPL(level, verbosity, ...) \
     do { \
-        if ((verbosity) <= common_log_verbosity_thold) { \
+        if ((verbosity) <= common_log_get_verbosity_thold()) { \
             common_log_add(common_log_main(), (level), __VA_ARGS__); \
         } \
     } while (0)

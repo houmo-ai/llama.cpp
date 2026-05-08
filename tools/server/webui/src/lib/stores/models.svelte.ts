@@ -1,13 +1,14 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { toast } from 'svelte-sonner';
 import { ServerModelStatus, ModelModality } from '$lib/enums';
-import { ModelsService, PropsService } from '$lib/services';
+import { ModelsService } from '$lib/services/models.service';
+import { PropsService } from '$lib/services/props.service';
 import { serverStore } from '$lib/stores/server.svelte';
 import { TTLCache } from '$lib/utils';
 import {
 	MODEL_PROPS_CACHE_TTL_MS,
 	MODEL_PROPS_CACHE_MAX_ENTRIES,
-	FAVOURITE_MODELS_LOCALSTORAGE_KEY
+	FAVORITE_MODELS_LOCALSTORAGE_KEY
 } from '$lib/constants';
 
 /**
@@ -54,10 +55,14 @@ class ModelsStore {
 	selectedModelId = $state<string | null>(null);
 	selectedModelName = $state<string | null>(null);
 
+	// dedup concurrent fetch() callers, all awaiters share the same inflight promise
+	// without this, ?model=<name> URL handler raced an in-progress fetch and saw an empty list
+	private inflightFetch: Promise<void> | null = null;
+
 	private modelUsage = $state<Map<string, SvelteSet<string>>>(new Map());
 	private modelLoadingStates = new SvelteMap<string, boolean>();
 
-	favouriteModelIds = $state<Set<string>>(this.loadFavouritesFromStorage());
+	favoriteModelIds = $state<Set<string>>(this.loadFavoritesFromStorage());
 
 	/**
 	 * Model-specific props cache with TTL
@@ -90,7 +95,11 @@ class ModelsStore {
 
 	get loadedModelIds(): string[] {
 		return this.routerModels
-			.filter((m) => m.status.value === ServerModelStatus.LOADED)
+			.filter(
+				(m) =>
+					m.status.value === ServerModelStatus.LOADED ||
+					m.status.value === ServerModelStatus.SLEEPING
+			)
 			.map((m) => m.id);
 	}
 
@@ -215,7 +224,11 @@ class ModelsStore {
 
 	isModelLoaded(modelId: string): boolean {
 		const model = this.routerModels.find((m) => m.id === modelId);
-		return model?.status.value === ServerModelStatus.LOADED || false;
+		return (
+			model?.status.value === ServerModelStatus.LOADED ||
+			model?.status.value === ServerModelStatus.SLEEPING ||
+			false
+		);
 	}
 
 	isModelOperationInProgress(modelId: string): boolean {
@@ -249,9 +262,18 @@ class ModelsStore {
 	 * Also fetches modalities for MODEL mode (single model)
 	 */
 	async fetch(force = false): Promise<void> {
-		if (this.loading) return;
+		if (this.inflightFetch) return this.inflightFetch;
 		if (this.models.length > 0 && !force) return;
 
+		this.inflightFetch = this.runFetch();
+		try {
+			await this.inflightFetch;
+		} finally {
+			this.inflightFetch = null;
+		}
+	}
+
+	private async runFetch(): Promise<void> {
 		this.loading = true;
 		this.error = null;
 
@@ -457,7 +479,7 @@ class ModelsStore {
 
 	/**
 	 * Select a model by its model name (used for syncing with conversation model)
-	 * @param modelName - Model name to select (e.g., "unsloth/gemma-3-12b-it-GGUF:latest")
+	 * @param modelName - Model name to select (e.g., "ggml-org/GLM-4.7-Flash-GGUF")
 	 */
 	selectModelByName(modelName: string): void {
 		const option = this.models.find((model) => model.model === modelName);
@@ -621,17 +643,17 @@ class ModelsStore {
 	/**
 	 *
 	 *
-	 * Favourites
+	 * Favorites
 	 *
 	 *
 	 */
 
-	isFavourite(modelId: string): boolean {
-		return this.favouriteModelIds.has(modelId);
+	isFavorite(modelId: string): boolean {
+		return this.favoriteModelIds.has(modelId);
 	}
 
-	toggleFavourite(modelId: string): void {
-		const next = new SvelteSet(this.favouriteModelIds);
+	toggleFavorite(modelId: string): void {
+		const next = new SvelteSet(this.favoriteModelIds);
 
 		if (next.has(modelId)) {
 			next.delete(modelId);
@@ -639,22 +661,22 @@ class ModelsStore {
 			next.add(modelId);
 		}
 
-		this.favouriteModelIds = next;
+		this.favoriteModelIds = next;
 
 		try {
-			localStorage.setItem(FAVOURITE_MODELS_LOCALSTORAGE_KEY, JSON.stringify([...next]));
+			localStorage.setItem(FAVORITE_MODELS_LOCALSTORAGE_KEY, JSON.stringify([...next]));
 		} catch {
-			toast.error('Failed to save favourite models to local storage');
+			toast.error('Failed to save favorite models to local storage');
 		}
 	}
 
-	private loadFavouritesFromStorage(): Set<string> {
+	private loadFavoritesFromStorage(): Set<string> {
 		try {
-			const raw = localStorage.getItem(FAVOURITE_MODELS_LOCALSTORAGE_KEY);
+			const raw = localStorage.getItem(FAVORITE_MODELS_LOCALSTORAGE_KEY);
 
 			return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
 		} catch {
-			toast.error('Failed to load favourite models from local storage');
+			toast.error('Failed to load favorite models from local storage');
 
 			return new Set();
 		}
@@ -713,4 +735,4 @@ export const loadingModelIds = () => modelsStore.loadingModelIds;
 export const propsCacheVersion = () => modelsStore.propsCacheVersion;
 export const singleModelName = () => modelsStore.singleModelName;
 export const selectedModelContextSize = () => modelsStore.selectedModelContextSize;
-export const favouriteModelIds = () => modelsStore.favouriteModelIds;
+export const favoriteModelIds = () => modelsStore.favoriteModelIds;

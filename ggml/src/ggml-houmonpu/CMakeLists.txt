@@ -9,7 +9,7 @@ add_library(houmonpu STATIC ${GGML_HOUMONPU_SOURCES})
 target_include_directories(houmonpu
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
         ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 

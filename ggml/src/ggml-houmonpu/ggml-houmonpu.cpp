@@ -415,9 +415,7 @@ static void ggml_backend_houmonpu_device_get_memory(ggml_backend_dev_t dev,
 
 static enum ggml_backend_dev_type ggml_backend_houmonpu_device_get_type(ggml_backend_dev_t dev) {
     GGML_UNUSED(dev);
-    // HW_ACCEL: 可被 --list-devices 显示，但不会被自动初始化为计算后端
-    // 后端完整实现后改为 GGML_BACKEND_DEVICE_TYPE_ACCEL
-    return GGML_BACKEND_DEVICE_TYPE_HM_ACCEL;
+    return GGML_BACKEND_DEVICE_TYPE_ACCEL;
 }
 
 static void ggml_backend_houmonpu_device_get_props(ggml_backend_dev_t dev,
