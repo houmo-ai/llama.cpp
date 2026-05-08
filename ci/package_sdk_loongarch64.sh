@@ -11,9 +11,12 @@ set -o pipefail
 #   bash ci/package_sdk_loongarch64.sh
 ARCH="loongarch64"
 PLATFORM="xh2"
-CURRENT_YEAR="$(date +%Y)"
-CURRENT_MONTH="$(date +%m)"
-CURRENT_DAY="$(date +%d)"
+# CURRENT_YEAR="$(date +%Y)"
+# CURRENT_MONTH="$(date +%m)"
+# CURRENT_DAY="$(date +%d)"
+CURRENT_YEAR="2026"
+CURRENT_MONTH="05"
+CURRENT_DAY="06"
 URL="http://artifactory.houmo.ai:80/artifactory/houmo_software/loongarch64/${CURRENT_YEAR}/${CURRENT_MONTH}/${CURRENT_DAY}/0200/loongnix/houmo-tcim-runtime-xh2_1.3.0_loongarch64.deb"
 
 download_file() {
