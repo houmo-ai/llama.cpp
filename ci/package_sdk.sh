@@ -163,6 +163,7 @@ package_llama() {
     # 复制脚本
     cp convert_hm_to_gguf.py "$release_dir/scripts/" || true
     cp third_party/houmo/bin/hmmstrip "$release_dir/scripts/" || true
+    cp third_party/houmo/bin/readhmm "$release_dir/scripts/" || true
     cp requirements/requirements-convert_hm_to_gguf.txt "$release_dir/scripts/" || true
     cp -r gguf-py "$release_dir/scripts/"
 
