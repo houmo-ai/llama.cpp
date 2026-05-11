@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "mtmd-image.h"
 class HoumoVision {
   public:
     HoumoVision() = default;
@@ -25,7 +26,7 @@ class HoumoVision {
     int16_t batch_size() const {
         return batch_size_;
     }
-    bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output);
+    virtual bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output);
 
   protected:
     bool houmo_load(const std::string &file_name, std::vector<int> device_ids);
@@ -111,4 +112,17 @@ class HoumoMinicpmVision : public HoumoVision {
     const int MAX_GRID_H = 70;
     const int MAX_GRID_W = 70;
     int32_t n_embedding_ = 3584;
+};
+
+class HoumoGemmaVision : public HoumoVision {
+  public:
+    HoumoGemmaVision(int patch_size_) : HoumoVision(), patch_size_(patch_size_) {}
+    ~HoumoGemmaVision() override = default;
+    virtual bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output) override;
+    virtual bool init(const std::string &model_path, std::vector<int> device_ids) override;
+    virtual bool encoding(const std::vector<float> &input_data,
+                          std::vector<float> &output_data, int out_offset = 0) override;
+  private:
+    bool patchify_inplace(std::vector<float> &input_data, std::string &err);
+    int patch_size_ = 16;
 };

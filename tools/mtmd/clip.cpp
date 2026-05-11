@@ -3127,8 +3127,20 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
                 int y_patch = img->ny / (params.patch_size * params.n_merge);
                 n_patches = x_patch * y_patch;
             } break;
-        case PROJECTOR_TYPE_GEMMA3:
         case PROJECTOR_TYPE_GEMMA4V:
+            {
+                if (clip_is_hmm(ctx)) {
+                    // for HMM models, the input image is already pre-processed and resized to square
+                    n_patches = (img->nx / patch_size) * (img->ny / patch_size);
+                    LOG_ERR("img-nx = %d, img-ny = %d, patch_size = %d, n_patches = %d\n", img->nx, img->ny, patch_size, n_patches);
+
+                } else {
+                    // for non-HMM models, the input image is downscaled by the scale factor before patchification
+                    int scale_factor = ctx->model.hparams.n_merge;
+                    n_patches /= (scale_factor * scale_factor);
+                }
+            } break;
+        case PROJECTOR_TYPE_GEMMA3:
         case PROJECTOR_TYPE_IDEFICS3:
         case PROJECTOR_TYPE_INTERNVL:
         case PROJECTOR_TYPE_NEMOTRON_V2_VL:
@@ -4115,6 +4127,9 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
         case PROJECTOR_TYPE_GEMMA3NV:
             return ctx->model.mm_input_proj_w->ne[0];
         case PROJECTOR_TYPE_GEMMA4V:
+            if (clip_is_hmm(ctx)) {
+                return ctx->model.hparams.projection_dim;
+            }
             return ctx->model.mm_input_proj_w->ne[1];
         case PROJECTOR_TYPE_IDEFICS3:
             return ctx->model.mm_fc_w->ne[1];
@@ -4171,6 +4186,14 @@ int clip_is_minicpmv(const struct clip_ctx * ctx) {
     return 0;
 }
 
+bool clip_is_gemma4v(const struct clip_ctx * ctx) {
+    return ctx->proj_type() == PROJECTOR_TYPE_GEMMA4V;
+}
+bool clip_is_qwenvl(const struct clip_ctx * ctx) {
+    return ctx->proj_type() == PROJECTOR_TYPE_QWEN25VL ||
+           ctx->proj_type() == PROJECTOR_TYPE_QWEN2VL ||
+           ctx->proj_type() == PROJECTOR_TYPE_QWEN3VL;
+}
 bool clip_is_glm(const struct clip_ctx * ctx) {
     // TODO: remove this function
     return ctx->proj_type() == PROJECTOR_TYPE_GLM_EDGE;

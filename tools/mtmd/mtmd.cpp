@@ -244,10 +244,15 @@ struct mtmd_context {
                     }
                 }
             }
-            if (clip_is_minicpmv(ctx_v))
+            if (clip_is_minicpmv(ctx_v)) {
                 hm_vision = new HoumoMinicpmVision();
-            else 
+            } else if(clip_is_glm(ctx_v)) {
+                //FIXME: add glm-ocr
+            } else if (clip_is_gemma4v(ctx_v)) {
+                hm_vision = new HoumoGemmaVision(clip_get_hparams(ctx_v)->patch_size);
+            } else {
                 hm_vision = new HoumoQwenVision();
+            }
             if (!hm_vision->init(mmproj_fname, device_ids))
                 throw std::runtime_error(string_format(
                     "Failed to load HMM model from %s\n", mmproj_fname));
@@ -787,8 +792,14 @@ struct mtmd_tokenizer {
             LOG_DBG("%s:==== image size: %d x %d\n", __func__, img_u8->nx, img_u8->ny);
             // preprocess image
             clip_image_f32_batch batch_f32;
-            if (clip_is_hmm(ctx->ctx_v) && !clip_is_minicpmv(ctx->ctx_v)) {
+            if (clip_is_hmm(ctx->ctx_v) && clip_is_qwenvl(ctx->ctx_v)) {
+                //FIXME: 后续统一使用mtmd_image_preprocessor接口
                 LOG_DBG("%s: image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
+                clip_image_f32_ptr img_f32(clip_image_f32_init());
+                ctx->hm_vision->image_resize(img_u8, img_f32);
+                batch_f32.entries.push_back(std::move(img_f32));
+            } else if (clip_is_hmm(ctx->ctx_v) && clip_is_gemma4v(ctx->ctx_v)) {
+                LOG_DBG("%s:== image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
                 clip_image_f32_ptr img_f32(clip_image_f32_init());
                 ctx->hm_vision->image_resize(img_u8, img_f32);
                 batch_f32.entries.push_back(std::move(img_f32));

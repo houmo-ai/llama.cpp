@@ -45,6 +45,7 @@ add_library(llama
             houmo/houmo-vllmodel.cpp
             houmo/houmo-embed.cpp
             houmo/houmo-embedding_layer.cpp
+            houmo/houmo-gemma4.cpp
             ${LLAMA_MODELS_SOURCES}
             )
 

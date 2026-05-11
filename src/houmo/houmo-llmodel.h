@@ -267,6 +267,7 @@ protected:
   std::string kBlockCountEx = ".block_count";
   std::string kSpliteCount = "split.tensors.count";
   std::string kHmmInfo = "hmm.info";
+  std::string kCacheKeyWord = "model_layers_";
   int kSeqMax = 8; // maximum sequence number for single-card model
   int device_num_ = 1;
   std::vector<int> device_ids_ = {0};

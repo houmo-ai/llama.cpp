@@ -6,6 +6,7 @@
 #include "houmo-qwenllm.h"
 #include "houmo-qwen35llm.h"
 #include "houmo-vllmodel.h"
+#include "houmo-gemma4.h"
 #include "llama-arch.h"
 #include "llama-batch.h"
 #include "llama-impl.h"
@@ -214,7 +215,11 @@ void HouMoLLModel::Impl::prefill_input_init() {
         auto input_name = prefill_model_->GetInputName(idx);
         LLAMA_LOG_DEBUG("%s: prefill input_name: %s\n", __func__,
                         input_name.c_str());
+        if (input_name.find("past_key_cache_") != std::string::npos) {
+            kCacheKeyWord = "past_key_cache_";
+        }
         if (input_name.find("past_key_cache_") != std::string::npos ||
+            input_name.find("past_value_cache_") != std::string::npos ||
             input_name.find("_self_attn_vcache") != std::string::npos ||
             input_name.find("_self_attn_kcache") != std::string::npos ||
             input_name.find("past_conv_cache") != std::string::npos ||
@@ -276,17 +281,23 @@ void HouMoLLModel::Impl::decode_input_init() {
         auto input_name = decode_model_->GetInputName(idx);
         LLAMA_LOG_DEBUG("%s: decode_model input_name: %s\n", __func__,
                         input_name.c_str());
+        if (input_name.find("past_key_cache_") != std::string::npos) {
+            kCacheKeyWord = "past_key_cache_";
+        }
         if (input_name.find("past_key_cache_") != std::string::npos ||
+            input_name.find("past_value_cache_") != std::string::npos ||
             input_name.find("_self_attn_vcache") != std::string::npos ||
             input_name.find("_self_attn_kcache") != std::string::npos ||
             input_name.find("past_conv_cache") != std::string::npos ||
             input_name.find("past_recurrent_state") != std::string::npos) {
             continue;
         }
-        if (input_name.find("valid_length") != std::string::npos) {
+        if (input_name.find("valid_length") != std::string::npos ||
+            input_name.find("past_seq_length") != std::string::npos) {
             decode_valid_length_names_.push_back(input_name);
         }
-        if (input_name.find("current_length") != std::string::npos) {
+        if (input_name.find("current_length") != std::string::npos ||
+            input_name.find("current_input_length") != std::string::npos) {
             decode_current_length_names_.push_back(input_name);
         }
         LLAMA_LOG_INFO("%s: decode input_name: %s\n", __func__,
@@ -521,7 +532,7 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                      prefill_model_->GetInputInfo(name).Shape()[3]);
         return;
     }
-    std::string kv_prefix_name = "model_layers_";
+    std::string kv_prefix_name = kCacheKeyWord;
     // 检查是否有.hmcc.format 后缀. 开发编译的模型会添加后缀
     std::string ends_with = "";
     if (prefill_model_->GetInputName(0).find(".hmcc.format") !=
@@ -544,6 +555,10 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                                        "_self_attn_kcache_input" + ends_with;
             std::string v_cache_name = kv_prefix_name + std::to_string(idx) +
                                        "_self_attn_vcache_input" + ends_with;
+            if (kCacheKeyWord == "past_key_cache_") {
+                k_cache_name = "past_key_cache_" + std::to_string(idx);
+                v_cache_name = "past_value_cache_" + std::to_string(idx);
+            }
             item.names.push_back(k_cache_name);
             item.names.push_back(v_cache_name);
             LLAMA_LOG_DEBUG("%s: kv_cache_name: %s, n_blocks = %d\n", __func__, k_cache_name.c_str(), n_blocks_);
@@ -738,7 +753,9 @@ HouMoLLModel::~HouMoLLModel() {
 // Forward method calls to the implementation
 bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
     if (impl_ == nullptr) {
-        if (ml.arch_name.find("vl") != std::string::npos) {
+        if (ml.arch_name.find("gemma4") != std::string::npos) {
+            impl_ = new HouMoGemma4();
+        } else if (ml.arch_name.find("vl") != std::string::npos) {
             impl_ = new HouMoVLLModel();
         } else if (ml.arch_name.find("gpt-oss") != std::string::npos) {
             impl_ = new HouMoGPTOSS();

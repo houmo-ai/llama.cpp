@@ -790,3 +790,128 @@ bool HoumoMinicpmVision::encoding(const std::vector<float> &input_data,
     }
     return true;
 }
+
+bool HoumoGemmaVision::init(const std::string &model_path, std::vector<int> device_ids) {
+    if (!houmo_load(model_path, device_ids)) {
+        LOG_ERR("Failed to load HoumoGemmaVision model from %s\n",
+                model_path.c_str());
+        return false;
+    }
+    int input_size = module_->GetInputNum();
+    for (auto i = 0; i < input_size; ++i) {
+        auto input_name = module_->GetInputName(i);
+        LOG_INF("%s: input_name: %s\n", __func__, input_name.c_str());
+        auto input_info = module_->GetInputInfo(input_name).AsContiguous();
+        auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
+        input_tensors_.insert(
+            std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
+    }
+    int out_size = module_->GetOutputNum();
+    for (auto i = 0; i < out_size; ++i) {
+        auto output_name = module_->GetOutputName(i);
+        LOG_INF("%s: output_name: %s\n", __func__, output_name.c_str());
+        output_names_.push_back(output_name);
+    }
+    int32_t shape1 = input_tensors_[module_->GetInputName(0)].Info().Shape()[1];
+    image_width_ = (int)sqrt(shape1) * patch_size_;
+    image_height_ = image_width_;
+    image_frames_ = 1;
+    return true;
+}
+
+bool HoumoGemmaVision::image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output) {
+    // Gemma4Processor uses PIL BICUBIC resize and then rescales pixels from
+    // [0, 255] to [0, 1] before patchify. Keep this path aligned with it.
+    clip_image_u8 resized_img;
+    bicubic_resize(*input, resized_img, image_width_, image_height_);
+    output->nx = image_width_;
+    output->ny = image_height_;
+    output->buf.resize(output->nx * output->ny * 3);
+    for (size_t i = 0; i < resized_img.buf.size(); ++i) {
+        output->buf[i] = static_cast<float>(resized_img.buf[i])/255.0f;
+    }
+    return true;
+}
+
+bool HoumoGemmaVision::patchify_inplace(std::vector<float> &input_data,
+                                        std::string &err) {
+    err.clear();
+
+     int C = 3;
+     int H = image_height_;
+     int W = image_width_;
+     int patch_size = patch_size_;
+
+     int num_patches_h = H / patch_size;   // 16
+     int num_patches_w = W / patch_size;   // 16
+     int num_patches   = num_patches_h * num_patches_w; // 256
+     int patch_vec_len = patch_size * patch_size * C;   // 768
+
+    const size_t expect_in = static_cast<size_t>(C) * H * W;     // 196608
+    if (input_data.size() != expect_in) {
+        err = "input_data.size mismatch, expect 3*256*256=196608";
+        return false;
+    }
+
+    std::vector<float> out(static_cast<size_t>(num_patches) * patch_vec_len, 0.0f);
+
+    auto chw_idx = [=](int c, int y, int x) -> size_t {
+        return static_cast<size_t>(c) * H * W + static_cast<size_t>(y) * W + x;
+    };
+
+    // 顺序与 HF patchify 一致：py, px, iy, ix, c
+    for (int py = 0; py < num_patches_h; ++py) {
+        for (int px = 0; px < num_patches_w; ++px) {
+            const int patch_id = py * num_patches_w + px;
+            const size_t base = static_cast<size_t>(patch_id) * patch_vec_len;
+
+            int k = 0;
+            for (int iy = 0; iy < patch_size; ++iy) {
+                for (int ix = 0; ix < patch_size; ++ix) {
+                    const int y = py * patch_size + iy;
+                    const int x = px * patch_size + ix;
+                    for (int c = 0; c < C; ++c) {
+                        out[base + k++] = input_data[chw_idx(c, y, x)];
+                    }
+                }
+            }
+        }
+    }
+
+    // 回写：input_data 变成 256*768
+    input_data.swap(out);
+    return true;
+}
+
+bool HoumoGemmaVision::encoding(const std::vector<float> &input_data, std::vector<float> &output_data,
+                             int out_offset) {
+    LOG_INF("houmo_gemma_vision: encoding image slice... %d,%d\n", out_offset,
+            input_data.size());
+    // nhwc to nchw
+    rgb_to_nchw(input_data);
+    std::string err_;
+    if (!patchify_inplace(nchw_data_, err_)) {
+        LOG_ERR("patchify failed: %s\n", err_.c_str());
+        return false;
+    }
+    // set image input.
+    auto input_tensor = input_tensors_[module_->GetInputName(0)];
+    tcim::Tensor input_fp32_tensor = tcim::Tensor::CreateHostTensor(
+        input_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    input_fp32_tensor.Buffer().CopyFromHost(nchw_data_.data(),
+                                            input_fp32_tensor.MemSize());
+    input_fp32_tensor.CastTo(input_tensor);
+    module_->SetInput(module_->GetInputName(0), input_tensor);
+    module_->Run();
+    module_->Sync();
+    fill_header(output_data);
+    int offset = sizeof(CompactHeader);
+    int8_t * output_data_ptr = reinterpret_cast<int8_t *>(output_data.data());
+    for (auto &name : output_names_) {
+        tcim::Tensor output_tensor = module_->GetOutput(name);
+        memcpy(output_data_ptr + offset, output_tensor.Buffer().Data(),
+               output_tensor.MemSize());
+        offset += output_tensor.MemSize();
+    }
+    return true;
+}
