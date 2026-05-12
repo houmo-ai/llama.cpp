@@ -35,7 +35,7 @@ case "$PLATFORM" in
 esac
 
 # SDK URLs
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.2.0/2026/04/10/1639/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-1.2.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.3.0/2026/05/11/2348/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-1.3.0.tar.gz"
 
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/hlaw_ollama.${ARCH}"
 modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.${ARCH}"

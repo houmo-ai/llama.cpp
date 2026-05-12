@@ -118,8 +118,6 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     std::vector<std::string> state_cache_output_names_;
     std::map<int, StateCacheEntry> state_cache_;
     std::map<int, bool> state_cache_initialized_;
-    // Device-side zero-initialized state tensors for fast initialization
-    std::vector<tcim::Tensor> zero_state_tensors_;
 
     // Indices into state_cache_names_ / StateCacheEntry::tensors that
     // correspond to recurrent state (conv_cache + recurrent_state) — only
@@ -174,8 +172,10 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     void clear_all_checkpoints(PrefillSnapshot &snapshot);
     // Allocate the pre-allocated checkpoint pool for one seq_id.  Called from
     // init_state_cache after state_cache_names_/checkpoint_tensor_indices_
-    // are built.  Allocates checkpoint_max_count_ slots, each with Cloned
-    // (kDevice) or host-allocated (kHost) tensors of the right shape.
+    // are built.  Allocates checkpoint_max_count_ slots, each with device
+    // buffers (kDevice) or directly allocated host buffers (kHost) of the
+    // right shape; host slots never clone/copy device tensor contents during
+    // allocation.
     void init_checkpoint_pool(int seq_id);
     // Find a free slot (or evict the gap-best in-use slot) and return its
     // index inside snapshot.checkpoint_pool.  Caller is responsible for

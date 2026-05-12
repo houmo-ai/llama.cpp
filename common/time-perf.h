@@ -47,6 +47,16 @@ public:
             *m.max_ns = 0; // <-- 重置最大值
         }
     }
+
+    void ResetAll() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto &m : metrics_) {
+            *m.total_ns = 0;
+            *m.count = 0;
+            *m.current_ns = 0;
+            *m.max_ns = 0;
+        }
+    }
 private:
     std::vector<Metric> metrics_;
     std::mutex mutex_;
@@ -72,3 +82,4 @@ private:
         count_##tag++; \
     }
 #define PERF_REPORT() PerfRegistry::Instance().PrintAll()
+#define PERF_RESET() PerfRegistry::Instance().ResetAll()

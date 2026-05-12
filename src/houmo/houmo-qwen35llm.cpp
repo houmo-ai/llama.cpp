@@ -107,34 +107,12 @@ std::string resolve_batch_name(const std::vector<std::string> &names,
 }
 
 void zero_tensor(tcim::Tensor &tensor) {
-    size_t elem_count = tensor.MemSize();
-    switch (tensor.Info().DataType()) {
-    case tcim::DataType::FLOAT16: {
-        elem_count /= sizeof(ggml_fp16_t);
-        std::vector<ggml_fp16_t> zeros(elem_count, ggml_fp32_to_fp16(0.0f));
-        tensor.Buffer().CopyFromHost(zeros.data(), tensor.MemSize());
-        break;
-    }
-    case tcim::DataType::FLOAT32: {
-        elem_count /= sizeof(float);
-        std::vector<float> zeros(elem_count, 0.0f);
-        tensor.Buffer().CopyFromHost(zeros.data(), tensor.MemSize());
-        break;
-    }
-    case tcim::DataType::INT16: {
-        elem_count /= sizeof(int16_t);
-        std::vector<int16_t> zeros(elem_count, 0);
-        tensor.Buffer().CopyFromHost(zeros.data(), tensor.MemSize());
-        break;
-    }
-    case tcim::DataType::INT32: {
-        elem_count /= sizeof(int32_t);
-        std::vector<int32_t> zeros(elem_count, 0);
-        tensor.Buffer().CopyFromHost(zeros.data(), tensor.MemSize());
-        break;
-    }
-    default:
-        break;
+    if (tensor.Device() == tcim::Device::COMPND) {
+        for (const auto & sub_tensor : tcim::CompTensor(tensor).SubTensors()) {
+            sub_tensor.Buffer().MemSet(0);
+        }
+    } else {
+        tensor.Buffer().MemSet(0);
     }
 }
 
@@ -153,15 +131,6 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
                                 void *abort_callback_data) {
     abort_callback_data_ = abort_callback_data;
     abort_callback_ = abort_callback;
-    model_inout_init(seq_max);
-    if (is_embedding()) {
-        memory_ = nullptr;
-    } else {
-        memory_ = memory;
-    }
-    resolve_input_names();
-    init_state_cache(seq_max);
-
     if (const char *env = std::getenv("LLAMA_CHECKPOINT_INTERVAL")) {
         errno = 0;
         char *end = nullptr;
@@ -175,7 +144,27 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
                            __func__, env, checkpoint_min_interval_);
         }
     }
-
+    if (const char *env = std::getenv("LLAMA_CHECKPOINT_STORAGE")) {
+        if (std::strcmp(env, "1") == 0 || std::strcmp(env, "device") == 0) {
+            checkpoint_storage_ = CheckpointStorage::kDevice;
+            LLAMA_LOG_INFO("%s: set checkpoint_storage_ to kDevice from env LLAMA_CHECKPOINT_STORAGE=%s\n",
+                           __func__, env);
+            checkpoint_max_count_ = 40;
+        } else {
+            checkpoint_storage_ = CheckpointStorage::kHost;
+            LLAMA_LOG_INFO("%s: set checkpoint_storage_ to kHost from env LLAMA_CHECKPOINT_STORAGE=%s\n",
+                           __func__, env);
+            checkpoint_max_count_ = 80;
+        }
+    }
+    model_inout_init(seq_max);
+    if (is_embedding()) {
+        memory_ = nullptr;
+    } else {
+        memory_ = memory;
+    }
+    resolve_input_names();
+    init_state_cache(seq_max);
 }
 
 void HoumoQwen35LLM::resolve_input_names() {
@@ -272,21 +261,23 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
         state_cache_[i] = std::move(entry);
         state_cache_initialized_[i] = false;
     }
-    // Create device-side zero-initialized tensors for fast state restoration.
-    // These serve as the single source of truth for position-0 state,
-    // avoiding redundant per-seq_id checkpoint 0 storage.
-    zero_state_tensors_.clear();
-    zero_state_tensors_.reserve(state_cache_names_.size());
-    for (const auto &name : state_cache_names_) {
-        auto cache = decode_model_->GetDevInput(name);
-        auto dev_tensor = cache.Clone();
-        zero_tensor(dev_tensor);
-        zero_state_tensors_.push_back(dev_tensor);
+
+    if (device_ids_.size() == 1) {
+        LLAMA_LOG_INFO("%s: using device checkpoint storage for seq_max=%d\n",
+                       __func__, seq_max);
+        checkpoint_storage_ = CheckpointStorage::kDevice;
+    } else {
+        LLAMA_LOG_INFO("%s: using host checkpoint storage for multi device "
+                       "model, device_ids_.size() = %zu\n",
+                       __func__, device_ids_.size());
+        checkpoint_storage_ = CheckpointStorage::kHost;
+        checkpoint_max_count_ *= 2;
     }
+
     // Zero-initialize all state cache entries so model I/O is connected.
     for (auto &[seq_id, entry] : state_cache_) {
         for (size_t idx = 0; idx < entry.tensors.size(); ++idx) {
-            zero_state_tensors_[idx].CopyTo(entry.tensors[idx]);
+            zero_tensor(entry.tensors[idx]);
         }
         state_cache_initialized_[seq_id] = true;
         auto &snap = prefill_snapshots_[seq_id];
@@ -323,12 +314,12 @@ void HoumoQwen35LLM::init_checkpoint_pool(int seq_id) {
             tcim::Tensor dst;
             if (checkpoint_storage_ == CheckpointStorage::kDevice) {
                 // Independent device-side buffer of matching shape/dtype.
-                dst = src.Clone();
+                dst = src.Clone(false);
             } else {
                 // ToHost(true) yields a contiguous host copy of matching
                 // shape — content is irrelevant, will be overwritten by
                 // CopyTo on first save.
-                dst = src.ToHost(true);
+                dst = src.ToHost(false);
             }
             if (dst.GetInitStatus() != tcim::Status::OK) {
                 LLAMA_LOG_WARN("%s: failed to pre-allocate checkpoint tensor "
@@ -440,7 +431,7 @@ void HoumoQwen35LLM::set_state_cache_for_prefill(int seq_id) {
         return;
     }
     auto &tensors = iter->second.tensors;
-    // If not initialized, restore zero state directly from template.
+    // If not initialized, restore zero state in-place.
     if (!state_cache_initialized_[seq_id]) {
         restore_zero_state(seq_id);
         state_cache_initialized_[seq_id] = true;
@@ -494,6 +485,11 @@ int HoumoQwen35LLM::find_common_prefix_length(
 
 void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
     if (prefill_model_ == nullptr) {
+        return;
+    }
+    if (position <= 0) {
+        // Position 0 is represented by in-place zeroing of state tensors;
+        // never allocate or save a checkpoint slot for it.
         return;
     }
     auto cache_iter = state_cache_.find(seq_id);
@@ -606,7 +602,9 @@ void HoumoQwen35LLM::restore_zero_state(int seq_id) {
     }
     auto &tensors = cache_iter->second.tensors;
     for (size_t idx : checkpoint_tensor_indices_) {
-        zero_state_tensors_[idx].CopyTo(tensors[idx]);
+        if (idx < tensors.size()) {
+            zero_tensor(tensors[idx]);
+        }
     }
 }
 
@@ -749,6 +747,8 @@ int HoumoQwen35LLM::run_prefill_round(int seq_id,
     }
 
     PERF_START(PREFILL_SETINPUT_ONCE);
+    LLAMA_LOG_INFO("%s: setting inputs for seq_id=%d (is_first_round=%d)\n",
+                   __func__, seq_id, is_first_round);
     if (is_first_round) {
         for (const auto &pair : lora_map) {
             if (prefill_input_map_.count(pair.first) > 0) {

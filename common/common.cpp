@@ -7,6 +7,7 @@
 #include "log.h"
 #include "llama.h"
 #include "sampling.h"
+#include "time-perf.h"
 #include "unicode.h"
 
 #include <algorithm>
@@ -1376,6 +1377,7 @@ common_init_result_ptr common_init_from_params(common_params & params) {
 
         // reset samplers to reset RNG state after warmup to the seeded state
         res->reset_samplers();
+        PERF_RESET();
     }
 
     return res;
