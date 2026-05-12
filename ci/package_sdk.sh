@@ -39,6 +39,103 @@ xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2
 
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/hlaw_ollama.${ARCH}"
 modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.${ARCH}"
+
+# 对齐策略说明：
+# - auto(默认): aarch64 默认启用 64K 对齐；x86_64 默认不启用
+# - 64k: 强制启用 64K 对齐
+# - native: 不强制页对齐（使用工具链默认行为）
+SDK_ALIGN_MODE="${SDK_ALIGN_MODE:-auto}"
+PAGE_ALIGN_LDFLAGS="-Wl,-z,max-page-size=65536 -Wl,-z,common-page-size=65536"
+PATCHELF_PAGE_SIZE=65536
+ENABLE_64K_ALIGN=0
+
+resolve_alignment_policy() {
+    case "${SDK_ALIGN_MODE}" in
+        auto)
+            if [ "$ARCH" = "aarch64" ]; then
+                ENABLE_64K_ALIGN=1
+            else
+                ENABLE_64K_ALIGN=0
+            fi
+            ;;
+        64k)
+            ENABLE_64K_ALIGN=1
+            ;;
+        native)
+            ENABLE_64K_ALIGN=0
+            ;;
+        *)
+            echo "Invalid SDK_ALIGN_MODE: ${SDK_ALIGN_MODE} (expected: auto|64k|native)"
+            exit 1
+            ;;
+    esac
+}
+
+patchelf_supports_page_size() {
+    patchelf --help 2>&1 | grep -q -- "--page-size"
+}
+
+patchelf_set_rpath() {
+    local rpath="$1"
+    local target="$2"
+
+    if [ "$ENABLE_64K_ALIGN" = "1" ] && patchelf_supports_page_size; then
+        patchelf --page-size "${PATCHELF_PAGE_SIZE}" --set-rpath "$rpath" "$target"
+    elif [ "$ENABLE_64K_ALIGN" = "1" ]; then
+        echo "Warning: patchelf does not support --page-size, fallback may reset alignment: $target"
+        patchelf --set-rpath "$rpath" "$target"
+    else
+        patchelf --set-rpath "$rpath" "$target"
+    fi
+}
+
+verify_elf_64k_alignment() {
+    local target="$1"
+
+    if [ "$ENABLE_64K_ALIGN" != "1" ]; then
+        return 0
+    fi
+
+    if ! command -v readelf >/dev/null 2>&1; then
+        echo "Warning: readelf not found, skip 64K alignment verification: $target"
+        return 0
+    fi
+
+    if readelf -l "$target" 2>/dev/null | awk '$1=="LOAD"{ if (tolower($NF) != "0x10000") bad=1 } END { exit bad ? 1 : 0 }'; then
+        echo "Verified 64K ELF LOAD alignment: $target"
+    else
+        echo "Warning: non-64K ELF LOAD alignment detected after patchelf: $target"
+    fi
+}
+
+# 检测主机页大小（仅用于日志），具体对齐策略由 SDK_ALIGN_MODE 决定
+detect_host_page_size() {
+    local page_size=""
+
+    if command -v getconf >/dev/null 2>&1; then
+        page_size=$(getconf PAGE_SIZE 2>/dev/null || true)
+        if [ -z "$page_size" ]; then
+            page_size=$(getconf PAGESIZE 2>/dev/null || true)
+        fi
+    fi
+
+    if [ -n "$page_size" ]; then
+        echo "Detected host page size via getconf: ${page_size}"
+    else
+        echo "getconf not available or failed, skip host page size detection."
+    fi
+}
+
+print_alignment_policy() {
+    echo "SDK_ALIGN_MODE=${SDK_ALIGN_MODE}"
+    if [ "$ENABLE_64K_ALIGN" = "1" ]; then
+        echo "Effective alignment policy: FORCE_64K"
+        echo "Using linker page alignment flags: ${PAGE_ALIGN_LDFLAGS}"
+    else
+        echo "Effective alignment policy: NATIVE"
+    fi
+}
+
 # 下载文件并检查是否成功
 download_file() {
     local url=$1
@@ -69,6 +166,17 @@ deploy_dadao_sdk() {
 build_llama() {
     echo "Building for ARCH: $ARCH"
     git config --global --add safe.directory `pwd`
+    resolve_alignment_policy
+    detect_host_page_size
+    print_alignment_policy
+    local cmake_linker_args=()
+    if [ "$ENABLE_64K_ALIGN" = "1" ]; then
+        cmake_linker_args+=(
+            -DCMAKE_EXE_LINKER_FLAGS="${PAGE_ALIGN_LDFLAGS}"
+            -DCMAKE_SHARED_LINKER_FLAGS="${PAGE_ALIGN_LDFLAGS}"
+            -DCMAKE_MODULE_LINKER_FLAGS="${PAGE_ALIGN_LDFLAGS}"
+        )
+    fi
     # 创建或清理构建目录
     mkdir -p build
     rm -rf build/*
@@ -76,16 +184,20 @@ build_llama() {
     cd build
     if [ "$ARCH" == "aarch64" ]; then
         if [ "$PLATFORM" == "xh2" ]; then
-            cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON
+            cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON \
+                "${cmake_linker_args[@]}"
         else
-            cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF
+            cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF \
+                "${cmake_linker_args[@]}"
         fi
     else
         if [ "$PLATFORM" == "xh2" ]; then
-            cmake .. -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON
+            cmake .. -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON \
+                "${cmake_linker_args[@]}"
         else
             # 默认使用x86_64架构
-            cmake .. -DLLAMA_CURL=OFF
+            cmake .. -DLLAMA_CURL=OFF \
+                "${cmake_linker_args[@]}"
         fi
     fi
     if [ $? -ne 0 ]; then
@@ -147,11 +259,13 @@ package_llama() {
     cp build/bin/llama-gguf-split "$release_dir/bin/" || true
     cp build/bin/llama-cli "$release_dir/bin/" || true
     for file in "$release_dir/bin/"*; do
-        patchelf --set-rpath '$ORIGIN/../lib' "$file"
+        patchelf_set_rpath '$ORIGIN/../lib' "$file"
+        verify_elf_64k_alignment "$file"
     done
     for so_file in "$release_dir"/lib/*.so; do
         if [ -f "$so_file" ]; then
-            patchelf --set-rpath '$ORIGIN' "$so_file"
+            patchelf_set_rpath '$ORIGIN' "$so_file"
+            verify_elf_64k_alignment "$so_file"
         fi
     done
 
@@ -222,7 +336,8 @@ main() {
 
     download_file "$modelcli_url" "release/$PLATFORM/$ARCH/bin/model-cli"
     download_file "$ollama_url" "release/$PLATFORM/$ARCH/bin/hlaw_ollama"
-    patchelf --set-rpath '$ORIGIN/../lib' release/$PLATFORM/$ARCH/bin/hlaw_ollama
+    patchelf_set_rpath '$ORIGIN/../lib' release/$PLATFORM/$ARCH/bin/hlaw_ollama
+    verify_elf_64k_alignment release/$PLATFORM/$ARCH/bin/hlaw_ollama
     chmod 755 release/$PLATFORM/$ARCH/bin/hlaw_ollama
     chmod 755 release/$PLATFORM/$ARCH/bin/model-cli
     echo "LLAMA build and packaging completed for $PLATFORM/$ARCH."
