@@ -579,16 +579,16 @@ bool mtmd_audio_preprocessor_whisper::preprocess(const float *                 s
         return false;
     }
 
-    // because the cgraph in clip.cpp only accepts 3000 frames each, we need to split the mel
-    // we always expect the mel to have 3000 silent frames at the end
+    // Split the mel into fixed-size chunks expected by the encoder.
+    // HMM-based audio models can override this with the input shape read from encode.hmm.
     if (DEBUG) {
         printf("output: n_mel = %d, n_len = %d\n", out_full.n_mel, out_full.n_len);
     }
-    const size_t frames_per_chunk = 3000;
-    GGML_ASSERT((size_t) out_full.n_len > frames_per_chunk);
-    for (size_t off = 0; off < (size_t) out_full.n_len; off += frames_per_chunk) {
-        int n_len = std::min(frames_per_chunk, (size_t) out_full.n_len - off);
-        if ((size_t) n_len < frames_per_chunk) {
+    const size_t chunk_frames = frames_per_chunk > 0 ? frames_per_chunk : 3000;
+    GGML_ASSERT((size_t) out_full.n_len > chunk_frames);
+    for (size_t off = 0; off < (size_t) out_full.n_len; off += chunk_frames) {
+        int n_len = std::min(chunk_frames, (size_t) out_full.n_len - off);
+        if ((size_t) n_len < chunk_frames) {
             break;  // last incomplete chunk will always be a padded chunk, safe to ignore
         }
 
@@ -600,7 +600,7 @@ bool mtmd_audio_preprocessor_whisper::preprocess(const float *                 s
 
         for (int i = 0; i < out_full.n_mel; i++) {
             auto src = out_full.data.begin() + i * out_full.n_len + off;
-            out_chunk.data.insert(out_chunk.data.end(), src, src + frames_per_chunk);
+            out_chunk.data.insert(out_chunk.data.end(), src, src + chunk_frames);
         }
 
         output.push_back(std::move(out_chunk));

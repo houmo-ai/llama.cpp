@@ -56,8 +56,12 @@ struct mtmd_audio_preprocessor {
     mtmd_audio_preprocessor(const clip_ctx * ctx): hparams(*clip_get_hparams(ctx)) {}
 
     virtual ~mtmd_audio_preprocessor() = default;
+    void set_frames_per_chunk(size_t frames) { frames_per_chunk = frames; }
     virtual void initialize() = 0; // NOT thread-safe
     virtual bool preprocess(const float * samples, size_t n_samples, std::vector<mtmd_audio_mel> & output) = 0;
+
+  protected:
+    size_t frames_per_chunk = 0;
 };
 
 struct mtmd_audio_preprocessor_whisper : mtmd_audio_preprocessor {

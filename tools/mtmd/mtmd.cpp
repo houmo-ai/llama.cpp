@@ -1,10 +1,11 @@
 #include "clip.h"
 #include "clip-impl.h"
+#include "houmo-audio.h"
+#include "houmo-vision.h"
 #include "mtmd.h"
 #include "mtmd-audio.h"
 #include "mtmd-image.h"
 #include "debug/mtmd-debug.h"
-#include "houmo-vision.h"
 
 #include "llama.h"
 
@@ -140,6 +141,7 @@ mtmd_context_params mtmd_context_params_default() {
 
 struct mtmd_context {
     HoumoVision * hm_vision = nullptr; // for HMM-based vision models
+    HoumoAudio * hm_audio = nullptr; // for HMM-based audio models
     struct clip_ctx * ctx_v; // vision
     struct clip_ctx * ctx_a; // audio
     const struct llama_model * text_model;
@@ -230,7 +232,7 @@ struct mtmd_context {
             throw std::runtime_error(string_format("Failed to load CLIP model from %s\n", mmproj_fname));
         }
 
-        if (clip_is_hmm(ctx_v)) {
+        if ( (ctx_v != nullptr && clip_is_hmm(ctx_v)) || (ctx_a != nullptr && clip_is_hmm(ctx_a))) {
             std::vector<int> device_ids;
             if (ctx_params.devices != nullptr) {
                 LOG_INF("device is not null...");
@@ -244,18 +246,27 @@ struct mtmd_context {
                     }
                 }
             }
-            if (clip_is_minicpmv(ctx_v)) {
-                hm_vision = new HoumoMinicpmVision();
-            } else if(clip_is_glm(ctx_v)) {
-                //FIXME: add glm-ocr
-            } else if (clip_is_gemma4v(ctx_v)) {
-                hm_vision = new HoumoGemmaVision(clip_get_hparams(ctx_v)->patch_size);
-            } else {
-                hm_vision = new HoumoQwenVision();
+            if(ctx_v) {
+                if (clip_is_minicpmv(ctx_v)) {
+                    hm_vision = new HoumoMinicpmVision();
+                } else if(clip_is_glm(ctx_v)) {
+                    //FIXME: add glm-ocr
+                } else if (clip_is_gemma4v(ctx_v)) {
+                    hm_vision = new HoumoGemmaVision(clip_get_hparams(ctx_v)->patch_size);
+                } else {
+                    hm_vision = new HoumoQwenVision();
+                }
+                if (!hm_vision->init(mmproj_fname, device_ids))
+                    throw std::runtime_error(string_format(
+                        "Failed to load HMM model from %s\n", mmproj_fname));
             }
-            if (!hm_vision->init(mmproj_fname, device_ids))
-                throw std::runtime_error(string_format(
-                    "Failed to load HMM model from %s\n", mmproj_fname));
+            if (ctx_a) {
+                // for audio, we currently only support qwen3a
+                hm_audio = new HoumoQwen3Audio();
+                if (!hm_audio->init(mmproj_fname, device_ids))
+                    throw std::runtime_error(string_format(
+                        "Failed to load HMM audio model from %s\n", mmproj_fname));
+            }
         }
 
         // if both vision and audio mmproj are present, we need to validate their n_embd
@@ -591,6 +602,9 @@ struct mtmd_context {
 
         // initialize audio preprocessor
         GGML_ASSERT(audio_preproc != nullptr);
+        if (clip_is_hmm(ctx_a) && hm_audio != nullptr && hm_audio->audio_n_frames() > 0) {
+            audio_preproc->set_frames_per_chunk((size_t) hm_audio->audio_n_frames());
+        }
         audio_preproc->initialize();
     }
 
@@ -952,15 +966,22 @@ struct mtmd_tokenizer {
                 LOG_ERR("Unable to preprocess audio\n");
                 return 2;
             }
-
+            LOG_INF("%s: audio preprocessed into %zu mel spectrogram chunks. n_samples = %zu\n",
+                     __func__, mel_spec_chunks.size(), n_samples);
             // consider each mel_spec as a separate audio chunk
             // TODO: maybe support batching, but this may come with memory cost
             for (auto & mel_spec : mel_spec_chunks) {
                 clip_image_f32_ptr mel_f32(clip_image_f32_init());
                 mel_f32->nx  = mel_spec.n_len;
                 mel_f32->ny  = mel_spec.n_mel;
+                LOG_INF("%s: mel spectrogram chunk has dimensions %d x %d\n", __func__, mel_f32->nx, mel_f32->ny);
                 mel_f32->buf = std::move(mel_spec.data);
                 size_t n_tokens = clip_n_output_tokens(ctx->ctx_a, mel_f32.get());
+                LOG_DBG("mel_spec.n_len = %d, mel_spec.n_mel = %d, n_tokens = %d\n", mel_spec.n_len, mel_spec.n_mel, (int)n_tokens);
+                LOG_INF("%s: mel spectrogram chunk has %d tokens\n", __func__, (int)n_tokens);
+                if (clip_is_hmm(ctx->ctx_a) && ctx->hm_audio != nullptr && ctx->hm_audio->output_tokens() > 0) {
+                    n_tokens = (size_t) ctx->hm_audio->output_tokens();
+                }
 
                 clip_image_f32_batch batch_f32;
                 batch_f32.is_audio = true;
@@ -1080,6 +1101,11 @@ int32_t mtmd_encode_chunk(mtmd_context * ctx, const mtmd_input_chunk * chunk) {
         }
         int n_mmproj_embd = ctx->n_embd_text;
         ctx->image_embd_v.resize(chunk->tokens_audio->n_tokens * n_mmproj_embd);
+        if (clip_is_hmm(ctx->ctx_a)) {
+            // FIXME: 只处理第一段音频
+            const clip_image_f32_ptr & audio = chunk->tokens_audio->batch_f32.entries[0];
+            return ctx->hm_audio->encoding(audio->buf, ctx->image_embd_v) ? 0 : 1;
+        }
         bool ok = clip_image_batch_encode(
             ctx->ctx_a,
             ctx->n_threads,

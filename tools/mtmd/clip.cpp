@@ -2876,9 +2876,11 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
         if (loader.has_audio && !skip_audio) {
             ctx_audio = new clip_ctx(ctx_params);
             loader.load_hparams(ctx_audio->model, CLIP_MODALITY_AUDIO);
-            loader.load_tensors(*ctx_audio);
-            if (ctx_params.warmup) {
-                loader.warmup(*ctx_audio);
+            if (!clip_is_hmm(ctx_audio)) {
+                loader.load_tensors(*ctx_audio);
+                if (ctx_params.warmup) {
+                    loader.warmup(*ctx_audio);
+                }
             }
         }
 
@@ -4147,6 +4149,9 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
         case PROJECTOR_TYPE_QWEN2A:
             return ctx->model.mm_fc_w->ne[1];
         case PROJECTOR_TYPE_QWEN3A:
+            if (clip_is_hmm(ctx)) {
+                return ctx->model.hparams.projection_dim;
+            }
             return ctx->model.mm_2_w->ne[1];
         case PROJECTOR_TYPE_GLMA:
         case PROJECTOR_TYPE_LFM2:

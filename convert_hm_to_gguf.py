@@ -2706,29 +2706,30 @@ class MmprojModel(ModelBase):
     def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
         # TODO: @guoxing.xu check & test this block
         logger.info(".....Getting tensors")
-        pattern = "*visual.hmm"
+        patterns = ("*visual.hmm", "*encode.hmm")
         # 遍历目录下匹配的所有文件（仅文件，不包含子目录）
-        for file_path in self.dir_model.glob(pattern):
-            logger.info(f".....Loading tensor from {file_path}")
-
-            if not file_path.is_file():
-                logger.warning(f".....{file_path} is not a file, skipping")
-                continue
-            hmm_info = read_hmm_info(file_path)
-            self.hmm_info = json.dumps(hmm_info.__dict__)
-            try:
-                # 读取二进制数据并转换为 torch.Tensor
-                with open(file_path, "rb") as file:
-                    binary_data = np.frombuffer(file.read(), dtype=np.uint8)
-                    logger.info(f".....Tensor size: {binary_data.shape}")
-                    data = torch.from_numpy(binary_data.copy())
-                    yield "visual.hmm", data
-            except Exception as e:
-                logger.error(
-                    f".....Failed to load {file_path}: {str(e)}", exc_info=True
-                )
-                continue
-                # 遍历目录下所有的json文件，只返回不带路径的文件名
+        for pattern in patterns:
+            for file_path in self.dir_model.glob(pattern):
+                logger.info(f".....Loading tensor from {file_path}")
+                if not file_path.is_file():
+                    logger.warning(f".....{file_path} is not a file, skipping")
+                    continue
+                hmm_info = read_hmm_info(file_path)
+                self.hmm_info = json.dumps(hmm_info.__dict__)
+                try:
+                    # 读取二进制数据并转换为 torch.Tensor
+                    with open(file_path, "rb") as file:
+                        binary_data = np.frombuffer(file.read(), dtype=np.uint8)
+                        logger.info(f".....Tensor size: {binary_data.shape}")
+                        data = torch.from_numpy(binary_data.copy())
+                        tensor_name = "encode.hmm" if file_path.name.endswith("encode.hmm") else "visual.hmm"
+                        yield tensor_name, data
+                except Exception as e:
+                    logger.error(
+                        f".....Failed to load {file_path}: {str(e)}", exc_info=True
+                    )
+                    continue
+                    # 遍历目录下所有的json文件，只返回不带路径的文件名
         for json_file in glob.glob(os.path.join(self.dir_model, "*.json")):
             with open(json_file, "rb") as file:
                 binary_data = np.frombuffer(file.read(), dtype=np.uint8)
@@ -4777,18 +4778,18 @@ class Qwen25AudioModel(MmprojModel):
         assert self.hparams_audio is not None
         self.gguf_writer.add_audio_num_mel_bins(self.hparams_audio["num_mel_bins"])
         self.gguf_writer.add_audio_attention_layernorm_eps(self.hparams_audio.get("layer_norm_eps", 1e-5))
-
-    def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
-        # SinusoidsPositionEmbedding
-        assert self.hparams_audio is not None
-        max_timescale = 10000
-        length = 1500
-        channels = self.hparams_audio["hidden_size"]
-        log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
-        inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2).float())
-        scaled_time = torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
-        pos_embd = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1).to(dtype=torch.float32)
-        yield ("audio_tower.embed_positions.weight", pos_embd)
+    # FIXME: no need..
+    # def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
+    #     # SinusoidsPositionEmbedding
+    #     assert self.hparams_audio is not None
+    #     max_timescale = 10000
+    #     length = 1500
+    #     channels = self.hparams_audio["hidden_size"]
+    #     log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
+    #     inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2).float())
+    #     scaled_time = torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
+    #     pos_embd = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1).to(dtype=torch.float32)
+    #     yield ("audio_tower.embed_positions.weight", pos_embd)
 
     def tensor_force_quant(self, name, new_name, bid, n_dims):
         if ".conv" in name and ".weight" in name:
@@ -5750,7 +5751,7 @@ class Qwen3OmniMoeTextModel(Qwen3VLMoeTextModel):
 
 @ModelBase.register("Qwen3ASRForConditionalGeneration")
 class Qwen3ASRTextModel(Qwen3VLTextModel):
-    model_arch = gguf.MODEL_ARCH.QWEN3VL
+    model_arch = gguf.MODEL_ARCH.QWEN3
 
     def set_gguf_parameters(self):
         super().set_gguf_parameters()

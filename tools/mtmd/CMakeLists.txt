@@ -42,6 +42,8 @@ add_library(mtmd
             models/mobilenetv5.cpp
             models/youtuvl.cpp
             models/yasa2.cpp
+            houmo-audio.cpp
+            houmo-audio.h
             houmo-vision.cpp
             houmo-vision.h
             )
