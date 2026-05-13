@@ -190,6 +190,7 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
                 ggml_backend_dev_t dev = ggml_backend_dev_get(i);
                 switch (ggml_backend_dev_type(dev)) {
                     case GGML_BACKEND_DEVICE_TYPE_CPU:
+                    case GGML_BACKEND_DEVICE_TYPE_HM_ACCEL:
                     case GGML_BACKEND_DEVICE_TYPE_ACCEL:
                         // skip CPU backends since they are handled separately
                         break;

@@ -142,6 +142,8 @@ extern "C" {
         GGML_BACKEND_DEVICE_TYPE_ACCEL,
         // "meta" device wrapping multiple other devices for tensor parallelism
         GGML_BACKEND_DEVICE_TYPE_META,
+        // for HOUMO NPU
+        GGML_BACKEND_DEVICE_TYPE_HM_ACCEL,
     };
 
     // functionality supported by the device
