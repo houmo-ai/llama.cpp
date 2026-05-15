@@ -240,7 +240,7 @@ package_llama() {
     cp -r build/tools/server/*.hpp "$release_dir/include/server/" || true
     # 复制库文件
     cp build/bin/*.so "$release_dir/lib/" || true
-    cp build/common/libcommon.a "$release_dir/lib/"
+    cp build/common/*.a "$release_dir/lib/"
     cp build/tools/server/libserver-context.a "$release_dir/lib/" || true
     cp third_party/houmo/lib/*.so* "$release_dir/lib/" || true
     cp version.cfg "$release_dir/version.txt"
