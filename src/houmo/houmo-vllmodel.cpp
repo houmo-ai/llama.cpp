@@ -337,11 +337,8 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     PERF_START(DECODE_GETOUTPUT);
     tcim::Tensor decode_data =
         decode_model_->GetOutput(decode_output_names_[0]);
-    // 转浮点
-    auto &decode_output_float = decode_output_map_[decode_output_names_[0]];
-    decode_data.CastTo(decode_output_float);
-    auto n_vocab =
-        decode_output_float.MemSize() / (n_decode_batch_ * sizeof(float));
+    const auto out_dtype = decode_data.Info().DataType();
+    void *decode_ptr = decode_data.Buffer().Data();
     PERF_STOP(DECODE_GETOUTPUT);
     // 7. 拷贝output到logits
     for (size_t i = 0; i < seq_ids.size(); i++) {
@@ -352,10 +349,17 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
         if (n_decode_batch_ == 1)
             batch_id = 0;
         float *logits_out = logits[i];
-        float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
-                            batch_id * n_vocab;
         if (logits_out != nullptr) {
-            memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+            if (out_dtype == tcim::DataType::FLOAT16) {
+                auto *output_ptr = static_cast<ggml_fp16_t *>(decode_ptr) +
+                                   batch_id * n_vocab_;
+                ggml_fp16_to_fp32_row(output_ptr, logits_out,
+                                      static_cast<int>(n_vocab_));
+            } else {
+                LLAMA_LOG_ERROR("%s: unsupported decode output dtype=%d\n",
+                                __func__, static_cast<int>(out_dtype));
+                return -1;
+            }
         }
         memory_->seq_add(batch_id, 0, 0, 1);
     }

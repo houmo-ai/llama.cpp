@@ -336,6 +336,8 @@ void HouMoLLModel::Impl::decode_output_init() {
             std::pair<std::string, tcim::Tensor>(output_name, output_tensor));
         decode_output_names_.push_back(output_name);
     }
+    n_vocab_ = decode_output_map_[decode_output_names_[0]].Info().MemSize() /
+               (sizeof(float) * n_decode_batch_);
 }
 
 void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx,

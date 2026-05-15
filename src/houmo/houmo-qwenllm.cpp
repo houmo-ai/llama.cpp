@@ -1,8 +1,10 @@
 #include "houmo-qwenllm.h"
+#include "ggml.h"
 #include <cstring>
 #include <algorithm>
 #include "llama-impl.h"
 #include "time-perf.h"
+
 void HoumoQwenLLM::houmo_init(houmo_memory_i *memory, int seq_max,
                               ggml_abort_callback abort_callback,
                               void *abort_callback_data) {
@@ -250,11 +252,8 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
     PERF_START(DECODE_GETOUTPUT);
     tcim::Tensor decode_data =
         decode_model_->GetOutput(decode_output_names_[0]);
-    // 7.转浮点
-    auto &decode_output_float = decode_output_map_[decode_output_names_[0]];
-    decode_data.CastTo(decode_output_float);
-    auto n_vocab =
-        decode_output_float.MemSize() / (n_decode_batch_ * sizeof(float));
+    const auto out_dtype = decode_data.Info().DataType();
+    void *decode_ptr = decode_data.Buffer().Data();
     PERF_STOP(DECODE_GETOUTPUT);
     for (size_t i = 0; i < seq_ids.size(); i++) {
         auto batch_id = seq_ids[i];
@@ -263,10 +262,17 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
         if (n_decode_batch_ == 1)
             batch_id = 0;
         float *logits_out = logits[i];
-        float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
-                            batch_id * n_vocab;
         if (logits_out != nullptr) {
-            memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+            if (out_dtype == tcim::DataType::FLOAT16) {
+                auto *output_ptr = static_cast<ggml_fp16_t *>(decode_ptr) +
+                                   batch_id * n_vocab_;
+                ggml_fp16_to_fp32_row(output_ptr, logits_out,
+                                      static_cast<int>(n_vocab_));
+            } else {
+                LLAMA_LOG_ERROR("%s: unsupported decode output dtype=%d\n",
+                                __func__, static_cast<int>(out_dtype));
+                return -1;
+            }
         }
         if (memory_) {
             memory_->seq_add(seq_ids[i], 0, 0, 1);
@@ -397,19 +403,27 @@ int HoumoQwenLLM::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     PERF_START(DECODE_GETOUTPUT);
     tcim::Tensor decode_data =
         decode_model_->GetOutput(decode_output_names_[0]);
-    auto &decode_output_float = decode_output_map_[decode_output_names_[0]];
-    decode_data.CastTo(decode_output_float);
+    const auto out_dtype = decode_data.Info().DataType();
+    void *decode_ptr = decode_data.Buffer().Data();
     // 输出形状 [1, graph_seq_len, n_vocab]
-    auto total_floats = decode_output_float.MemSize() / sizeof(float);
+    GGML_ASSERT(out_dtype == tcim::DataType::FLOAT16);
+    auto total_floats = decode_data.MemSize() / sizeof(uint16_t);
     auto n_vocab = total_floats / (size_t)graph_seq_len;
     PERF_STOP(DECODE_GETOUTPUT);
 
     // 7. 复制每个位置的 logits
-    float *base_ptr = static_cast<float *>(decode_output_float.Data());
     for (int i = 0; i < k; ++i) {
         if (logits_out[i] != nullptr) {
-            memcpy(logits_out[i], base_ptr + (size_t)i * n_vocab,
-                   n_vocab * sizeof(float));
+            if (out_dtype == tcim::DataType::FLOAT16) {
+                auto *base_ptr = static_cast<ggml_fp16_t *>(decode_ptr);
+                ggml_fp16_to_fp32_row(base_ptr + (size_t)i * n_vocab,
+                                      logits_out[i],
+                                      static_cast<int>(n_vocab));
+            } else {
+                LLAMA_LOG_ERROR("%s: unsupported decode output dtype=%d\n",
+                                __func__, static_cast<int>(out_dtype));
+                return -1;
+            }
         }
     }
 

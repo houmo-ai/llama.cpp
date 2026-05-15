@@ -124,6 +124,17 @@ bool is_cache_input_name(const std::string &name) {
            name.find("past_recurrent_state") != std::string::npos;
 }
 
+size_t dtype_size(tcim::DataType dtype) {
+    switch (dtype) {
+        case tcim::DataType::FLOAT16:
+            return sizeof(ggml_fp16_t);
+        case tcim::DataType::FLOAT32:
+            return sizeof(float);
+        default:
+            return 0;
+    }
+}
+
 } // namespace
 
 void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
@@ -135,7 +146,7 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
         errno = 0;
         char *end = nullptr;
         long v = std::strtol(env, &end, 10);
-        if (errno == 0 && end != env && *end == '\0' && v > 0 && v <= 4096) {
+        if (errno == 0 && end != env && *end == '\0' && v > 0 && v <= 40960) {
             checkpoint_min_interval_ = static_cast<int>(v);
             LLAMA_LOG_INFO("%s: set checkpoint_min_interval_ from env LLAMA_CHECKPOINT_INTERVAL=%d\n",
                            __func__, checkpoint_min_interval_);
@@ -1686,12 +1697,10 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
 
     PERF_START(DECODE_GETOUTPUT);
     tcim::Tensor decode_data = decode_model_->GetOutput(decode_output_names_[0]);
-    auto &decode_output_float = decode_output_map_[decode_output_names_[0]];
-    decode_data.CastTo(decode_output_float);
-    auto n_vocab =
-        decode_output_float.MemSize() / (n_decode_batch_ * sizeof(float));
+    const auto out_dtype = decode_data.Info().DataType();
+    void *decode_ptr = decode_data.Buffer().Data();
     PERF_STOP(DECODE_GETOUTPUT);
-
+    PERF_START(DECODE_POSTPROCESS);
     for (size_t i = 0; i < seq_ids.size(); i++) {
         auto batch_id = seq_ids[i];
         decode_valid_length_[batch_id]++;
@@ -1699,10 +1708,18 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
             batch_id = 0;
         }
         float *logits_out = logits[i];
-        float *output_ptr = static_cast<float *>(decode_output_float.Data()) +
-                            batch_id * n_vocab;
         if (logits_out != nullptr) {
-            memcpy(logits_out, output_ptr, n_vocab * sizeof(float));
+            if (out_dtype == tcim::DataType::FLOAT16) {
+                auto *output_ptr =
+                    static_cast<ggml_fp16_t *>(decode_ptr) +
+                    batch_id * n_vocab_;
+                ggml_fp16_to_fp32_row(output_ptr, logits_out,
+                                      static_cast<int>(n_vocab_));
+            } else {
+                LLAMA_LOG_ERROR("%s: unsupported decode output dtype=%d\n", __func__,
+                                static_cast<int>(out_dtype));
+                return -1;
+            }
         }
         if (memory_) {
             memory_->seq_add(seq_ids[i], 0, 0, 1);
@@ -1743,6 +1760,7 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
             }
         }
     }
+    PERF_STOP(DECODE_POSTPROCESS);
     return 0;
 }
 

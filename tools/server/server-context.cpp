@@ -3005,12 +3005,13 @@ private:
                 }
 
                 const int tok_idx = slot.i_batch - i;
-
+                PERF_START(SAMPLE);
                 llama_token id = common_sampler_sample(slot.smpl.get(), slot.ctx, tok_idx);
 
                 slot.i_batch = -1;
 
                 common_sampler_accept(slot.smpl.get(), id, true);
+                PERF_STOP(SAMPLE);
 
                 // here we have synchronized the llama_context (due to the sampling above), so we can do time measurement
                 const int64_t t_current = ggml_time_us();
