@@ -710,17 +710,61 @@ static std::string fnv_hash(const uint8_t * data, size_t len) {
     return std::to_string(hash);
 }
 
-server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files) {
+server_tokens process_mtmd_prompt(
+    mtmd_context * mctx,
+    std::string prompt,
+    std::vector<raw_buffer> files,
+    const std::vector<size_t> & file_group_sizes) {
     mtmd::bitmaps bitmaps;
-    for (auto & file : files) {
-        mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size()));
-        if (!bmp.ptr) {
-            throw std::runtime_error("Failed to load image or audio file");
+
+    std::vector<size_t> group_sizes = file_group_sizes;
+    if (group_sizes.empty()) {
+        group_sizes.assign(files.size(), 1);
+    }
+    size_t n_group_files = 0;
+    for (size_t group_size : group_sizes) {
+        if (group_size == 0) {
+            throw std::runtime_error("Media group must not be empty");
         }
-        // calculate bitmap hash (for KV caching)
-        std::string hash = fnv_hash(bmp.data(), bmp.n_bytes());
-        bmp.set_id(hash.c_str());
-        bitmaps.entries.push_back(std::move(bmp));
+        n_group_files += group_size;
+    }
+    if (n_group_files != files.size()) {
+        throw std::runtime_error("Media group sizes do not match media file count");
+    }
+
+    size_t i_file = 0;
+    for (size_t group_size : group_sizes) {
+        std::vector<mtmd::bitmap> frame_bitmaps;
+        frame_bitmaps.reserve(group_size);
+        std::string group_hash;
+        for (size_t i = 0; i < group_size; ++i) {
+            auto & file = files[i_file++];
+            mtmd::bitmap frame(mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size()));
+            if (!frame.ptr) {
+                throw std::runtime_error("Failed to load image or audio file");
+            }
+            std::string hash = fnv_hash(frame.data(), frame.n_bytes());
+            frame.set_id(hash.c_str());
+            group_hash += hash;
+            frame_bitmaps.push_back(std::move(frame));
+        }
+
+        if (group_size == 1) {
+            bitmaps.entries.push_back(std::move(frame_bitmaps[0]));
+        } else {
+            std::vector<const mtmd_bitmap *> frame_ptrs;
+            frame_ptrs.reserve(frame_bitmaps.size());
+            for (const auto & frame : frame_bitmaps) {
+                frame_ptrs.push_back(frame.ptr.get());
+            }
+            mtmd::bitmap video(mtmd_bitmap_init_from_frames(frame_ptrs.data(), frame_ptrs.size()));
+            if (!video.ptr) {
+                throw std::runtime_error("Failed to create video frame group");
+            }
+            std::string hash = fnv_hash(reinterpret_cast<const uint8_t *>(group_hash.data()), group_hash.size());
+            video.set_id(hash.c_str());
+            bitmaps.entries.push_back(std::move(video));
+        }
     }
     // process prompt
     std::vector<server_tokens> inputs;
@@ -908,7 +952,8 @@ static void handle_media(
 json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
-    std::vector<raw_buffer> & out_files)
+    std::vector<raw_buffer> & out_files,
+    std::vector<size_t> * out_file_group_sizes)
 {
     json llama_params;
 
@@ -994,10 +1039,48 @@ json oaicompat_chat_params_parse(
 
                 json image_url = json_value(p, "image_url", json::object());
                 handle_media(out_files, image_url, opt.media_path);
+                if (out_file_group_sizes) {
+                    out_file_group_sizes->push_back(1);
+                }
 
                 p["type"] = "media_marker";
                 p["text"] = get_media_marker();
                 p.erase("image_url");
+
+            } else if (type == "video") {
+                if (!opt.allow_image) {
+                    throw std::runtime_error("video input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
+                }
+
+                json video = json_value(p, "video", json::array());
+                if (!video.is_array()) {
+                    throw std::invalid_argument("video must be an array of frame URLs");
+                }
+                if (video.empty()) {
+                    throw std::invalid_argument("video must contain at least one frame");
+                }
+                if (video.size() > 2) {
+                    throw std::invalid_argument("video currently supports at most 2 frame images");
+                }
+
+                for (const auto & frame : video) {
+                    json frame_obj;
+                    if (frame.is_string()) {
+                        frame_obj = json{{"url", frame.get<std::string>()}};
+                    } else if (frame.is_object()) {
+                        frame_obj = frame;
+                    } else {
+                        throw std::invalid_argument("video frames must be URL strings or objects with a url field");
+                    }
+                    handle_media(out_files, frame_obj, opt.media_path);
+                }
+                if (out_file_group_sizes) {
+                    out_file_group_sizes->push_back(video.size());
+                }
+
+                p["type"] = "media_marker";
+                p["text"] = get_media_marker();
+                p.erase("video");
 
             } else if (type == "input_audio") {
                 if (!opt.allow_audio) {
@@ -1013,6 +1096,9 @@ json oaicompat_chat_params_parse(
                 }
                 auto decoded_data = base64_decode(data); // expected to be base64 encoded
                 out_files.push_back(decoded_data);
+                if (out_file_group_sizes) {
+                    out_file_group_sizes->push_back(1);
+                }
 
                 // TODO: add audio_url support by reusing handle_media()
 

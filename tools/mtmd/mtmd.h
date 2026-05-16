@@ -140,6 +140,7 @@ MTMD_API int mtmd_get_audio_sample_rate(const mtmd_context * ctx);
 //     the data is in float format (PCM F32)
 MTMD_API mtmd_bitmap *         mtmd_bitmap_init           (uint32_t nx, uint32_t ny, const unsigned char * data);
 MTMD_API mtmd_bitmap *         mtmd_bitmap_init_from_audio(size_t n_samples,         const float         * data);
+MTMD_API mtmd_bitmap *         mtmd_bitmap_init_from_frames(const mtmd_bitmap ** frames, size_t n_frames);
 MTMD_API uint32_t              mtmd_bitmap_get_nx     (const mtmd_bitmap * bitmap);
 MTMD_API uint32_t              mtmd_bitmap_get_ny     (const mtmd_bitmap * bitmap);
 MTMD_API const unsigned char * mtmd_bitmap_get_data   (const mtmd_bitmap * bitmap);

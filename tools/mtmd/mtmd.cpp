@@ -33,6 +33,8 @@ struct mtmd_bitmap {
     std::vector<unsigned char> data;
     std::string id; // optional user-defined id, for ex: can be set to image hash, useful for KV cache tracking
     bool is_audio = false; // true if the bitmap is audio
+    uint32_t n_frames = 1;
+    std::vector<mtmd_bitmap> frames; // non-empty means this bitmap is a video frame group
 };
 
 // position indexing for decoder model
@@ -792,36 +794,57 @@ struct mtmd_tokenizer {
                 add_text(ctx->img_beg, true); // add image begin token
             }
 
+            clip_image_f32_batch batch_f32;
+
+            const bool is_video = !bitmap->frames.empty();
+            std::vector<const mtmd_bitmap *> frame_bitmaps;
+            if (is_video) {
+                frame_bitmaps.reserve(bitmap->frames.size());
+                for (const auto & frame : bitmap->frames) {
+                    frame_bitmaps.push_back(&frame);
+                }
+            } else {
+                frame_bitmaps.push_back(bitmap);
+            }
+
+            if (is_video && !(clip_is_hmm(ctx->ctx_v) && clip_is_qwenvl(ctx->ctx_v))) {
+                LOG_ERR("%s: video frame groups are only supported by HMM Qwen-VL vision backend for now\n", __func__);
+                return 2;
+            }
+
             // sanity check
-            GGML_ASSERT(bitmap->nx > 0 && bitmap->ny > 0);
-            GGML_ASSERT(bitmap->data.size() == (size_t)bitmap->nx * bitmap->ny * 3);
             GGML_ASSERT(ctx->image_preproc != nullptr);
 
-            // convert mtmd_bitmap to clip_image_u8
-            clip_image_u8_ptr img_u8(clip_image_u8_init());
-            img_u8->nx = bitmap->nx;
-            img_u8->ny = bitmap->ny;
-            img_u8->buf.resize(bitmap->data.size());
-            std::memcpy(img_u8->buf.data(), bitmap->data.data(), img_u8->nx * img_u8->ny * 3);
-            LOG_DBG("%s:==== image size: %d x %d\n", __func__, img_u8->nx, img_u8->ny);
-            // preprocess image
-            clip_image_f32_batch batch_f32;
-            if (clip_is_hmm(ctx->ctx_v) && clip_is_qwenvl(ctx->ctx_v)) {
-                //FIXME: 后续统一使用mtmd_image_preprocessor接口
-                LOG_DBG("%s: image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
-                clip_image_f32_ptr img_f32(clip_image_f32_init());
-                ctx->hm_vision->image_resize(img_u8, img_f32);
-                batch_f32.entries.push_back(std::move(img_f32));
-            } else if (clip_is_hmm(ctx->ctx_v) && clip_is_gemma4v(ctx->ctx_v)) {
-                LOG_DBG("%s:== image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
-                clip_image_f32_ptr img_f32(clip_image_f32_init());
-                ctx->hm_vision->image_resize(img_u8, img_f32);
-                batch_f32.entries.push_back(std::move(img_f32));
-            } else {
-                bool ok = ctx->image_preproc->preprocess(*img_u8, batch_f32);
-                if (!ok) {
-                    LOG_ERR("Unable to preprocess image\n");
-                    return 2;
+            for (const mtmd_bitmap * frame_bitmap : frame_bitmaps) {
+                GGML_ASSERT(!frame_bitmap->is_audio);
+                GGML_ASSERT(frame_bitmap->nx > 0 && frame_bitmap->ny > 0);
+                GGML_ASSERT(frame_bitmap->data.size() == (size_t)frame_bitmap->nx * frame_bitmap->ny * 3);
+
+                // convert mtmd_bitmap to clip_image_u8
+                clip_image_u8_ptr img_u8(clip_image_u8_init());
+                img_u8->nx = frame_bitmap->nx;
+                img_u8->ny = frame_bitmap->ny;
+                img_u8->buf.resize(frame_bitmap->data.size());
+                std::memcpy(img_u8->buf.data(), frame_bitmap->data.data(), img_u8->nx * img_u8->ny * 3);
+                LOG_DBG("%s:==== image size: %d x %d\n", __func__, img_u8->nx, img_u8->ny);
+                // preprocess image
+                if (clip_is_hmm(ctx->ctx_v) && clip_is_qwenvl(ctx->ctx_v)) {
+                    // FIXME: 后续统一使用mtmd_image_preprocessor接口
+                    LOG_DBG("%s: image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
+                    clip_image_f32_ptr img_f32(clip_image_f32_init());
+                    ctx->hm_vision->image_resize(img_u8, img_f32);
+                    batch_f32.entries.push_back(std::move(img_f32));
+                } else if (clip_is_hmm(ctx->ctx_v) && clip_is_gemma4v(ctx->ctx_v)) {
+                    LOG_DBG("%s:== image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
+                    clip_image_f32_ptr img_f32(clip_image_f32_init());
+                    ctx->hm_vision->image_resize(img_u8, img_f32);
+                    batch_f32.entries.push_back(std::move(img_f32));
+                } else {
+                    bool ok = ctx->image_preproc->preprocess(*img_u8, batch_f32);
+                    if (!ok) {
+                        LOG_ERR("Unable to preprocess image\n");
+                        return 2;
+                    }
                 }
             }
             // handle llava-uhd style preprocessing
@@ -1145,10 +1168,17 @@ int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens) 
         }
     } else {
         if (clip_is_hmm(ctx->ctx_v)) {
-            // FIXME: 只处理第一张图片
-            const clip_image_f32_ptr & imgs = image_tokens->batch_f32.entries[0];
-            return ctx->hm_vision->encoding(imgs->buf, ctx->image_embd_v) ? 0
-                                                                          : 1;
+            std::vector<float> input_data;
+            size_t input_size = 0;
+            for (const auto & img : image_tokens->batch_f32.entries) {
+                input_size += img->buf.size();
+            }
+            input_data.reserve(input_size);
+            for (const auto & img : image_tokens->batch_f32.entries) {
+                input_data.insert(input_data.end(), img->buf.begin(), img->buf.end());
+            }
+            return ctx->hm_vision->encoding(input_data, ctx->image_embd_v) ? 0
+                                                                           : 1;
         }
         ok = clip_image_batch_encode(
             ctx_clip,
@@ -1224,6 +1254,29 @@ mtmd_bitmap * mtmd_bitmap_init_from_audio(size_t n_samples,
     size_t data_size = n_samples * sizeof(float);
     bitmap->data.resize(data_size);
     std::memcpy(bitmap->data.data(), data, data_size);
+    return bitmap;
+}
+
+mtmd_bitmap * mtmd_bitmap_init_from_frames(const mtmd_bitmap ** frames, size_t n_frames) {
+    if (frames == nullptr || n_frames == 0) {
+        return nullptr;
+    }
+
+    mtmd_bitmap * bitmap = new mtmd_bitmap;
+    bitmap->nx = frames[0]->nx;
+    bitmap->ny = frames[0]->ny;
+    bitmap->is_audio = false;
+    bitmap->n_frames = n_frames;
+    bitmap->frames.reserve(n_frames);
+
+    for (size_t i = 0; i < n_frames; ++i) {
+        if (frames[i] == nullptr || frames[i]->is_audio || !frames[i]->frames.empty()) {
+            delete bitmap;
+            return nullptr;
+        }
+        bitmap->frames.push_back(*frames[i]);
+    }
+
     return bitmap;
 }
 

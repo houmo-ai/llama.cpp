@@ -12,8 +12,14 @@
 
 #include <vector>
 #include <limits.h>
+#include <cctype>
 #include <cinttypes>
 #include <clocale>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
 #include <signal.h>
@@ -30,6 +36,74 @@
 // volatile, because of signal being an interrupt
 static volatile bool g_is_generating = false;
 static volatile bool g_is_interrupted = false;
+
+static std::string shell_quote(const std::string & s) {
+    std::string result = "'";
+    for (char c : s) {
+        if (c == '\'') {
+            result += "'\\''";
+        } else {
+            result += c;
+        }
+    }
+    result += "'";
+    return result;
+}
+
+static bool file_exists(const std::string & path) {
+    std::ifstream f(path, std::ios::binary);
+    return f.good();
+}
+
+static void remove_file_if_exists(const std::string & path) {
+    if (file_exists(path)) {
+        std::remove(path.c_str());
+    }
+}
+
+static bool parse_positive_double(const std::string & s, double & value, bool & is_number) {
+    char * end = nullptr;
+    value = std::strtod(s.c_str(), &end);
+    is_number = end != s.c_str();
+    if (!is_number) {
+        return false;
+    }
+    while (*end != '\0') {
+        if (!std::isspace(static_cast<unsigned char>(*end))) {
+            is_number = false;
+            return false;
+        }
+        ++end;
+    }
+    return std::isfinite(value) && value > 0.0;
+}
+
+static bool parse_video_args(const std::string & args, std::string & fname, double & seconds_per_frame) {
+    fname = string_strip(args);
+    seconds_per_frame = 1.0;
+    if (fname.empty()) {
+        return false;
+    }
+
+    size_t sep = fname.find_last_of(" \t\r\n");
+    if (sep == std::string::npos) {
+        return true;
+    }
+
+    std::string maybe_interval = fname.substr(sep + 1);
+    double parsed = 0.0;
+    bool is_number = false;
+    if (parse_positive_double(maybe_interval, parsed, is_number)) {
+        fname = string_strip(fname.substr(0, sep));
+        seconds_per_frame = parsed;
+        return !fname.empty();
+    }
+    if (is_number) {
+        LOG_ERR("ERR: /video frame interval must be a positive number of seconds\n");
+        return false;
+    }
+    return true;
+}
 
 /**
  * Please note that this is NOT a production-ready stuff.
@@ -172,6 +246,79 @@ struct mtmd_cli_context {
         }
         bitmaps.entries.push_back(std::move(bmp));
         return true;
+    }
+
+    bool load_video(const std::string & fname, double seconds_per_frame) {
+#if defined(_WIN32)
+        LOG_ERR("ERR: /video currently requires a POSIX shell and system ffmpeg\n");
+        return false;
+#else
+        char tmp_dir_template[] = "/tmp/mtmd-video-XXXXXX";
+        char * tmp_dir = mkdtemp(tmp_dir_template);
+        if (!tmp_dir) {
+            LOG_ERR("ERR: failed to create temporary directory for video frames\n");
+            return false;
+        }
+
+        const std::string frame_pattern = std::string(tmp_dir) + "/frame_%02d.png";
+        std::ostringstream fps_filter;
+        fps_filter << "fps=1/" << seconds_per_frame;
+        std::ostringstream cmd;
+        cmd << "ffmpeg -v error -y -i " << shell_quote(fname)
+            << " -vf " << shell_quote(fps_filter.str())
+            << " -frames:v 2 " << shell_quote(frame_pattern);
+
+        int ret = std::system(cmd.str().c_str());
+        if (ret != 0) {
+            LOG_ERR("ERR: ffmpeg failed to extract video frames from %s\n", fname.c_str());
+            remove_file_if_exists(std::string(tmp_dir) + "/frame_01.png");
+            remove_file_if_exists(std::string(tmp_dir) + "/frame_02.png");
+            rmdir(tmp_dir);
+            return false;
+        }
+
+        std::vector<mtmd::bitmap> frames;
+        for (int i = 1; i <= 2; ++i) {
+            char frame_name[PATH_MAX];
+            snprintf(frame_name, sizeof(frame_name), "%s/frame_%02d.png", tmp_dir, i);
+            if (!file_exists(frame_name)) {
+                continue;
+            }
+            mtmd::bitmap frame(mtmd_helper_bitmap_init_from_file(ctx_vision.get(), frame_name));
+            if (!frame.ptr) {
+                LOG_ERR("ERR: failed to load extracted video frame %s\n", frame_name);
+                remove_file_if_exists(std::string(tmp_dir) + "/frame_01.png");
+                remove_file_if_exists(std::string(tmp_dir) + "/frame_02.png");
+                rmdir(tmp_dir);
+                return false;
+            }
+            frames.push_back(std::move(frame));
+        }
+
+        remove_file_if_exists(std::string(tmp_dir) + "/frame_01.png");
+        remove_file_if_exists(std::string(tmp_dir) + "/frame_02.png");
+        rmdir(tmp_dir);
+
+        if (frames.empty()) {
+            LOG_ERR("ERR: ffmpeg did not extract any frames from %s\n", fname.c_str());
+            return false;
+        }
+
+        std::vector<const mtmd_bitmap *> frame_ptrs(frames.size());
+        for (size_t i = 0; i < frames.size(); ++i) {
+            frame_ptrs[i] = frames[i].ptr.get();
+        }
+
+        mtmd::bitmap video(mtmd_bitmap_init_from_frames(frame_ptrs.data(), frame_ptrs.size()));
+        if (!video.ptr) {
+            LOG_ERR("ERR: failed to create video frame group from %s\n", fname.c_str());
+            return false;
+        }
+
+        bitmaps.entries.push_back(std::move(video));
+        LOG_INF("%s: extracted %zu frame(s) every %g second(s) from %s\n", __func__, frames.size(), seconds_per_frame, fname.c_str());
+        return true;
+#endif
     }
 };
 
@@ -369,6 +516,7 @@ int main(int argc, char ** argv) {
         LOG("\n Running in chat mode, available commands:");
         if (mtmd_support_vision(ctx.ctx_vision.get())) {
             LOG("\n   /image <path>    load an image");
+            LOG("\n   /video <path> [seconds]    load a video by extracting up to 2 frames via ffmpeg");
         }
         if (mtmd_support_audio(ctx.ctx_vision.get())) {
             LOG("\n   /audio <path>    load an audio");
@@ -406,16 +554,25 @@ int main(int argc, char ** argv) {
             }
             g_is_generating = true;
             bool is_image = line == "/image" || line.find("/image ") == 0;
+            bool is_video = line == "/video" || line.find("/video ") == 0;
             bool is_audio = line == "/audio" || line.find("/audio ") == 0;
-            if (is_image || is_audio) {
-                if (line.size() < 8) {
+            if (is_image || is_video || is_audio) {
+                const size_t command_with_space_len = 7;
+                if (line.size() <= command_with_space_len) {
                     LOG_ERR("ERR: Missing media filename\n");
                     continue;
                 }
-                std::string media_path = line.substr(7);
-                if (ctx.load_media(media_path)) {
-                    LOG("%s %s loaded\n", media_path.c_str(), is_image ? "image" : "audio");
+                std::string media_path = line.substr(command_with_space_len);
+                double seconds_per_frame = 1.0;
+                if (is_video && !parse_video_args(media_path, media_path, seconds_per_frame)) {
+                    LOG_ERR("ERR: Usage: /video <path> [seconds_per_frame]\n");
+                    continue;
+                }
+                bool loaded = is_video ? ctx.load_video(media_path, seconds_per_frame) : ctx.load_media(media_path);
+                if (loaded) {
+                    LOG("%s %s loaded\n", media_path.c_str(), is_video ? "video" : (is_image ? "image" : "audio"));
                     content += mtmd_default_marker();
+                    LOG("Media loaded. Enter your text prompt to start generation.\n");
                 }
                 // else, error is already printed by libmtmd
                 continue;
