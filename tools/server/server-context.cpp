@@ -948,10 +948,8 @@ private:
         slots.clear();
 
         auto ctx_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
-        if (!is_hmm) {
-            ctx_seq_rm_type = common_context_can_seq_rm(ctx);
-        }
-        if (!is_hmm && ctx_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
+        ctx_seq_rm_type = common_context_can_seq_rm(ctx);
+        if (ctx_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             SRV_WRN("%s", "speculative decoding not supported by this context\n");
         }
 
