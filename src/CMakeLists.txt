@@ -43,6 +43,7 @@ add_library(llama
             houmo/houmo-qwenllm.cpp
             houmo/houmo-qwen35llm.cpp
             houmo/houmo-vllmodel.cpp
+            houmo/houmo-glmocrmodel.cpp
             houmo/houmo-embed.cpp
             houmo/houmo-embedding_layer.cpp
             houmo/houmo-gemma4.cpp

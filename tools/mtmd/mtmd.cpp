@@ -253,6 +253,8 @@ struct mtmd_context {
                     hm_vision = new HoumoMinicpmVision();
                 } else if(clip_is_glm(ctx_v)) {
                     //FIXME: add glm-ocr
+                } else if (clip_get_projector_type(ctx_v) == PROJECTOR_TYPE_GLM4V) {
+                    hm_vision = new HoumoGLMOCRVision();
                 } else if (clip_is_gemma4v(ctx_v)) {
                     hm_vision = new HoumoGemmaVision(clip_get_hparams(ctx_v)->patch_size);
                 } else {
@@ -828,7 +830,8 @@ struct mtmd_tokenizer {
                 std::memcpy(img_u8->buf.data(), frame_bitmap->data.data(), img_u8->nx * img_u8->ny * 3);
                 LOG_DBG("%s:==== image size: %d x %d\n", __func__, img_u8->nx, img_u8->ny);
                 // preprocess image
-                if (clip_is_hmm(ctx->ctx_v) && clip_is_qwenvl(ctx->ctx_v)) {
+                if (clip_is_hmm(ctx->ctx_v) &&(clip_is_qwenvl(ctx->ctx_v) ||
+                        clip_get_projector_type(ctx->ctx_v) == PROJECTOR_TYPE_GLM4V)) {
                     // FIXME: 后续统一使用mtmd_image_preprocessor接口
                     LOG_DBG("%s: image resize to %d x %d\n", __func__, img_u8->nx, img_u8->ny);
                     clip_image_f32_ptr img_f32(clip_image_f32_init());

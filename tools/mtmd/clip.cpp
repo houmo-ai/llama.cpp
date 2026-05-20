@@ -4174,6 +4174,9 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
         case PROJECTOR_TYPE_GRANITE_SPEECH:
             return ctx->model.qf_proj_linear_w->ne[1];
         case PROJECTOR_TYPE_GLM4V:
+            if (clip_is_hmm(ctx)) {
+                return ctx->model.hparams.projection_dim;
+            }
             return ctx->model.mm_ffn_down_w->ne[1];
         default:
             GGML_ABORT("Unknown projector type");

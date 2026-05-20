@@ -6,6 +6,7 @@
 #include "houmo-qwenllm.h"
 #include "houmo-qwen35llm.h"
 #include "houmo-vllmodel.h"
+#include "houmo-glmocrmodel.h"
 #include "houmo-gemma4.h"
 #include "llama-arch.h"
 #include "llama-batch.h"
@@ -757,6 +758,8 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
     if (impl_ == nullptr) {
         if (ml.arch_name.find("gemma4") != std::string::npos) {
             impl_ = new HouMoGemma4();
+        } else if (ml.arch_name.find("glm4") != std::string::npos) {
+            impl_ = new HouMoGLMOCRModel();
         } else if (ml.arch_name.find("vl") != std::string::npos) {
             impl_ = new HouMoVLLModel();
         } else if (ml.arch_name.find("gpt-oss") != std::string::npos) {

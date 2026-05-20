@@ -579,6 +579,224 @@ bool HoumoQwenVision::encoding(const std::vector<float> &input_data,
     LOG_INF("houmo_vision: run model done\n");
     return true;
 }
+
+bool HoumoGLMOCRVision::init(const std::string& model_path, const std::vector<int> device_ids) {
+    if (!houmo_load(model_path, device_ids)) {
+        LOG_ERR("Failed to load HoumoGLMOCRVision model from %s\n", model_path.c_str());
+        return false;
+    }
+
+    int input_size = module_->GetInputNum();
+    for (int i = 0; i < input_size; ++i) {
+        auto input_name = module_->GetInputName(i);
+        LOG_INF("%s: input_name: %s\n", __func__, input_name.c_str());
+        auto input_info   = module_->GetInputInfo(input_name).AsContiguous();
+        auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
+        input_tensors_.insert(std::pair(input_name, input_tensor));
+        if (i == 0) {
+            input_name_ = input_name;
+            const auto & shape = input_info.Shape();
+            if (shape.size() != 2) {
+                LOG_ERR("%s: GLM-OCR visual input must be rank-2 pixel_values, got %zu\n", __func__, shape.size());
+                return false;
+            }
+
+            const int n_patches     = static_cast<int>(shape[0]);
+            patch_vec_len_          = static_cast<int>(shape[1]);
+            const int patch_vec_den = image_channels_ * temporal_patch_size_;
+            if (n_patches <= 0 || patch_vec_len_ <= 0 || patch_vec_len_ % patch_vec_den != 0) {
+                LOG_ERR("%s: invalid GLM-OCR pixel_values shape=[%d,%d]\n", __func__, n_patches, patch_vec_len_);
+                return false;
+            }
+            const int patch_area = patch_vec_len_ / (image_channels_ * temporal_patch_size_);
+            patch_size_          = static_cast<uint32_t>(std::sqrt(static_cast<float>(patch_area)));
+            if (static_cast<int>(patch_size_ * patch_size_) != patch_area) {
+                LOG_ERR("%s: invalid GLM-OCR patch area %d from vector length %d\n", __func__, patch_area,
+                        patch_vec_len_);
+                return false;
+            }
+            const int grid = static_cast<int>(std::sqrt(static_cast<float>(n_patches)));
+            if (grid * grid != n_patches) {
+                LOG_ERR("%s: invalid GLM-OCR patch grid from n_patches=%d\n", __func__, n_patches);
+                return false;
+            }
+            image_width_  = static_cast<uint16_t>(grid * patch_size_);
+            image_height_ = image_width_;
+            image_frames_ = 1;
+            LOG_INF("%s: GLM-OCR pixel_values shape=[%d,%d], image=%dx%d, patch=%u\n", __func__, n_patches,
+                    patch_vec_len_, image_width_, image_height_, patch_size_);
+        }
+    }
+
+    int out_size = module_->GetOutputNum();
+    for (int i = 0; i < out_size; ++i) {
+        auto output_name = module_->GetOutputName(i);
+        LOG_INF("%s: output_name: %s\n", __func__, output_name.c_str());
+        output_names_.push_back(output_name);
+    }
+    return true;
+}
+
+bool HoumoGLMOCRVision::image_resize(clip_image_u8_ptr & input, clip_image_f32_ptr & output) {
+    const int     target_w = image_width_;
+    const int     target_h = image_height_;
+    clip_image_u8 resized_img;
+    if (input->nx == target_w && input->ny == target_h) {
+        resized_img = *input;
+    } else {
+        const float scale =
+            std::min(static_cast<float>(target_w) / input->nx, static_cast<float>(target_h) / input->ny);
+        const int new_w = static_cast<int>(input->nx * scale);
+        const int new_h = static_cast<int>(input->ny * scale);
+
+        clip_image_u8 scaled_img;
+        bicubic_resize(*input, scaled_img, new_w, new_h);
+
+        resized_img.nx = target_w;
+        resized_img.ny = target_h;
+        resized_img.buf.resize(static_cast<size_t>(target_w) * target_h * image_channels_);
+        for (size_t i = 0; i < resized_img.buf.size(); i += 3) {
+            resized_img.buf[i + 0] = 114;
+            resized_img.buf[i + 1] = 114;
+            resized_img.buf[i + 2] = 114;
+        }
+        for (int y = 0; y < new_h; y++) {
+            for (int x = 0; x < new_w; x++) {
+                for (int c = 0; c < image_channels_; c++) {
+                    resized_img.buf[(static_cast<size_t>(y) * target_w + x) * image_channels_ + c] =
+                        scaled_img.buf[(static_cast<size_t>(y) * new_w + x) * image_channels_ + c];
+                }
+            }
+        }
+    }
+
+    output->nx = image_width_;
+    output->ny = image_height_;
+    output->buf.resize(output->nx * output->ny * image_channels_);
+    for (size_t i = 0; i < resized_img.buf.size(); ++i) {
+        output->buf[i] = static_cast<float>(resized_img.buf[i]);
+    }
+    return true;
+}
+
+bool HoumoGLMOCRVision::patchify(const std::vector<float> & input_data,
+                                 std::vector<float> &       output_data,
+                                 std::string &              err) const {
+    err.clear();
+    const int C              = image_channels_;
+    const int H              = image_height_;
+    const int W              = image_width_;
+    const int P              = static_cast<int>(patch_size_);
+    const int T              = temporal_patch_size_;
+    const int grid_h         = H / P;
+    const int grid_w         = W / P;
+    const int n_patches      = grid_h * grid_w;
+    const int expect_vec_len = T * C * P * P;
+
+    if (P <= 0 || H % P != 0 || W % P != 0) {
+        err = "image size is not divisible by GLM-OCR patch size";
+        return false;
+    }
+    if (static_cast<int>(input_data.size()) != H * W * C) {
+        err = "input_data size mismatch for GLM-OCR image";
+        return false;
+    }
+    if (expect_vec_len != patch_vec_len_) {
+        err = "patch vector length mismatch for GLM-OCR pixel_values";
+        return false;
+    }
+
+    std::vector<float> chw(static_cast<size_t>(C) * H * W);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            for (int c = 0; c < C; c++) {
+                float v = input_data[(static_cast<size_t>(y) * W + x) * C + c];
+                // AutoProcessor rescales resized uint8 RGB pixels by 1/255.
+                // Do not apply mean/std normalization for GLM-OCR.
+                if (v >= -128.0f && v < 0.0f) {
+                    v += 256.0f;
+                }
+                if (v > 1.5f) {
+                    v = std::clamp(v, 0.0f, 255.0f) / 255.0f;
+                }
+                chw[static_cast<size_t>(c) * H * W + static_cast<size_t>(y) * W + x] = v;
+            }
+        }
+    }
+
+    output_data.assign(static_cast<size_t>(n_patches) * patch_vec_len_, 0.0f);
+    constexpr int merge_size = 2;
+    if (grid_h % merge_size != 0 || grid_w % merge_size != 0) {
+        err = "GLM-OCR patch grid is not divisible by spatial merge size";
+        return false;
+    }
+
+    int patch_id = 0;
+    // Match AutoProcessor patch order:
+    // reshape(grid_t, T, C, gh/merge, merge, P, gw/merge, merge, P)
+    // transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
+    // For a single image grid_t=1 and the image is tiled over T.
+    for (int hb = 0; hb < grid_h / merge_size; hb++) {
+        for (int wb = 0; wb < grid_w / merge_size; wb++) {
+            for (int mh = 0; mh < merge_size; mh++) {
+                for (int mw = 0; mw < merge_size; mw++) {
+                    const int    py   = hb * merge_size + mh;
+                    const int    px   = wb * merge_size + mw;
+                    const size_t base = static_cast<size_t>(patch_id++) * patch_vec_len_;
+                    int          k    = 0;
+                    // Per-patch vector layout is [C, T, P, P].
+                    for (int c = 0; c < C; c++) {
+                        for (int t = 0; t < T; t++) {
+                            (void) t;
+                            for (int iy = 0; iy < P; iy++) {
+                                for (int ix = 0; ix < P; ix++) {
+                                    const int y = py * P + iy;
+                                    const int x = px * P + ix;
+                                    output_data[base + k++] =
+                                        chw[static_cast<size_t>(c) * H * W + static_cast<size_t>(y) * W + x];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool HoumoGLMOCRVision::encoding(const std::vector<float> & input_data,
+                                 std::vector<float> &       output_data,
+                                 const int                  out_offset) {
+    (void) out_offset;
+    std::vector<float> pixel_values;
+    std::string        err;
+    if (!patchify(input_data, pixel_values, err)) {
+        LOG_ERR("%s: patchify failed: %s\n", __func__, err.c_str());
+        return false;
+    }
+
+    auto input_tensor = input_tensors_[input_name_];
+    const tcim::Tensor input_fp32_tensor =
+        tcim::Tensor::CreateHostTensor(input_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    input_fp32_tensor.Buffer().CopyFromHost(pixel_values.data(), input_fp32_tensor.MemSize());
+    input_fp32_tensor.CastTo(input_tensor);
+    module_->SetInput(input_name_, input_tensor);
+    module_->Run();
+    module_->Sync();
+
+    fill_header(output_data);
+    int    offset          = sizeof(CompactHeader);
+    auto * output_data_ptr = reinterpret_cast<int8_t *>(output_data.data());
+    for (auto & name : output_names_) {
+        tcim::Tensor output_tensor = module_->GetOutput(name);
+        memcpy(output_data_ptr + offset, output_tensor.Buffer().Data(), output_tensor.MemSize());
+        offset += output_tensor.MemSize();
+    }
+    LOG_INF("houmo_glmocr_vision: run model done\n");
+    return true;
+}
+
 bool HoumoMinicpmVision::init(const std::string &model_path, std::vector<int> device_ids) {
     // TODO: not implemented
     if (!houmo_load(model_path, device_ids)) {

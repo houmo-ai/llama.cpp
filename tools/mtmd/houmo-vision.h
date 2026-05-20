@@ -80,6 +80,24 @@ class HoumoQwenVision : public HoumoVision {
     void set_windows_attention();
 };
 
+class HoumoGLMOCRVision : public HoumoVision {
+  public:
+    HoumoGLMOCRVision() : HoumoVision() {}
+    ~HoumoGLMOCRVision() override = default;
+    bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output) override;
+    bool init(const std::string &model_path, std::vector<int> device_ids) override;
+    bool encoding(const std::vector<float> &input_data,
+                  std::vector<float> &output_data, int out_offset = 0) override;
+
+  private:
+    bool patchify(const std::vector<float> &input_data, std::vector<float> &output_data,
+                  std::string &err) const;
+
+  private:
+    int temporal_patch_size_ = 2;
+    int patch_vec_len_ = 1176;
+};
+
 /*
 *@ 基于minicpm的视觉模型, 支持M50模型
 */
