@@ -361,7 +361,7 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
                 return -1;
             }
         }
-        memory_->seq_add(batch_id, 0, 0, 1);
+        memory_->seq_add(seq_ids[i], 0, 0, 1);
     }
     return 0;
 }
