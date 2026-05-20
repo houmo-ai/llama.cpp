@@ -182,7 +182,6 @@ const ksigns_iq2xs: array<u32, 32> = array<u32, 32>(
     0xf37271f0,0x77f6f574,0x7bfaf978,0xff7e7dfc
 );
 #endif
-
 #ifdef IQ2_XXS_GRID
 const iq2xxs_grid = array<u32, 512>(
     0x08080808, 0x08080808, 0x0808082b, 0x08080808, 0x08081919, 0x08080808, 0x08082b08, 0x08080808,
@@ -896,3 +895,10 @@ const kvalues_iq4nl = array<i32, 16>(
 );
 
 #endif
+
+#ifdef MXFP4_LUT
+const kvalues_mxfp4 = array<i32, 16>(
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+);
+#endif
+

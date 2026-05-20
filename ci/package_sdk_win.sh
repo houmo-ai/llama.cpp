@@ -56,6 +56,48 @@ deploy_dadao_sdk() {
     rm dadao_sdk.tar.gz
 }
 
+build_ui_assets() {
+    local ui_dir="tools/ui"
+    local ui_dist="${ui_dir}/dist"
+    local required_assets=(index.html bundle.js bundle.css loading.html)
+    local missing=0
+
+    for asset in "${required_assets[@]}"; do
+        if [ ! -f "${ui_dist}/${asset}" ]; then
+            missing=1
+            break
+        fi
+    done
+
+    if [ "$missing" = "0" ]; then
+        echo "UI assets already exist in ${ui_dist}, skipping npm build."
+        return 0
+    fi
+
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "npm is required to build UI assets into ${ui_dist}."
+        exit 1
+    fi
+
+    echo "Building UI assets into ${ui_dist}..."
+    (
+        cd "${ui_dir}"
+        if [ -f package-lock.json ]; then
+            npm ci
+        else
+            npm install
+        fi
+        npm run build
+    )
+
+    for asset in "${required_assets[@]}"; do
+        if [ ! -f "${ui_dist}/${asset}" ]; then
+            echo "UI build failed: missing ${ui_dist}/${asset}"
+            exit 1
+        fi
+    done
+}
+
 # 编译 LLAMA
 build_llama() {
     echo "Building for ARCH: $ARCH"
@@ -63,9 +105,9 @@ build_llama() {
     # 创建或清理构建目录
     rm -rf build/*
     if [ $PLATFORM == "xh2" ]; then
-        cmake -B build  -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON
+        cmake -B build  -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON -DLLAMA_USE_PREBUILT_UI=OFF
     else
-        cmake -B build -DLLAMA_CURL=OFF
+        cmake -B build -DLLAMA_CURL=OFF -DLLAMA_USE_PREBUILT_UI=OFF
     fi
     if [ $? -ne 0 ]; then
         echo "cmake failed."
@@ -102,13 +144,14 @@ package_llama() {
     cp -r vendor/nlohmann "$release_dir/include/" || true
     cp -r src/llama*.h* "$release_dir/include/" || true
     cp -r tools/server/*.h* "$release_dir/include/server/" || true
-    cp -r build/tools/server/*.hpp "$release_dir/include/server/" || true
+    cp -r build/tools/ui/*.hpp "$release_dir/include/server/" || true
     # 复制库文件
     cp build/src/Release/*.lib "$release_dir/lib/" || true
     cp build/common/Release/*.lib "$release_dir/lib/" || true
     cp build/tools/mtmd/Release/*.lib "$release_dir/lib/" || true
     cp build/ggml/src/Release/*.lib "$release_dir/lib/" || true
     cp build/tools/server/Release/*.lib "$release_dir/lib/" || true
+    cp build/tools/ui/Release/*.lib "$release_dir/lib/" || true
     cp build/bin/Release/*.dll "$release_dir/bin/" || true
 
     cp third_party/houmo/lib/*.dll "$release_dir/bin/" || true
@@ -143,6 +186,7 @@ main() {
     echo "Deployed Dadao SDK and System SDK for $PLATFORM/$ARCH."
 
     # 编译和打包
+    build_ui_assets
     build_llama
     package_llama
     download_file "$modelcli_url" "release/$PLATFORM/$ARCH/bin/model-cli.exe"

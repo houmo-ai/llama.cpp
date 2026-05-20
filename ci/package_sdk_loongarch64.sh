@@ -46,6 +46,48 @@ deploy_houmo_deb_to_third_party() {
 	echo "Houmo deployed under: third_party/houmo"
 }
 
+build_ui_assets() {
+	local ui_dir="tools/ui"
+	local ui_dist="${ui_dir}/dist"
+	local required_assets=(index.html bundle.js bundle.css loading.html)
+	local missing=0
+
+	for asset in "${required_assets[@]}"; do
+		if [ ! -f "${ui_dist}/${asset}" ]; then
+			missing=1
+			break
+		fi
+	done
+
+	if [ "$missing" = "0" ]; then
+		echo "UI assets already exist in ${ui_dist}, skipping npm build."
+		return 0
+	fi
+
+	if ! command -v npm >/dev/null 2>&1; then
+		echo "npm is required to build UI assets into ${ui_dist}."
+		exit 1
+	fi
+
+	echo "Building UI assets into ${ui_dist}..."
+	(
+		cd "${ui_dir}"
+		if [ -f package-lock.json ]; then
+			npm ci
+		else
+			npm install
+		fi
+		npm run build
+	)
+
+	for asset in "${required_assets[@]}"; do
+		if [ ! -f "${ui_dist}/${asset}" ]; then
+			echo "UI build failed: missing ${ui_dist}/${asset}"
+			exit 1
+		fi
+	done
+}
+
 
 resolve_houmo_root() {
 	if [ -d "third_party/houmo" ]; then
@@ -67,6 +109,7 @@ build_llama() {
 	cmake -S . -B build \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DLLAMA_CURL=OFF \
+		-DLLAMA_USE_PREBUILT_UI=OFF \
 		-DENABLE_HOUMO_XH2=ON
 
 	cmake --build build -j"$(nproc)"
@@ -142,6 +185,7 @@ package_llama() {
 
 main() {
 	deploy_houmo_deb_to_third_party
+	build_ui_assets
 	build_llama
 	package_llama
 	echo "LLAMA build and packaging completed for $PLATFORM/$ARCH."

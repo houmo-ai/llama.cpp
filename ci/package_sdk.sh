@@ -162,6 +162,48 @@ deploy_dadao_sdk() {
     rm -rf third_party/houmo-sdk
 }
 
+build_ui_assets() {
+    local ui_dir="tools/ui"
+    local ui_dist="${ui_dir}/dist"
+    local required_assets=(index.html bundle.js bundle.css loading.html)
+    local missing=0
+
+    for asset in "${required_assets[@]}"; do
+        if [ ! -f "${ui_dist}/${asset}" ]; then
+            missing=1
+            break
+        fi
+    done
+
+    if [ "$missing" = "0" ]; then
+        echo "UI assets already exist in ${ui_dist}, skipping npm build."
+        return 0
+    fi
+
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "npm is required to build UI assets into ${ui_dist}."
+        exit 1
+    fi
+
+    echo "Building UI assets into ${ui_dist}..."
+    (
+        cd "${ui_dir}"
+        if [ -f package-lock.json ]; then
+            npm ci
+        else
+            npm install
+        fi
+        npm run build
+    )
+
+    for asset in "${required_assets[@]}"; do
+        if [ ! -f "${ui_dist}/${asset}" ]; then
+            echo "UI build failed: missing ${ui_dist}/${asset}"
+            exit 1
+        fi
+    done
+}
+
 # 编译 LLAMA
 build_llama() {
     echo "Building for ARCH: $ARCH"
@@ -237,10 +279,11 @@ package_llama() {
     cp -r tools/mtmd/mtmd*.h "$release_dir/include/" || true
     cp -r vendor/nlohmann "$release_dir/include/" || true
     cp -r tools/server/*.h* "$release_dir/include/server/" || true
-    cp -r build/tools/server/*.hpp "$release_dir/include/server/" || true
+    cp -r build/tools/ui/*.hpp "$release_dir/include/server/" || true
     # 复制库文件
     cp build/bin/*.so "$release_dir/lib/" || true
     cp build/common/*.a "$release_dir/lib/"
+    cp build/tools/ui/*.a "$release_dir/lib/" || true
     cp build/tools/server/libserver-context.a "$release_dir/lib/" || true
     cp third_party/houmo/lib/*.so* "$release_dir/lib/" || true
     cp version.cfg "$release_dir/version.txt"
@@ -331,6 +374,7 @@ main() {
     echo "Deployed Dadao SDK and System SDK for $PLATFORM/$ARCH."
 
     # 编译和打包
+    build_ui_assets
     build_llama
     package_llama
 
