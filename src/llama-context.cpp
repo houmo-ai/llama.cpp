@@ -27,8 +27,9 @@
 void llama_context::houmo_init(int32_t seq_max) {
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
     memory = std::make_unique<houmo_memory_i>();
+    const bool is_mtp = (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP);
     hm_llmodel->houmo_init(dynamic_cast<houmo_memory_i *>(memory.get()), seq_max,
-                           abort_callback, abort_callback_data);
+                           abort_callback, abort_callback_data, is_mtp);
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
 
     cparams.n_ctx = std::min(cparams.n_ctx, hm_llmodel->n_context_length());
@@ -1575,7 +1576,47 @@ int llama_context::houmo_decode(const llama_batch & batch) {
     auto & hm_llmodel = model.hm_llmodel;
     const int32_t n_vocab = model.vocab.n_tokens();
 
+    // ---------------- MTP draft 分支 ----------------
+    // 路由判据 = cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP
+    // 上游 common/speculative.cpp::common_speculative_impl_draft_mtp 在
+    // ctx_dft 上调 llama_decode 时，batch 同时携带：
+    //   - batch.token  : 草稿要追加的 token id [N]
+    //   - batch.embd   : 来自 ctx_tgt 的 pre-norm hidden state [N, n_embd]
+    // 我们路由到 hm_llmodel->houmo_decode_mtp。
+    if (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
+        if (batch.embd == nullptr || batch.token == nullptr) {
+            LLAMA_LOG_ERROR("%s: MTP ctx requires batch with both token and "
+                            "embd (got token=%p embd=%p)\n", __func__,
+                            (void*)batch.token, (void*)batch.embd);
+            return -1;
+        }
+        const int seq_id  = batch.seq_id ? batch.seq_id[0][0] : 0;
+        const int n_tokens = batch.n_tokens;
+
+        std::vector<llama_token> toks(batch.token, batch.token + n_tokens);
+        std::vector<float *>     lgts(n_tokens, nullptr);
+        for (int i = 0; i < n_tokens; ++i) {
+            const bool need = batch.logits ? (batch.logits[i] == 1)
+                                           : (i == n_tokens - 1);
+            if (need) {
+                output_ids[i] = i;
+                lgts[i] = logits.data + (size_t) i * n_vocab;
+            }
+        }
+        float *h_out_dst = nullptr;
+        if (cparams.embeddings_pre_norm && embd_pre_norm.data) {
+            h_out_dst = embd_pre_norm.data;
+        }
+        const int32_t start_pos = batch.pos ? batch.pos[0] : -1;
+        int ret = hm_llmodel->houmo_decode_mtp(batch.embd, toks, seq_id,
+                    lgts, h_out_dst, start_pos);
+        n_outputs = n_tokens;
+        return ret;
+    }
+    // not mtp model.
+
     if (batch.embd != nullptr) {
+        // vl prefill.
         const int seq_id = batch.seq_id ? batch.seq_id[0][0] : 0;
         return hm_llmodel->houmo_prefill(batch.embd, batch.n_tokens, seq_id, nullptr);
     }
@@ -1607,10 +1648,16 @@ int llama_context::houmo_decode(const llama_batch & batch) {
             }
         }
     }
-
-    if (output_reserve(std::max<uint32_t>(cparams.n_batch, (uint32_t) n_outputs_all)) < (uint32_t) n_outputs_all) {
-        LLAMA_LOG_ERROR("%s: could not reserve space for %d outputs\n", __func__, n_outputs_all);
+    if (output_reserve(n_outputs_all) < static_cast<uint32_t>(n_outputs_all)) {
+        LLAMA_LOG_ERROR("%s: could not reserve space for batch with %d outputs\n", __func__, n_outputs_all);
         return -2;
+    }
+    LLAMA_LOG_INFO("houmo_decode: embeddings_pre_norm = %d, embd_pre_norm.data = %p\n",
+                    cparams.embeddings_pre_norm, (void*) embd_pre_norm.data);
+    if (cparams.embeddings_pre_norm && embd_pre_norm.data) {
+        hm_llmodel->set_pre_norm_hidden_dst(embd_pre_norm.data, batch.n_tokens);
+    } else {
+        hm_llmodel->set_pre_norm_hidden_dst(nullptr, 0);
     }
 
     int pos = 0;
@@ -1695,16 +1742,18 @@ int llama_context::houmo_decode(const llama_batch & batch) {
             for (const auto & e : entries) {
                 lgts.push_back(logits_ptr_for(e));
             }
-            LLAMA_LOG_DEBUG("%s: seq_id %d uses houmo_verify for %d positions\n", __func__, sid, n_logits_needed);
+            LLAMA_LOG_INFO("%s: seq_id %d uses houmo_verify for %d positions\n", __func__, sid, n_logits_needed);
             ret = hm_llmodel->houmo_verify(toks, sid, lgts);
         }
         if (ret != 0) {
             return ret;
         }
-
+        std::string result;
         for (const auto & e : entries) {
-            LLAMA_LOG_DEBUG("%s", common_token_to_piece(&model.vocab, e.token, true).c_str());
+            result +=common_token_to_piece(&model.vocab, e.token, true);
         }
+        LLAMA_LOG_INFO("%s", result.c_str());
+
     }
 
     n_outputs = n_outputs_all;
@@ -1804,6 +1853,17 @@ int llama_context::houmo_embedding(const llama_batch & batch) {
     }
 
     return 0;
+}
+
+int llama_context::houmo_verify_accept(llama_seq_id seq_id, uint16_t n_accepted) {
+    if (!model.hparams.is_hmm || model.hm_llmodel == nullptr) {
+        return -1;
+    }
+    return model.hm_llmodel->houmo_verify_accept(seq_id, n_accepted);
+}
+
+bool llama_context::houmo_is_hmm() const {
+    return model.hparams.is_hmm;
 }
 
 static void copy_tensor_async_ints(
@@ -2310,7 +2370,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
     bool has_logits        = true;
     bool has_embd          = cparams.embeddings;
-    bool has_embd_pre_norm = cparams.embeddings_pre_norm;
+    bool has_embd_pre_norm = cparams.embeddings_pre_norm || cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP;
 
     // TODO: hacky enc-dec support
     if (model.arch == LLM_ARCH_T5) {
@@ -2330,6 +2390,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
         // unmasked: pre-norm row exists for every token in the batch, not just
         // those flagged via batch.logits[i] -> size by token count instead.
         embd_pre_norm.size = (size_t) n_embd * n_batch;
+        LLAMA_LOG_INFO("%s: adjusted embd_pre_norm size for unmasked pre-norm: %zu\n", __func__, embd_pre_norm.size);
     }
 
     // Allocate backend sampling output buffers if there are backend samplers configured.
@@ -2348,7 +2409,6 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const size_t new_size  =
         (logits.size + embd.size + embd_pre_norm.size + backend_float_count) * sizeof(float) +
         (                                               backend_token_count) * sizeof(llama_token);
-
     // alloc only when more than the current capacity is required
     // TODO: also consider shrinking the buffer
     if (!buf_output || prev_size < new_size) {
@@ -3739,8 +3799,11 @@ llama_context * llama_init_from_model(
                        model->hparams.pooling_type, params.pooling_type);
     }
 
+    const bool has_native_mtp = model->hparams.nextn_predict_layers > 0;
+    const bool has_hmm_mtp = model->hparams.is_hmm && model->hm_llmodel &&
+                             model->hm_llmodel->has_mtp_modules();
     if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP &&
-        model->hparams.nextn_predict_layers == 0) {
+        !has_native_mtp && !has_hmm_mtp) {
         LLAMA_LOG_WARN("%s: context type MTP requested but model doesn't contain MTP layers\n", __func__);
         return nullptr;
     }
@@ -3894,6 +3957,17 @@ float * llama_get_embeddings_pre_norm_ith(llama_context * ctx, int32_t i) {
     ctx->synchronize();
 
     return ctx->get_embeddings_pre_norm_ith(i);
+}
+
+int llama_houmo_verify_accept(llama_context * ctx, llama_seq_id seq_id, uint16_t n_accepted) {
+    if (ctx == nullptr) {
+        return -1;
+    }
+    return ctx->houmo_verify_accept(seq_id, n_accepted);
+}
+
+bool llama_houmo_is_hmm(const llama_context * ctx) {
+    return ctx != nullptr && ctx->houmo_is_hmm();
 }
 
 bool llama_set_sampler(llama_context * ctx, llama_seq_id seq_id, llama_sampler * smpl) {

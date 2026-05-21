@@ -1233,7 +1233,7 @@ class TextModel(ModelBase):
             self.hf_arch = get_model_architecture(self.hparams, self.model_type)
         else:
             self.hf_arch = ""
-
+        self.hmm_info = {}
         if "text_config" in self.hparams:
             # move the text_config to the root level
             self.hparams = {**self.hparams, **self.hparams["text_config"]}
@@ -1338,10 +1338,12 @@ class TextModel(ModelBase):
         # 分为"必须存在"和"可选存在"两组
         required_keys = {
             "quant_embedding.bin": re.compile(r".*embedding\.pt$"),
-            "prefill.hmm": re.compile(r".*prefill\.hmm(s)?$"),
             #"decoder.hmm": re.compile(r".*decode(r)?\.hmm(s)?$"),
         }
         optional_keys = {
+            "prefill.hmm": re.compile(r".*prefill\.hmm(s)?$"),
+            "prefill_mtp.hmm": re.compile(r".*prefill_mtp\.hmm(s)?$"),
+            "decoder_mtp.hmm": re.compile(r".*decode(r)?_mtp\.hmm(s)?$"),
             "decoder.hmm": re.compile(r".*decode(r)?\.hmm(s)?$"),
             "prefill_0.hmm": re.compile(r".*prefill_0\.hmm(s)?$"),
             "prefill_1.hmm": re.compile(r".*prefill_1\.hmm(s)?$"),
@@ -1404,7 +1406,7 @@ class TextModel(ModelBase):
             # 处理量化嵌入文件的特殊逻辑
             if key == "quant_embedding.bin":
                 file_path = self.conver_embedding(file_path)
-            if key == "decoder.hmm":
+            else:
                 print(file_path)
                 hmm_info = read_hmm_info(file_path)
                 print(hmm_info)

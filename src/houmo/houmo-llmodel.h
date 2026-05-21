@@ -27,9 +27,12 @@ class HouMoLLModel {
     ~HouMoLLModel();
 
     bool houmo_load(llama_model_loader & ml, std::vector<int> device_ids);
+    // is_mtp: true → 本 ctx 是 MTP 草稿 context (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP)，
+    //         false → target context。由上层 llama_context::houmo_init 根据 cparams.ctx_type 传入。
     void houmo_init(houmo_memory_i *memory, int seq_max = 8,
           ggml_abort_callback abort_callback = nullptr,
-          void *abort_callback_data = nullptr);
+          void *abort_callback_data = nullptr,
+          bool is_mtp = false);
     int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                       float *logits);
     int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
@@ -59,11 +62,57 @@ class HouMoLLModel {
      */
     int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
                      std::vector<float *> &logits_out);
+    int houmo_verify_accept(int seq_id, uint16_t n_accepted);
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings);
     bool is_embedding();
     bool is_asr_force_aligner();
     bool has_decode_model();
+
+    // ---------------- MTP (Multi-Token Prediction) ----------------
+    // 适配 llama.cpp 上游 commit 255582687 的 draft-mtp speculative 流程：
+    //   - target 模型与 MTP 模型分别为两份独立 gguf，各自加载为 llama_model +
+    //     llama_context（外部 common/speculative.cpp 已编排好）。
+    //   - 这里只在 houmo backend 内部识别"当前 ctx 是 MTP 还是 target"，
+    //     角色由 houmo_init(..., is_mtp) 参数传入，不再从 gguf tensor 名推断。
+    //   - 不修改任何公共 llama.h API。
+    //
+    // is_mtp_model(): true 表示本 ctx 用作 MTP 草稿模型。
+    bool is_mtp_model() const;
+
+    // has_mtp_modules(): true 表示该 HMM GGUF 里实际含 prefill_mtp.hmm /
+    // decode_mtp.hmm 模块，可被创建为 LLAMA_CONTEXT_TYPE_MTP。
+    bool has_mtp_modules() const;
+
+    // MTP 草稿一次推理：吃 (target_hidden_state[n], token[n]) 返回
+    //   logits[n] 以及新的 hidden_state[n] (用于 AR 串接)。
+    //   - h_in:        [n_tokens, n_embd]，通过 llama.cpp 的 float* 通道承载
+    //                  原始 fp16 hidden（每行有效数据为 n_embd * 2 bytes，
+    //                  行步长仍为 n_embd * sizeof(float)）
+    //   - tokens:      [n_tokens] 草稿当前要送入的 token id
+    //   - logits_out:  每行 n_vocab 个 fp32; nullptr 行表示该位置不取 logits
+    //   - h_out:       [n_tokens, n_embd]，同样以 float* 为 carrier 回写原始
+    //                  fp16 hidden（供下一轮草稿继续 AR 推进）；
+    //                  nullptr 表示不需要回写
+    //   - start_pos:   该批第 0 个 token 的绝对位置；MTP 无 KV cache，必须
+    //                  信任上层 speculative/seq_rm 后传入的位置，避免内部
+    //                  自增 past_seq_length 在 rollback 后漂移。
+    //   返回 0 成功，<0 失败。仅 MTP gguf (`is_mtp_model()`) 上有效。
+    int houmo_decode_mtp(const float *h_in,
+               const std::vector<llama_token> &tokens,
+               int seq_id,
+               std::vector<float *> &logits_out,
+               float *h_out,
+               int32_t start_pos = -1);
+
+    // 设置 target ctx 的 pre-norm hidden 输出去向。
+    // 调用约定: llama_context::houmo_decode 在调用 prefill/decode/verify 前
+    // 设置 dst (= cparams.embeddings_pre_norm ? embd_pre_norm.data + base : nullptr)，
+    // backend 在 Run() 完成后把 hidden_state ishmm output 拷过去。
+    // dst==nullptr 表示不需要输出。
+    // n_rows == 该次调用预计写出的行数 (与 logits_out.size() 对齐)。
+    // row_stride_floats == n_embd_。
+    void set_pre_norm_hidden_dst(float *dst, int n_rows);
     int n_decode_batch();
     int n_prefill_batch();
     uint32_t n_context_length();
@@ -72,7 +121,8 @@ class HouMoLLModel {
     void lora_clear();
     class Impl;  // Forward declaration of the implementation class
   private:
-    Impl *impl_; // Pointer to the implementation
+    Impl *impl_;     // target/current ctx implementation
+    Impl *impl_mtp_; // MTP implementation for single-GGUF MTP
 };
 
 struct kv_cache_item {
@@ -146,6 +196,9 @@ public:
       }
       return 0;
   }
+  virtual int houmo_verify_accept(int /*seq_id*/, uint16_t /*n_accepted*/) {
+    return -1;
+  }
   virtual bool is_embedding() {
     return false;
   }
@@ -154,6 +207,29 @@ public:
   }
   void set_asr_force_aligner(bool value) { asr_force_aligner_ = value; }
   bool has_decode_model() const { return decode_model_ != nullptr; }
+
+  // ---------------- MTP hooks (default: no-op / not supported) ----------------
+  // MTP 角色由具体 Impl 类型决定。
+  virtual bool is_mtp_model() const { return wants_mtp_modules(); }
+  virtual bool has_mtp_modules() const { return wants_mtp_modules(); }
+  virtual bool wants_mtp_modules() const { return false; }
+
+  // 默认不支持 MTP draft；只有 HoumoQwen35MTP 等具体 backend 重写。
+  virtual int houmo_decode_mtp(const float * /*h_in*/,
+                               const std::vector<llama_token> & /*tokens*/,
+                               int /*seq_id*/,
+                               std::vector<float *> & /*logits_out*/,
+                               float * /*h_out*/,
+                               int32_t /*start_pos*/ = -1) {
+      return -1;
+  }
+
+  // 默认 no-op。Qwen3.5 在 Run() 后会把 ishmm 的 hidden_state 输出 memcpy
+  // 到 pre_norm_hidden_dst_ (若非空)。
+  void set_pre_norm_hidden_dst(float *dst, int n_rows) {
+      pre_norm_hidden_dst_      = dst;
+      pre_norm_hidden_dst_rows_ = n_rows;
+  }
   int n_decode_batch() const { return n_decode_batch_; }
   int n_prefill_batch() const { return n_prefill_batch_; }
   uint32_t n_context_length() const { return context_length_;}
@@ -266,6 +342,14 @@ protected:
   std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_;
   std::shared_ptr<tcim::Module> prefill_model_;
   std::shared_ptr<tcim::Module> decode_model_;
+  // MTP 相关：
+  //   - MTP 角色由 wants_mtp_modules() / 具体 Impl 类型决定。
+  //   - pre_norm_hidden_dst_/_rows_: 调用方在 prefill/decode 前通过
+  //                      set_pre_norm_hidden_dst() 注入的写出地址；Run() 后由
+  //                      具体 backend 把 hidden_state ishmm 输出 memcpy 过去。
+  //                      空指针表示本次调用无需写出。
+  float *pre_norm_hidden_dst_     = nullptr;
+  int    pre_norm_hidden_dst_rows_ = 0;
   tcim::Module::WeightManager wm_;
 
   std::map<std::string, tcim::Tensor> prefill_input_map_;

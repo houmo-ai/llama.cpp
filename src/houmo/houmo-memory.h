@@ -99,10 +99,13 @@ class houmo_memory_i : public llama_memory_i {
         return it->second;
     }
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const override {
-        (void) seq_id;
-        return -1;
+        auto it = seq_pos_map.find(seq_id);
+        if (it == seq_pos_map.end() || it->second <= 0) {
+            return -1;
+        }
+        return it->second - 1;
     }
-    
+
     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override {
         return std::map<ggml_backend_buffer_type_t, size_t>();
     }

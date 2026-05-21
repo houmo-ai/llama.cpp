@@ -42,6 +42,7 @@ add_library(llama
             houmo/houmo-gptoss.cpp
             houmo/houmo-qwenllm.cpp
             houmo/houmo-qwen35llm.cpp
+            houmo/houmo-qwen35mtp.cpp
             houmo/houmo-vllmodel.cpp
             houmo/houmo-glmocrmodel.cpp
             houmo/houmo-embed.cpp

@@ -33,15 +33,24 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     int houmo_decode(std::vector<llama_token> &batches,
                      std::vector<int> &seq_ids,
                      std::vector<float *> logits) override;
+    int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+             std::vector<float *> &logits_out) override;
+    int houmo_verify_accept(int seq_id, uint16_t n_accepted) override;
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings) override;
     bool is_embedding() override;
 
-  private:
+  protected:
     void resolve_input_names();
     void init_state_cache(int seq_max);
     void set_state_cache_for_prefill(int seq_id);
-    void set_state_cache_for_decode(const std::vector<int> &seq_ids);
+    // accept_pos: 当 decode 模型为 verify 形态 (每个 state 输出 split 成
+    // verify_seq 份: conv_cache_out_N_0..N_{K-1}) 时，要把哪一份 split 输出
+    // 绑定回 past_*_cache_N。对应 demo_mtp.py `_commit_verify_linear_cache`
+    // 的 accept_pos = accepted_steps - 1。非 verify 形态忽略该参数。
+    void set_state_cache_for_decode(const std::vector<int> &seq_ids,
+                                    int accept_pos = 0,
+                                    bool bind_outputs = true);
     void set_linear_attn_mask(tcim::Tensor &tensor, int fill_length,
                               int new_cache_length) const;
     std::vector<int32_t> build_rope_position_ids(int valid_length,
@@ -116,6 +125,14 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
 
     std::vector<std::string> state_cache_names_;
     std::vector<std::string> state_cache_output_names_;
+    // 当 decode 模型为 verify 形态时，每个 state cache 输入对应一组 split 输出
+    // (例如 past_conv_cache_22 → ["conv_cache_out_22_0", ... "_22_4"])。
+    // 非 verify 形态下该 vector 为空。索引与 state_cache_names_ 一一对应。
+    std::vector<std::vector<std::string>> state_cache_split_output_names_;
+    // 当 decode 模型为 verify 形态时，activation 输入的 seq 维度 (>=2)。
+    // 即一次 Run 期望喂入的 token 槽位数 (demo_mtp.py 的 verify_seq)。
+    // 非 verify 形态保持 1。
+    int decode_verify_seq_ = 1;
     std::map<int, StateCacheEntry> state_cache_;
     std::map<int, bool> state_cache_initialized_;
 
@@ -166,6 +183,17 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
         int first_safe_position = 0;
     };
     std::map<int, PrefillSnapshot> prefill_snapshots_;
+
+    struct VerifyPending {
+      bool valid = false;
+      int32_t start_pos = 0;
+      int n_verify = 0;
+      std::vector<llama_token> tokens;
+    };
+    std::map<int, VerifyPending> pending_verify_;
+
+    int commit_verify_accept(int seq_id, int accepted_steps);
+    int copy_verify_state_to_cache(int seq_id, int accept_pos);
 
     // Mark all slots as free and clear the index.  Pre-allocated tensor
     // buffers are kept — only the occupancy bookkeeping is reset.

@@ -5,6 +5,7 @@
 #include "houmo-gptoss.h"
 #include "houmo-qwenllm.h"
 #include "houmo-qwen35llm.h"
+#include "houmo-qwen35mtp.h"
 #include "houmo-vllmodel.h"
 #include "houmo-glmocrmodel.h"
 #include "houmo-gemma4.h"
@@ -32,6 +33,39 @@ static bool string_replace_once(std::string &str, const std::string &from,
     str.replace(pos, from.length(), to);
     return true;
 }
+
+static bool qwen35_has_mtp_tensors(const llama_model_loader &loader) {
+    if (!loader.metadata_ptr) {
+        return false;
+    }
+    gguf_context *ctx = loader.metadata_ptr.get();
+    const int n_tensors = gguf_get_n_tensors(ctx);
+    const std::regex kPrefillMtpPattern("^prefill_mtp(_\\d+)?\\.hmm$");
+    const std::regex kDecodeMtpPattern("^decode(r)?_mtp(_\\d+)?\\.hmm$");
+    for (int i = 0; i < n_tensors; ++i) {
+        const char *name = gguf_get_tensor_name(ctx, i);
+        if (name == nullptr) {
+            continue;
+        }
+        if (std::regex_match(name, kPrefillMtpPattern) ||
+            std::regex_match(name, kDecodeMtpPattern)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool is_kv_cache_io_name(const std::string &name) {
+    return name.find("past_key_cache") != std::string::npos ||
+           name.find("past_value_cache") != std::string::npos ||
+           name.find("_self_attn_vcache") != std::string::npos ||
+           name.find("_self_attn_kcache") != std::string::npos ||
+           name.find("conv_cache_out") != std::string::npos ||
+           name.find("recurrent_state_out") != std::string::npos ||
+           name.find("past_conv_cache") != std::string::npos ||
+           name.find("past_recurrent_state") != std::string::npos;
+}
+
 std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     bool prefill, void *raw_data, int64_t size, bool load_from_file,
     std::vector<std::string> dummy_tensor_names) {
@@ -105,9 +139,12 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
     device_ids_ = device_ids;
     gguf_context *ctx = ml.metadata_ptr.get();
     parser_gguf_parameters(ctx, ml.arch_name);
-    // 从gguf文件中加载hmmodels
+    const bool load_mtp_modules = wants_mtp_modules();
+    // 从 gguf 文件中加载 hmmodels
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
+    const std::regex kPrefillMtpPattern("^prefill_mtp(_\\d+)?\\.hmm$");
     const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
+    const std::regex kDecodeMtpPattern("^decode(r)?_mtp(_\\d+)?\\.hmm$");
     // 环境变量中是否开启了LLAMA_ENABLE_LAZY_MODE
     enable_lazy_mode_ = !ml.use_mmap;
     if (const char *env = std::getenv("LLAMA_ENABLE_LAZY_MODE")) {
@@ -137,7 +174,26 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
                     strlen("quant_embedding.bin")) == 0) {
             embedding_layer_ =
                 std::make_shared<HoumoEmbeddingLayer>(file_name, offset, size);
+        } else if (std::regex_match(name, kPrefillMtpPattern)) {
+            if (!load_mtp_modules) {
+                LLAMA_LOG_INFO("%s: skip prefill_mtp.hmm for target impl\n", __func__);
+                continue;
+            }
+            // MTP 草稿 prefill：与普通 prefill 共用 prefill_model_ 槽位
+            // （同一个 HouMoLLModel 实例只承载一个 gguf，要么是 target 要么是 MTP）。
+            prefill_model_ = create_infer_engine(file_name, offset, size,
+                                                 dummy_tensor_names);
+            if (prefill_model_ == nullptr) {
+                LLAMA_LOG_ERROR("%s: failed to load prefill_mtp.hmm\n", __func__);
+                return false;
+            }
+            LLAMA_LOG_INFO("%s: succeed to load prefill_mtp.hmm (MTP draft module)\n",
+                           __func__);
         } else if (std::regex_match(name, kPrefillPattern)) {
+            if (load_mtp_modules) {
+                LLAMA_LOG_INFO("%s: skip prefill.hmm for MTP impl\n", __func__);
+                continue;
+            }
             // load prefill
             prefill_model_ = create_infer_engine(file_name, offset, size,
                                                  dummy_tensor_names);
@@ -146,7 +202,23 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
                 return false;
             }
             LLAMA_LOG_INFO("%s: succeed to load prefill.hmm\n", __func__);
+        } else if (std::regex_match(name, kDecodeMtpPattern)) {
+            if (!load_mtp_modules) {
+                LLAMA_LOG_INFO("%s: skip decode_mtp.hmm for target impl\n", __func__);
+                continue;
+            }
+            decode_model_ = create_infer_engine(file_name, offset, size);
+            if (decode_model_ == nullptr) {
+                LLAMA_LOG_ERROR("%s: failed to load decode_mtp.hmm\n", __func__);
+                return false;
+            }
+            LLAMA_LOG_INFO("%s: succeed to load decode_mtp.hmm (MTP draft module)\n",
+                           __func__);
         } else if (std::regex_match(name, kDecodePattern)) {
+            if (load_mtp_modules) {
+                LLAMA_LOG_INFO("%s: skip decode.hmm for MTP impl\n", __func__);
+                continue;
+            }
             // load decode
             decode_model_ = create_infer_engine(file_name, offset, size);
 
@@ -180,6 +252,7 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
 }
 
 void HouMoLLModel::Impl::model_inout_init(int seq_max) {
+    n_vocab_ = embedding_layer_->get_vocab_size();
     // init prefill
     prefill_input_init();
     // 填充prefill 的output
@@ -196,7 +269,16 @@ void HouMoLLModel::Impl::model_inout_init(int seq_max) {
     }
     int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
     size = std::max(size, n_decode_batch_);
-    initialize_kv_cache(size);
+    if (is_mtp_model()) {
+        // MTP draft HMM does not expose/use the target model KV cache fields.
+        // Its state is driven by hidden/input_embedding/position length inputs,
+        // so the generic per-layer KV initializer must not probe target KV names.
+        kv_cache_.clear();
+        need_set_kv_cache_ = 0;
+        LLAMA_LOG_INFO("%s: skip generic KV cache init for MTP model\n", __func__);
+    } else {
+        initialize_kv_cache(size);
+    }
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
     LLAMA_LOG_INFO("prefill_length_ = %d\n context_length_ = %d\n "
                    "n_blocks_ = %d\n n_embd_ = %ld\n n_prefill_batch_ = %d\n "
@@ -222,12 +304,7 @@ void HouMoLLModel::Impl::prefill_input_init() {
         if (input_name.find("past_key_cache_") != std::string::npos) {
             kCacheKeyWord = "past_key_cache_";
         }
-        if (input_name.find("past_key_cache_") != std::string::npos ||
-            input_name.find("past_value_cache_") != std::string::npos ||
-            input_name.find("_self_attn_vcache") != std::string::npos ||
-            input_name.find("_self_attn_kcache") != std::string::npos ||
-            input_name.find("past_conv_cache") != std::string::npos ||
-            input_name.find("past_recurrent_state") != std::string::npos) {
+        if (is_kv_cache_io_name(input_name)) {
             continue;
         }
         input_names_.push_back(input_name);
@@ -262,6 +339,9 @@ void HouMoLLModel::Impl::prefill_output_init() {
         auto output_name = prefill_model_->GetOutputName(idx);
         LLAMA_LOG_INFO("%s: prefill output_name: %s\n", __func__,
                        output_name.c_str());
+        if (is_kv_cache_io_name(output_name)) {
+            continue;
+        }
         auto output_info = prefill_model_->GetOutputInfo(output_name)
                                .AsContiguous()
                                .AsType(tcim::DataType::FLOAT32);
@@ -288,12 +368,7 @@ void HouMoLLModel::Impl::decode_input_init() {
         if (input_name.find("past_key_cache_") != std::string::npos) {
             kCacheKeyWord = "past_key_cache_";
         }
-        if (input_name.find("past_key_cache_") != std::string::npos ||
-            input_name.find("past_value_cache_") != std::string::npos ||
-            input_name.find("_self_attn_vcache") != std::string::npos ||
-            input_name.find("_self_attn_kcache") != std::string::npos ||
-            input_name.find("past_conv_cache") != std::string::npos ||
-            input_name.find("past_recurrent_state") != std::string::npos) {
+        if (is_kv_cache_io_name(input_name)) {
             continue;
         }
         if (input_name.find("valid_length") != std::string::npos ||
@@ -316,9 +391,9 @@ void HouMoLLModel::Impl::decode_input_init() {
         decode_input_map_.insert(
             std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
     }
-    if (input_num_decode > 0)
-        n_decode_batch_ =
-            decode_input_map_[decode_model_->GetInputName(0)].Info().Shape()[0];
+    if (!decode_input_map_.empty()) {
+        n_decode_batch_ = decode_input_map_.begin()->second.Info().Shape()[0];
+    }
 }
 
 void HouMoLLModel::Impl::decode_output_init() {
@@ -332,6 +407,11 @@ void HouMoLLModel::Impl::decode_output_init() {
     int output_num_decode = decode_model_->GetOutputNum();
     for (int idx = 0; idx < output_num_decode; idx++) {
         auto output_name = decode_model_->GetOutputName(idx);
+        LLAMA_LOG_INFO("%s: decode output_name: %s\n", __func__,
+                       output_name.c_str());
+        if (is_kv_cache_io_name(output_name)) {
+            continue;
+        }
         auto output_info = decode_model_->GetOutputInfo(output_name)
                                .AsContiguous()
                                .AsType(tcim::DataType::FLOAT32);
@@ -340,8 +420,6 @@ void HouMoLLModel::Impl::decode_output_init() {
             std::pair<std::string, tcim::Tensor>(output_name, output_tensor));
         decode_output_names_.push_back(output_name);
     }
-    n_vocab_ = decode_output_map_[decode_output_names_[0]].Info().MemSize() /
-               (sizeof(float) * n_decode_batch_);
 }
 
 void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx,
@@ -753,16 +831,24 @@ void HouMoLLModel::Impl::lora_clear() {
 }
 
 // HouMoLLModel constructor and destructor
-HouMoLLModel::HouMoLLModel() : impl_(nullptr) {}
+HouMoLLModel::HouMoLLModel() : impl_(nullptr), impl_mtp_(nullptr) {}
 
 HouMoLLModel::~HouMoLLModel() {
-    if (impl_) {
+    if (impl_mtp_) {
+        delete impl_mtp_;
+    }
+    if (impl_ && impl_ != impl_mtp_) {
         delete impl_;
     }
 }
 
 // Forward method calls to the implementation
 bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
+    const bool is_qwen35_arch =
+        ml.arch_name.find("qwen35") != std::string::npos ||
+        ml.arch_name.find("qwen3.5") != std::string::npos ||
+        ml.arch_name.find("qwen3_5") != std::string::npos;
+
     if (impl_ == nullptr) {
         bool has_prefill_hmm = false;
         bool has_decode_hmm = false;
@@ -800,11 +886,30 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
             impl_ = new HouMoGPTOSS();
         } else if (ml.arch_name.find("bert") != std::string::npos) {
             impl_ = new HouMoEmbed();
-        } else if (ml.arch_name.find("qwen35") != std::string::npos ||
-                   ml.arch_name.find("qwen3.5") != std::string::npos ||
-                   ml.arch_name.find("qwen3_5") != std::string::npos) {
-            impl_ = new HoumoQwen35LLM();
-        } else if (is_qwen) {
+        } else if (is_qwen35_arch) {
+            if (qwen35_has_mtp_tensors(ml)) {
+                impl_ = new HoumoQwen35LLM();
+                impl_mtp_ = new HoumoQwen35MTP();
+                LLAMA_LOG_INFO("%s: qwen3.5 gguf has MTP tensors, loading target + MTP impl\n",
+                               __func__);
+
+                if (!impl_->houmo_load(ml, device_ids)) {
+                    LLAMA_LOG_WARN("%s: failed to load qwen3.5 target impl\n", __func__);
+                    delete impl_;
+                    impl_ = nullptr;
+                }
+                if (!impl_mtp_->houmo_load(ml, device_ids)) {
+                    LLAMA_LOG_ERROR("%s: failed to load qwen3.5 MTP impl\n", __func__);
+                    return false;
+                }
+                if (impl_ == nullptr) impl_ = impl_mtp_; // MTP impl 包含 target impl 的功能, 直接使用MTP impl
+                return true;
+            } else {
+                impl_ = new HoumoQwen35LLM();
+                LLAMA_LOG_INFO("%s: qwen3.5 gguf has no MTP tensors, using HoumoQwen35LLM\n",
+                               __func__);
+            }
+        } else if (ml.arch_name.find("qwen") != std::string::npos) {
             impl_ = new HoumoQwenLLM();
         } else {
             LLAMA_LOG_ERROR("%s: unknown architecture %s\n", __func__,
@@ -823,8 +928,17 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
 
 void HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
                               ggml_abort_callback abort_callback,
-                              void *abort_callback_data) {
-    impl_->houmo_init(memory, seq_max, abort_callback, abort_callback_data);
+                              void *abort_callback_data,
+                              bool is_mtp) {
+    if (is_mtp) {
+        if (impl_mtp_ == nullptr) {
+            LLAMA_LOG_ERROR("%s: requested MTP ctx but no MTP impl loaded\n", __func__);
+            return;
+        }
+        impl_mtp_->houmo_init(memory, seq_max, abort_callback, abort_callback_data);
+    } else {
+        impl_->houmo_init(memory, seq_max, abort_callback, abort_callback_data);
+    }
 }
 
 int HouMoLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
@@ -848,6 +962,10 @@ int HouMoLLModel::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     return impl_->houmo_verify(tokens, seq_id, logits_out);
 }
 
+int HouMoLLModel::houmo_verify_accept(int seq_id, uint16_t n_accepted) {
+    return impl_->houmo_verify_accept(seq_id, n_accepted);
+}
+
 int HouMoLLModel::n_decode_batch() { return impl_->n_decode_batch(); }
 
 int HouMoLLModel::n_prefill_batch() { return impl_->n_prefill_batch(); }
@@ -867,6 +985,32 @@ int HouMoLLModel::houmo_embedding(
 bool HouMoLLModel::is_embedding() { return impl_->is_embedding(); }
 bool HouMoLLModel::is_asr_force_aligner() { return impl_->is_asr_force_aligner(); }
 bool HouMoLLModel::has_decode_model() { return impl_->has_decode_model(); }
+
+// ---- MTP forwarders ----
+bool HouMoLLModel::is_mtp_model() const {
+    return impl_ ? impl_->is_mtp_model() : false;
+}
+
+bool HouMoLLModel::has_mtp_modules() const {
+    return impl_mtp_ != nullptr || (impl_ && impl_->has_mtp_modules());
+}
+
+int HouMoLLModel::houmo_decode_mtp(const float *h_in,
+                                   const std::vector<llama_token> &tokens,
+                                   int seq_id,
+                                   std::vector<float *> &logits_out,
+                                   float *h_out,
+                                   int32_t start_pos) {
+    return impl_mtp_ ? impl_mtp_->houmo_decode_mtp(h_in, tokens, seq_id, logits_out, h_out,
+                                   start_pos) : -1;
+}
+
+void HouMoLLModel::set_pre_norm_hidden_dst(float *dst, int n_rows) {
+    if (impl_) {
+        impl_->set_pre_norm_hidden_dst(dst, n_rows);
+    }
+}
+
 void HouMoLLModel::lora_init(std::string file_name, void *adapter) {
     impl_->lora_init(file_name, adapter);
 }

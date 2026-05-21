@@ -874,6 +874,10 @@ private:
             SRV_ERR("failed to load model, '%s'\n", params_base.model.path.c_str());
             return false;
         }
+        if (ctx_tgt == nullptr) {
+            SRV_ERR("failed to create target context for '%s'\n", params_base.model.path.c_str());
+            return false;
+        }
 
         vocab = llama_model_get_vocab(model_tgt);
 
@@ -930,6 +934,10 @@ private:
             //       the extra memory for small models is likely negligible?
             cparams.n_rs_seq = 0;
             ctx_dft.reset(llama_init_from_model(model_dft.get(), cparams));
+            if (ctx_dft == nullptr) {
+                SRV_ERR("failed to create draft context for '%s'\n", params_dft.model.path.c_str());
+                return false;
+            }
 
             ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
 
@@ -1474,7 +1482,7 @@ private:
                 return false;
             }
             int n_timestamp_tokens = 0;
-            for (int j = 0; j < task.tokens.size(); ++j) {
+            for (size_t j = 0; j < task.tokens.size(); ++j) {
                 if (task.tokens[j] == task.params.asr_force_align_timestamp_token) {
                     n_timestamp_tokens++;
                 }
@@ -2542,7 +2550,7 @@ private:
                 const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                 const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
-                const int n_draft_max = slot.get_n_draft_max();
+                int n_draft_max = slot.get_n_draft_max();
 
                 if (n_draft_max > 0) {
                     GGML_ASSERT(slot.can_speculate());
@@ -3064,16 +3072,20 @@ private:
                             break;
                         }
 
-                        // embedding requires all tokens in the batch to be output;
-                        // MTP also wants logits at every prompt position so the
-                        // streaming hook can mirror t_h_pre_norm into ctx_dft.
+                        // embedding requires all tokens in the batch to be output.
+                        // Non-HMM MTP also wants every prompt position marked so the
+                        // streaming hook can mirror t_h_pre_norm into ctx_dft.  Houmo
+                        // HMM writes pre-norm hidden rows directly for the whole batch;
+                        // marking every prompt token as logits would make llama-context
+                        // misclassify prompt prefill as speculative verify.
                         common_batch_add(batch,
                             cur_tok,
                             is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next(),
                             { slot.id },
                             slot.need_embd() ||
                                 (slot.task->params.asr_force_align &&
-                                 cur_tok == slot.task->params.asr_force_align_timestamp_token));
+                                 cur_tok == slot.task->params.asr_force_align_timestamp_token) ||
+                                (!is_hmm && slot.need_embd_pre_norm()));
                         slot.prompt.tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;

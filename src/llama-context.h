@@ -137,6 +137,8 @@ struct llama_context {
 
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);
+    int houmo_verify_accept(llama_seq_id seq_id, uint16_t n_accepted);
+    bool houmo_is_hmm() const;
 
     //
     // state save/load

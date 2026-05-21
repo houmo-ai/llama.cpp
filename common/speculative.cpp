@@ -420,9 +420,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     // The last h-row of one process() call needs the first token of the NEXT
     // call to pair with, so it's stashed here until that next call fires.
     std::vector<std::vector<float>> pending_h;   // [n_seq][n_embd]
+    std::vector<bool> pending_h_valid;
 
     std::vector<int32_t> i_batch_beg;
     std::vector<int32_t> i_batch_end;
+    std::vector<bool> skip_replay;
 
     // Hidden rows from the most recent target verification batch, grouped by seq.
     // Row 0 corresponds to the sampled token, row N to the Nth accepted draft token.
@@ -473,9 +475,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         llama_set_embeddings_pre_norm(ctx_dft, true, /*masked*/ true);
 
         pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
+        pending_h_valid.assign(n_seq, false);
 
         i_batch_beg.assign(n_seq, -1);
         i_batch_end.assign(n_seq, -1);
+        skip_replay.assign(n_seq, false);
 
         verify_h.assign(n_seq, {});
         verify_h_rows.assign(n_seq, 0);
@@ -498,12 +502,15 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
         auto * ctx_dft = this->params.ctx_dft;
         const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id);
-        if (pos_max < N - 1) {
-            LOG_WRN("%s: ctx_dft pos_max=%d < N-1=%d - "
+        // MTP consumes pairs (h_{i-1}, token_i), so after a prompt of N tokens
+        // the mirrored draft context contains N-1 pair positions: [0, N-2].
+        const llama_pos expected_pos_max = N > 1 ? N - 2 : -1;
+        if (pos_max < expected_pos_max) {
+            LOG_WRN("%s: ctx_dft pos_max=%d < N-2=%d - "
                     "process() hook may not have run on every prefill ubatch "
                     "(need_embd / logits=1 on every prompt position?). "
                     "Drafts may degrade.\n",
-                    __func__, (int) pos_max, N - 1);
+                    __func__, (int) pos_max, (int) expected_pos_max);
         }
     }
 
@@ -539,50 +546,62 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         auto * ctx_tgt = this->params.ctx_tgt;
         auto * ctx_dft = this->params.ctx_dft;
 
-        const size_t row_bytes = (size_t) n_embd * sizeof(float);
+        const size_t row_bytes = (size_t) n_embd * (llama_houmo_is_hmm(ctx_tgt) ? sizeof(ggml_fp16_t) : sizeof(float));
 
         common_batch_clear(batch);
 
-        for (int k = 0; k < n_tokens; ++k) {
-            common_batch_add(batch, batch_in.token[k], batch_in.pos[k], { batch_in.seq_id[k][0] }, 0);
-        }
-
-        // shift the tgt embeddings to the right by one position
-        // assumes that the tokens in the batch are sequential for each sequence
-        // i.e. we cannot have seq_id like this: [0, 0, 0, 1, 1, 0, 1, 1]
-        //                                                       ^--- this is a problem
-        // TODO:this is generally true, but would be nice to assert it
-        {
-            const float * h_tgt = llama_get_embeddings_pre_norm(ctx_tgt);
-            std::memcpy(batch.embd + (size_t) 1 * n_embd, h_tgt, row_bytes * (n_tokens-1));
-
-            //{
-            //    // string with seq_ids in the batch
-            //    std::stringstream ss;
-            //    for (int i = 0; i < n_tokens; ++i) {
-            //        ss << batch_in.seq_id[i][0] << ",";
-            //    }
-            //    LOG_WRN("%s: batch_in.seq_id = %s\n", __func__, ss.str().c_str());
-            //}
-        }
-
-        // fill the pending embeddings from a previous run
-        auto set_h = [&](int idx, const float * h_row) {
+        auto set_h = [&](int idx, const void * h_row) {
             std::memcpy(batch.embd + (size_t) idx * n_embd, h_row, row_bytes);
         };
 
+        // Mirror target tokens into the MTP draft context as pairs
+        // (h_{i-1}, token_i), matching demo_mtp.py:
+        //   prompt: hidden[0:N-1] pairs with tokens[1:N]
+        //   decode: pending last hidden pairs with the sampled token
+        // The very first prompt token has no previous hidden row, so do not feed
+        // a synthetic zero-hidden pair; that off-by-one makes MTP drafts random.
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-            if (i_batch_beg[seq_id] < 0) {
+            const int beg = i_batch_beg[seq_id];
+            const int end = i_batch_end[seq_id];
+            if (beg < 0) {
                 continue;
             }
 
-            set_h(i_batch_beg[seq_id], pending_h[seq_id].data());
+            // For verification batches, ctx_dft has already executed the draft
+            // path. Align with demo_mtp.py: only harvest target-side hidden rows
+            // for accept(), and continue drafting from the accepted hidden/token
+            // pair next round. Do not replay the verify batch into ctx_dft.
+            skip_replay[seq_id] = last_n_drafted[seq_id] > 0;
+
+            LOG_TRC("%s: seq_id %d, batch token range [%d, %d], pos range [%d, %d]\n", __func__,
+                    seq_id, beg, end, (int) batch_in.pos[beg], (int) batch_in.pos[end]);
+
+            if (skip_replay[seq_id]) {
+                continue;
+            }
+
+            for (int k = beg; k <= end; ++k) {
+                const void * h_row = nullptr;
+                if (k == beg) {
+                    if (!pending_h_valid[seq_id]) {
+                        continue;
+                    }
+                    h_row = pending_h[seq_id].data();
+                } else {
+                    h_row = llama_get_embeddings_pre_norm_ith(ctx_tgt, k - 1);
+                }
+
+                common_batch_add(batch, batch_in.token[k], batch_in.pos[k], { seq_id }, 0);
+                set_h(batch.n_tokens - 1, h_row);
+            }
         }
 
-        const int32_t rc = llama_decode(ctx_dft, batch);
-        if (rc != 0) {
-            LOG_ERR("%s: llama_decode(ctx_dft) failed rc=%d (pos=%d)\n", __func__, (int) rc, (int) batch_in.pos[0]);
-            return false;
+        if (batch.n_tokens > 0) {
+            const int32_t rc = llama_decode(ctx_dft, batch);
+            if (rc != 0) {
+                LOG_ERR("%s: llama_decode(ctx_dft) failed rc=%d (pos=%d)\n", __func__, (int) rc, (int) batch_in.pos[0]);
+                return false;
+            }
         }
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
@@ -601,6 +620,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             std::memcpy(pending_h[seq_id].data(),
                     verify_h[seq_id].data() + (size_t) (n_rows - 1) * n_embd, row_bytes);
+                pending_h_valid[seq_id] = true;
         }
 
         return true;
@@ -615,8 +635,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         int n_drafting = 0;
         std::vector<bool> drafting(n_seq);
 
-        const float * h_row = nullptr;
-        const size_t row_bytes = (size_t) n_embd * sizeof(float);
+        const void * h_row = nullptr;
+        const size_t row_bytes = (size_t) n_embd * (llama_houmo_is_hmm(ctx_dft) ? sizeof(ggml_fp16_t) : sizeof(float));
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             auto & dp = dparams[seq_id];
@@ -728,14 +748,22 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             return;
         }
 
+        if (llama_houmo_verify_accept(params.ctx_tgt, seq_id, n_accepted) != 0) {
+            LOG_WRN("%s: target houmo verify accept failed for seq_id=%d accepted=%u\n",
+                    __func__, seq_id, (unsigned) n_accepted);
+        }
+
         const int32_t n_rows = verify_h_rows[seq_id];
         if (n_rows <= 0) {
             return;
         }
 
         const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
-        const size_t row_bytes = (size_t) n_embd * sizeof(float);
+        const size_t row_bytes = (size_t) n_embd * (llama_houmo_is_hmm(params.ctx_tgt) ? sizeof(ggml_fp16_t) : sizeof(float));
         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
+        pending_h_valid[seq_id] = true;
+        verify_h_rows[seq_id] = 0;
+        last_n_drafted[seq_id] = 0;
     }
 
     bool need_embd() const override {

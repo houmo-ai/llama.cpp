@@ -11,8 +11,8 @@ class HouMoEmbed : public HouMoLLModel::Impl {
     ~HouMoEmbed();
     virtual bool houmo_load(llama_model_loader & ml, std::vector<int> device_ids) override;
     virtual void houmo_init(houmo_memory_i *memory, int seq_max = 10,
-              ggml_abort_callback abort_callback = nullptr,
-              void *abort_callback_data = nullptr) override;
+                            ggml_abort_callback abort_callback = nullptr,
+                            void *abort_callback_data = nullptr) override;
     virtual int
     houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                     std::map<int, float *> &embeddings) override;

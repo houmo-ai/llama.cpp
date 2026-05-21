@@ -104,3 +104,11 @@ LLAMA_API float * llama_get_embeddings_pre_norm    (struct llama_context * ctx);
 
 // LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
 LLAMA_API float * llama_get_embeddings_pre_norm_ith(struct llama_context * ctx, int32_t i);
+
+// Commit Houmo verify results after speculative acceptance.
+// n_accepted counts accepted draft tokens and excludes the sampled token.
+LLAMA_API int llama_houmo_verify_accept(struct llama_context * ctx, llama_seq_id seq_id, uint16_t n_accepted);
+
+// true for Houmo/HMM contexts whose pre-norm hidden rows are packed as fp16 in
+// llama.cpp's float carrier buffers.
+LLAMA_API bool llama_houmo_is_hmm(const struct llama_context * ctx);
