@@ -273,11 +273,7 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
         state_cache_initialized_[i] = false;
     }
 
-    if (device_ids_.size() == 1) {
-        LLAMA_LOG_INFO("%s: using device checkpoint storage for seq_max=%d\n",
-                       __func__, seq_max);
-        checkpoint_storage_ = CheckpointStorage::kDevice;
-    } else {
+    if (device_ids_.size() > 1) {
         LLAMA_LOG_INFO("%s: using host checkpoint storage for multi device "
                        "model, device_ids_.size() = %zu\n",
                        __func__, device_ids_.size());
