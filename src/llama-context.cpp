@@ -1223,6 +1223,11 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
 
 void llama_context::set_adapters_lora(llama_adapter_lora ** adapters, size_t n_adapters, float * scales) {
     LLAMA_LOG_DEBUG("%s: adapters = %p\n", __func__, (void *) adapters);
+    if (model.hparams.is_hmm) {
+        for (size_t i = 0; i < n_adapters; i++) {
+            model.hm_llmodel->lora_set_scale(adapters[i], scales[i]);
+        }
+    }
 
     if (adapters_lora_are_same(adapters, n_adapters, scales)) {
         return;
