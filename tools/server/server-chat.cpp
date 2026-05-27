@@ -596,17 +596,46 @@ json convert_transcriptions_to_chatcmpl(
     std::string prompt          = json_value(inp_body, "prompt", std::string());
     std::string language        = json_value(inp_body, "language", std::string());
     std::string response_format = json_value(inp_body, "response_format", std::string("json"));
+    const std::string asr_force_align_str =
+        json_value(inp_body, "asr_force_align", json_value(inp_body, "force_align", std::string()));
+    bool asr_force_align = false;
+    if (inp_body.contains("asr_force_align") && inp_body.at("asr_force_align").is_boolean()) {
+        asr_force_align = inp_body.at("asr_force_align").get<bool>();
+    } else if (inp_body.contains("force_align") && inp_body.at("force_align").is_boolean()) {
+        asr_force_align = inp_body.at("force_align").get<bool>();
+    } else {
+        asr_force_align = asr_force_align_str == "true" || asr_force_align_str == "1";
+    }
+    std::string align_text = json_value(inp_body, "text", std::string());
+    std::string timestamp_token = json_value(inp_body, "timestamp_token", std::string("<timestamp>"));
     if (response_format != "json") {
         throw std::invalid_argument("Only 'json' response_format is supported for transcription");
     }
     const common_chat_prompt_preset preset = common_chat_get_asr_prompt(tmpls);
-    if (prompt.empty()) {
-        prompt = preset.user;
+    std::vector<std::string> asr_force_align_words;
+    if (asr_force_align) {
+        if (align_text.empty()) {
+            align_text = prompt;
+        }
+        prompt.clear();
+        prompt += get_media_marker();
+        std::istringstream iss(align_text);
+        std::string word;
+        while (iss >> word) {
+            asr_force_align_words.push_back(word);
+            prompt += word;
+            prompt += timestamp_token;
+            prompt += timestamp_token;
+        }
+    } else {
+        if (prompt.empty()) {
+            prompt = preset.user;
+        }
+        if (!language.empty()) {
+            prompt += string_format(" (language: %s)", language.c_str());
+        }
+        prompt += get_media_marker();
     }
-    if (!language.empty()) {
-        prompt += string_format(" (language: %s)", language.c_str());
-    }
-    prompt += get_media_marker();
 
     json messages = json::array();
     if (!preset.system.empty()) {
@@ -616,6 +645,12 @@ json convert_transcriptions_to_chatcmpl(
 
     json chatcmpl_body = inp_body; // copy all fields
     chatcmpl_body["messages"] = messages;
+    if (asr_force_align) {
+        chatcmpl_body["asr_force_align"] = true;
+        chatcmpl_body["asr_force_align_words"] = asr_force_align_words;
+        chatcmpl_body["timestamp_token"] = timestamp_token;
+        chatcmpl_body["asr_force_align_raw_prompt"] = prompt;
+    }
 
     // because input from form-data, everything is string, we need to correct the types here
     std::string stream = json_value(inp_body, "stream", std::string("false"));

@@ -32,6 +32,7 @@
 #include <exception>
 #include <memory>
 #include <filesystem>
+#include <limits>
 #include <unordered_set>
 #include <utility>
 
@@ -39,6 +40,67 @@
 using json = nlohmann::ordered_json;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+
+static std::vector<int32_t> fix_asr_force_align_timestamps(const std::vector<int32_t> & data) {
+    std::vector<int32_t> res = data;
+    for (size_t i = 1; i < res.size(); ++i) {
+        if (res[i] < res[i - 1]) {
+            res[i] = res[i - 1];
+        }
+    }
+    return res;
+}
+
+static std::string format_asr_force_align_output(
+        const std::vector<std::string> & words,
+        const std::vector<int32_t> & timestamp_ms) {
+    const std::vector<int32_t> ts = fix_asr_force_align_timestamps(timestamp_ms);
+    std::string out;
+    for (size_t i = 0; i < words.size(); ++i) {
+        const size_t p = i * 2;
+        if (p + 1 >= ts.size()) {
+            break;
+        }
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += words[i];
+        out += " ";
+        out += string_format("%.3f", ts[p] / 1000.0f);
+        out += " ";
+        out += string_format("%.3f", ts[p + 1] / 1000.0f);
+    }
+    return out;
+}
+
+static bool json_asr_force_align_enabled(const json & body) {
+    const char * keys[] = { "asr_force_align", "force_align" };
+    for (const char * key : keys) {
+        if (!body.contains(key)) {
+            continue;
+        }
+        const json & value = body.at(key);
+        if (value.is_boolean()) {
+            return value.get<bool>();
+        }
+        if (value.is_string()) {
+            const std::string s = value.get<std::string>();
+            return s == "true" || s == "1";
+        }
+    }
+    return false;
+}
+
+static bool json_asr_force_align_raw_prompt(const json & body, std::string & prompt) {
+    const char * keys[] = { "asr_force_align_raw_prompt", "force_align_raw_prompt" };
+    for (const char * key : keys) {
+        if (body.contains(key) && body.at(key).is_string()) {
+            prompt = body.at(key).get<std::string>();
+            return true;
+        }
+    }
+    return false;
+}
 
 // state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
 enum slot_state {
@@ -100,6 +162,7 @@ struct server_slot {
     std::string  generated_text;
     std::string  debug_generated_text;
     llama_tokens generated_tokens;
+    std::vector<int32_t> asr_force_align_timestamps_ms;
 
     std::vector<completion_token_output> generated_token_probs;
 
@@ -207,6 +270,7 @@ struct server_slot {
             spec_ckpt.clear();
         }
         generated_tokens.clear();
+        asr_force_align_timestamps_ms.clear();
         generated_token_probs.clear();
         json_schema = json();
 
@@ -259,7 +323,7 @@ struct server_slot {
 
     // if the context does not have a memory module then all embeddings have to be computed within a single ubatch
     // also we cannot split if the pooling would require any past tokens
-    // (MTP supports splitting — uses task->need_embd() not need_embd())
+    // (MTP supports splitting - uses task->need_embd() not need_embd())
     bool can_split() const {
         GGML_ASSERT(task);
 
@@ -370,6 +434,10 @@ struct server_slot {
 
             t_last_used        =  ggml_time_us();
             t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
+
+            if (task->params.asr_force_align) {
+                prompt_clear(true);
+            }
 
             state = SLOT_STATE_IDLE;
 
@@ -1256,6 +1324,7 @@ private:
             const auto & tokens = ret->prompt.tokens;
 
             update_cache = update_cache && prompt_cache;
+            update_cache = update_cache && !task.params.asr_force_align;
 
             // cache prompts only for completion tasks
             update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
@@ -1397,6 +1466,23 @@ private:
         if (!task.tokens.validate(ctx_tgt)) {
             send_error(task, "Prompt contains invalid tokens", ERROR_TYPE_INVALID_REQUEST);
             return false;
+        }
+
+        if (task.params.asr_force_align) {
+            if (task.params.asr_force_align_timestamp_token == LLAMA_TOKEN_NULL) {
+                send_error(task, "asr_force_align timestamp token was not resolved; pass timestamp_token_id or timestamp_token", ERROR_TYPE_INVALID_REQUEST);
+                return false;
+            }
+            int n_timestamp_tokens = 0;
+            for (int j = 0; j < task.tokens.size(); ++j) {
+                if (task.tokens[j] == task.params.asr_force_align_timestamp_token) {
+                    n_timestamp_tokens++;
+                }
+            }
+            if (n_timestamp_tokens == 0) {
+                send_error(task, "asr_force_align prompt contains no timestamp tokens", ERROR_TYPE_INVALID_REQUEST);
+                return false;
+            }
         }
 
         SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
@@ -1818,6 +1904,98 @@ private:
         SLT_DBG(slot, "%s", "sending embeddings\n");
 
         queue_results.send(std::move(res));
+    }
+
+    bool send_asr_force_align(server_slot & slot, const llama_batch & batch) {
+        const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+        for (int32_t j = 0; j < batch.n_tokens; ++j) {
+            if (!batch.logits[j] ||
+                batch.token[j] != slot.task->params.asr_force_align_timestamp_token) {
+                continue;
+            }
+
+            bool belongs_to_slot = false;
+            for (int s = 0; s < batch.n_seq_id[j]; ++s) {
+                if (batch.seq_id[j][s] == slot.id) {
+                    belongs_to_slot = true;
+                    break;
+                }
+            }
+            if (!belongs_to_slot) {
+                continue;
+            }
+
+            float * logits = llama_get_logits_ith(ctx_tgt, j);
+            if (logits == nullptr) {
+                SLT_ERR(slot, "missing logits for asr_force_align timestamp at batch index %d\n", j);
+                send_error(slot, "missing logits for asr_force_align timestamp", ERROR_TYPE_SERVER);
+                return false;
+            }
+
+            int best = 0;
+            for (int v = 1; v < n_vocab; ++v) {
+                if (logits[v] > logits[best]) {
+                    best = v;
+                }
+            }
+
+            if (slot.asr_force_align_timestamps_ms.size() < 40) {
+                int top_ids[5] = {0, 0, 0, 0, 0};
+                float top_vals[5] = {
+                    -std::numeric_limits<float>::infinity(),
+                    -std::numeric_limits<float>::infinity(),
+                    -std::numeric_limits<float>::infinity(),
+                    -std::numeric_limits<float>::infinity(),
+                    -std::numeric_limits<float>::infinity(),
+                };
+                for (int v = 0; v < n_vocab; ++v) {
+                    const float val = logits[v];
+                    for (int t = 0; t < 5; ++t) {
+                        if (val > top_vals[t]) {
+                            for (int m = 4; m > t; --m) {
+                                top_vals[m] = top_vals[m - 1];
+                                top_ids[m] = top_ids[m - 1];
+                            }
+                            top_vals[t] = val;
+                            top_ids[t] = v;
+                            break;
+                        }
+                    }
+                }
+                SLT_INF(slot,
+                        "asr_force_align timestamp[%zu] batch_j=%d best=%d ms=%d top=[%d %.4f, %d %.4f, %d %.4f, %d %.4f, %d %.4f]\n",
+                        slot.asr_force_align_timestamps_ms.size(), j, best,
+                        best * slot.task->params.asr_force_align_timestamp_segment_ms,
+                        top_ids[0], top_vals[0],
+                        top_ids[1], top_vals[1],
+                        top_ids[2], top_vals[2],
+                        top_ids[3], top_vals[3],
+                        top_ids[4], top_vals[4]);
+            }
+
+            slot.asr_force_align_timestamps_ms.push_back(
+                best * slot.task->params.asr_force_align_timestamp_segment_ms);
+        }
+
+        slot.generated_text = format_asr_force_align_output(
+            slot.task->params.asr_force_align_words,
+            slot.asr_force_align_timestamps_ms);
+        SLT_INF(slot,
+                "asr_force_align timestamps=%zu words=%zu text='%s'\n",
+                slot.asr_force_align_timestamps_ms.size(),
+                slot.task->params.asr_force_align_words.size(),
+                slot.generated_text.c_str());
+
+        const int64_t t_current = ggml_time_us();
+        slot.n_decoded = (int32_t) slot.task->params.asr_force_align_words.size();
+        slot.t_start_generation = t_current;
+        slot.t_token_generation = 1.0;
+        slot.stop = STOP_TYPE_EOS;
+        slot.has_next_token = false;
+        slot.print_timings();
+        send_final_response(slot);
+        metrics.on_prediction(slot);
+        return true;
     }
 
     void send_rerank(const server_slot & slot, const llama_batch & batch) {
@@ -2537,7 +2715,7 @@ private:
                         }
 
                         // TODO: support memory-less logits computation
-                        if (slot.task->need_logits() && !llama_get_memory(ctx_tgt)) {
+                        if (slot.task->need_logits() && !slot.task->params.asr_force_align && !llama_get_memory(ctx_tgt)) {
                             send_error(slot, "the current context does not logits computation. skipping", ERROR_TYPE_SERVER);
                             slot.release();
                             continue;
@@ -2893,7 +3071,9 @@ private:
                             cur_tok,
                             is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next(),
                             { slot.id },
-                            slot.need_embd());
+                            slot.need_embd() ||
+                                (slot.task->params.asr_force_align &&
+                                 cur_tok == slot.task->params.asr_force_align_timestamp_token));
                         slot.prompt.tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;
@@ -2930,7 +3110,9 @@ private:
                         GGML_ASSERT(batch.n_tokens > 0);
 
                         // extract the logits only for the last token
-                        batch.logits[batch.n_tokens - 1] = true;
+                        if (!slot.task->params.asr_force_align) {
+                            batch.logits[batch.n_tokens - 1] = true;
+                        }
 
                         slot.n_decoded = 0;
                         slot.i_batch   = batch.n_tokens - 1;
@@ -3183,6 +3365,13 @@ private:
                 }
 
                 if (slot.state == SLOT_STATE_DONE_PROMPT) {
+                    if (slot.task->params.asr_force_align) {
+                        send_asr_force_align(slot, batch_view);
+                        slot.release();
+                        slot.i_batch = -1;
+                        continue;
+                    }
+
                     if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                         // prompt evaluated for embedding
                         send_embedding(slot, batch_view);
@@ -4185,6 +4374,12 @@ void server_routes::init_routes() {
             meta->chat_params,
             files,
             &file_group_sizes);
+        std::string asr_force_align_prompt;
+        if (json_asr_force_align_enabled(body) &&
+            json_asr_force_align_raw_prompt(body, asr_force_align_prompt)) {
+            body_parsed["prompt"] = asr_force_align_prompt;
+            SRV_INF("asr_force_align raw prompt override: %s\n", body_parsed.at("prompt").get<std::string>().c_str());
+        }
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,

@@ -2,6 +2,7 @@
 #include "ggml.h"
 #include <cstring>
 #include <algorithm>
+#include <limits>
 #include "llama-impl.h"
 #include "time-perf.h"
 
@@ -19,18 +20,20 @@ void HoumoQwenLLM::houmo_init(houmo_memory_i *memory, int seq_max,
 
     // input, valid_lenght, current_length, lora_mask... from index 3.
     for (size_t index = 3; index < input_names_.size(); ++index) {
-        if (prefill_input_map_.count(input_names_[index]) > 0
-            && decode_input_map_.count(input_names_[index]) > 0) {
+        if (prefill_input_map_.count(input_names_[index]) > 0) {
             auto lora_mask = prefill_input_map_[input_names_[index]];
             set_input_data(lora_mask, 1, 0);
             prefill_model_->SetInput(input_names_[index], lora_mask);
-            auto decode_lora_mask = decode_input_map_[input_names_[index]];
-            set_input_data(decode_lora_mask, 1, 0);
-            decode_model_->SetInput(input_names_[index], decode_lora_mask);
 
             lora_mask_float_ =
                 tcim::Tensor::CreateHostTensor(lora_mask.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
             LLAMA_LOG_INFO("set %d to %s\n", 0, input_names_[index].c_str());
+
+            if (decode_model_ != nullptr && decode_input_map_.count(input_names_[index]) > 0) {
+                auto decode_lora_mask = decode_input_map_[input_names_[index]];
+                set_input_data(decode_lora_mask, 1, 0);
+                decode_model_->SetInput(input_names_[index], decode_lora_mask);
+            }
         }
     }
 }
@@ -209,6 +212,10 @@ int HoumoQwenLLM::houmo_decode(std::vector<llama_token> &batches,
                                std::vector<float *> logits) {
     LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
                     seq_ids.size(), batches.size());
+    if (decode_model_ == nullptr) {
+        LLAMA_LOG_ERROR("%s: decode model is null for non-force-align Qwen model\n", __func__);
+        return -1;
+    }
     for (auto seq_id : seq_ids)
         decode_valid_length_[seq_id] = memory_->seq_pos_min(seq_id);
     int ret = 0;
@@ -462,4 +469,81 @@ bool HoumoQwenLLM::is_embedding() {
         return true;
     }
     return false;
+}
+
+int HoumoQwenLLM::houmo_asr_force_align(
+    std::vector<llama_token> &tokens, int seq_id,
+    std::vector<float *> &logits_out) {
+    if (tokens.size() != logits_out.size()) {
+        LLAMA_LOG_ERROR("%s: tokens.size(%zu) != logits_out.size(%zu)\n",
+                        __func__, tokens.size(), logits_out.size());
+        return -1;
+    }
+    const int k = (int)tokens.size();
+    if (k <= 0) {
+        return 0;
+    }
+    bool has_logits_out = false;
+    for (float * logits : logits_out) {
+        if (logits != nullptr) {
+            has_logits_out = true;
+            break;
+        }
+    }
+    if (!has_logits_out) {
+        const size_t old_size = input_embedding_ids_[seq_id].size();
+        input_embedding_ids_[seq_id].resize(old_size + tokens.size() * n_embd_);
+        if (!tokens.empty()) {
+            embedding_layer_->get_embedding_batch(
+                tokens.data(), (int) tokens.size(),
+                input_embedding_ids_[seq_id].data() + old_size);
+        }
+        LLAMA_LOG_INFO("%s: cached %zu text tokens as embeddings, seq_id=%d, cached_tokens=%zu\n",
+                       __func__, tokens.size(), seq_id,
+                       input_embedding_ids_[seq_id].size() / n_embd_);
+        return 0;
+    }
+
+    const size_t embeddings_available = input_embedding_ids_[seq_id].size() / n_embd_;
+    const size_t total_tokens = embeddings_available + tokens.size();
+    auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
+    const auto shape = prefill_output_float.Info().Shape();
+    const size_t output_vocab = !shape.empty() ? (size_t) shape.back() : (size_t) n_vocab_;
+    const size_t total_floats = prefill_output_float.MemSize() / sizeof(float);
+    const size_t output_rows = output_vocab > 0 ? total_floats / output_vocab : 0;
+    if (output_vocab == 0 || output_rows == 0) {
+        LLAMA_LOG_ERROR("%s: invalid prefill output shape\n", __func__);
+        return -1;
+    }
+    if (total_tokens > output_rows) {
+        LLAMA_LOG_ERROR("%s: total tokens %zu exceed ASR force align output rows %zu\n",
+                        __func__, total_tokens, output_rows);
+        return -1;
+    }
+
+    LLAMA_LOG_INFO("%s: ASR force align via prefill seq_id=%d cached_emb_tokens=%zu text_tokens=%zu total_tokens=%zu output_rows=%zu output_vocab=%zu logits_slots=%zu\n",
+                   __func__, seq_id, embeddings_available, tokens.size(), total_tokens,
+                   output_rows, output_vocab, logits_out.size());
+
+    std::vector<float> prefill_logits(total_floats);
+    int ret = houmo_prefill(tokens, seq_id, prefill_logits.data());
+    if (ret != 0) {
+        LLAMA_LOG_ERROR("%s: houmo_prefill failed with error code %d\n", __func__, ret);
+        return ret;
+    }
+
+    for (int i = 0; i < k; ++i) {
+        if (logits_out[i] == nullptr) {
+            continue;
+        }
+        const size_t row = embeddings_available + (size_t) i;
+        LLAMA_LOG_INFO("%s: copy ASR force align logits token_i=%d row=%zu output_vocab=%zu\n",
+                       __func__, i, row, output_vocab);
+        std::fill(logits_out[i], logits_out[i] + n_vocab_,
+                  -std::numeric_limits<float>::infinity());
+        memcpy(logits_out[i],
+               prefill_logits.data() + row * output_vocab,
+               std::min<size_t>(output_vocab, (size_t)n_vocab_) * sizeof(float));
+    }
+    return 0;
 }

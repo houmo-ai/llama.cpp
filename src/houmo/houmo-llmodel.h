@@ -36,6 +36,8 @@ class HouMoLLModel {
                       float *logits);
     int houmo_decode(std::vector<llama_token> &batches,
                      std::vector<int> &seq_ids, std::vector<float *> logits);
+    int houmo_asr_force_align(std::vector<llama_token> &tokens, int seq_id,
+                              std::vector<float *> &logits_out);
     /**
      * @brief Verify k draft tokens for the same sequence in a single NPU forward.
      * @details Equivalent to prefill(k tokens) but returns the logits of every
@@ -60,6 +62,8 @@ class HouMoLLModel {
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings);
     bool is_embedding();
+    bool is_asr_force_aligner();
+    bool has_decode_model();
     int n_decode_batch();
     int n_prefill_batch();
     uint32_t n_context_length();
@@ -114,6 +118,13 @@ public:
   virtual int houmo_decode(std::vector<llama_token> &batches,
                            std::vector<int> &seq_ids,
                            std::vector<float *> logits) = 0;
+  virtual int houmo_asr_force_align(std::vector<llama_token> &tokens, int seq_id,
+                                    std::vector<float *> &logits_out) {
+      (void) tokens;
+      (void) seq_id;
+      (void) logits_out;
+      return -1;
+  }
   /**
    * @brief Batched verification for speculative decoding.
    * @details See HouMoLLModel::houmo_verify. Default fallback implementation
@@ -138,6 +149,11 @@ public:
   virtual bool is_embedding() {
     return false;
   }
+  virtual bool is_asr_force_aligner() {
+    return asr_force_aligner_;
+  }
+  void set_asr_force_aligner(bool value) { asr_force_aligner_ = value; }
+  bool has_decode_model() const { return decode_model_ != nullptr; }
   int n_decode_batch() const { return n_decode_batch_; }
   int n_prefill_batch() const { return n_prefill_batch_; }
   uint32_t n_context_length() const { return context_length_;}
@@ -272,6 +288,7 @@ protected:
   int device_num_ = 1;
   std::vector<int> device_ids_ = {0};
   bool enable_lazy_mode_ = false;
+  bool asr_force_aligner_ = false;
   houmo_memory_i *memory_ = nullptr;
   std::map<std::string, lora_item> lora_map;
   tcim::Tensor lora_mask_float_;

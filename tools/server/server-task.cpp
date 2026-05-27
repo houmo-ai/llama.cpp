@@ -10,7 +10,26 @@
 #include "speculative.h"
 #include "server-common.h"
 
+#include <cstdlib>
+
 using json = nlohmann::ordered_json;
+
+static int32_t json_value_i32_or_string(const json & data, const char * key, int32_t def) {
+    if (!data.contains(key)) {
+        return def;
+    }
+    const auto & value = data.at(key);
+    if (value.is_number_integer()) {
+        return value.get<int32_t>();
+    }
+    if (value.is_string()) {
+        const std::string str = value.get<std::string>();
+        if (!str.empty()) {
+            return (int32_t) std::strtol(str.c_str(), nullptr, 10);
+        }
+    }
+    return def;
+}
 
 //
 // task_params
@@ -340,6 +359,26 @@ task_params server_task::params_from_json_cmpl(
     //params.t_max_prompt_ms  = json_value(data,       "t_max_prompt_ms",    defaults.t_max_prompt_ms); // TODO: implement
     params.t_max_predict_ms = json_value(data,       "t_max_predict_ms",   defaults.t_max_predict_ms);
     params.response_fields  = json_value(data,       "response_fields",    std::vector<std::string>());
+    params.asr_force_align  = json_value(data,       "asr_force_align",    json_value(data, "force_align", false));
+    params.asr_force_align_words =
+        json_value(data, "asr_force_align_words",
+            json_value(data, "force_align_words", std::vector<std::string>()));
+    params.asr_force_align_timestamp_segment_ms =
+        json_value_i32_or_string(data, "timestamp_segment_time_ms",
+            json_value_i32_or_string(data, "timestamp_segment_time", defaults.asr_force_align_timestamp_segment_ms));
+    params.asr_force_align_timestamp_token =
+        (llama_token) json_value_i32_or_string(data, "timestamp_token_id", LLAMA_TOKEN_NULL);
+    if (params.asr_force_align && params.asr_force_align_timestamp_token == LLAMA_TOKEN_NULL) {
+        const std::string timestamp_token = json_value(data, "timestamp_token", std::string("<timestamp>"));
+        llama_tokens tokenized = common_tokenize(vocab, timestamp_token, false, true);
+        if (!tokenized.empty()) {
+            params.asr_force_align_timestamp_token = tokenized[0];
+        }
+    }
+    if (params.asr_force_align) {
+        params.cache_prompt = false;
+        params.n_cache_reuse = 0;
+    }
 
     params.sampling.top_k              = json_value(data, "top_k",               defaults.sampling.top_k);
     params.sampling.top_p              = json_value(data, "top_p",               defaults.sampling.top_p);
@@ -1181,9 +1220,10 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp_stream() {
 }
 
 json server_task_result_cmpl_final::to_json_oaicompat_asr() {
+    const std::string text = oaicompat_msg.content.empty() ? content : oaicompat_msg.content;
     json event = json {
         {"type",  "transcript.text.done"},
-        {"text",  oaicompat_msg.content},
+        {"text",  text},
         {"usage", json {
             {"type",         "tokens"},
             {"input_tokens",  n_prompt_tokens},

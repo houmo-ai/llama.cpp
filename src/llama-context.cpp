@@ -1627,7 +1627,8 @@ int llama_context::houmo_decode(const llama_batch & batch) {
     };
 
     int ret = 0;
-    {
+    const bool has_decode_model = hm_llmodel->has_decode_model();
+    if (has_decode_model) {
         std::vector<llama_token> dec_tokens;
         std::vector<int>         dec_seqs;
         std::vector<float *>     dec_logits;
@@ -1653,7 +1654,7 @@ int llama_context::houmo_decode(const llama_batch & batch) {
     }
 
     for (auto & [sid, entries] : seqid_entries) {
-        if (entries.size() <= 1) {
+        if (has_decode_model && entries.size() <= 1) {
             continue;
         }
 
@@ -1670,7 +1671,16 @@ int llama_context::houmo_decode(const llama_batch & batch) {
             toks.push_back(e.token);
         }
 
-        if (n_logits_needed <= 1) {
+        if (hm_llmodel->is_asr_force_aligner()) {
+            std::vector<float *> lgts;
+            lgts.reserve(entries.size());
+            for (const auto & e : entries) {
+                lgts.push_back(logits_ptr_for(e));
+            }
+            LLAMA_LOG_DEBUG("%s: seq_id %d uses houmo_asr_force_align, logits positions = %d\n",
+                            __func__, sid, n_logits_needed);
+            ret = hm_llmodel->houmo_asr_force_align(toks, sid, lgts);
+        } else if (n_logits_needed <= 1) {
             float * out = nullptr;
             for (const auto & e : entries) {
                 if (e.needs_logits) {

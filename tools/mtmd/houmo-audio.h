@@ -14,12 +14,17 @@ class HoumoAudio {
     virtual ~HoumoAudio() = default;
     virtual bool init(const std::string &model_path, std::vector<int> device_ids) = 0;
     virtual bool encoding(const std::vector<float> &input_data,
-                          std::vector<float> &output_data, int out_offset = 0) = 0;
+                          std::vector<float> &output_data,
+                          int out_offset = 0,
+                          int32_t feature_lens = -1) = 0;
     int32_t output_tokens() const {
         return output_tokens_;
     }
     int32_t audio_n_frames() const {
         return audio_n_frames_;
+    }
+    bool is_force_aligner() const {
+        return is_force_aligner_;
     }
 
   protected:
@@ -36,6 +41,7 @@ class HoumoAudio {
     int32_t output_tokens_ = 0;
     int32_t audio_n_mel_ = 0;
     int32_t audio_n_frames_ = 0;
+    bool is_force_aligner_ = false;
     std::string audio_input_name_;
     std::string audio_feature_lens_name_;
 };
@@ -46,5 +52,7 @@ class HoumoQwen3Audio : public HoumoAudio {
     ~HoumoQwen3Audio() override = default;
     virtual bool init(const std::string &model_path, std::vector<int> device_ids) override;
     virtual bool encoding(const std::vector<float> &input_data,
-                          std::vector<float> &output_data, int out_offset = 0) override;
+                          std::vector<float> &output_data,
+                          int out_offset = 0,
+                          int32_t feature_lens = -1) override;
 };

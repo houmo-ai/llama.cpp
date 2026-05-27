@@ -12,6 +12,9 @@
 #include "llama-batch.h"
 #include "llama-impl.h"
 #include "nlohmann/json.hpp"
+#include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <regex>
@@ -358,6 +361,11 @@ void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx,
                        key.c_str());
     } else {
         n_embd_ = gguf_get_val_u32(ctx, key_id);
+    }
+    key = "tokenizer.ggml.tokens";
+    key_id = gguf_find_key(ctx, key.c_str());
+    if (key_id >= 0) {
+        n_vocab_ = (int64_t) gguf_get_arr_n(ctx, key_id);
     }
     auto key_n_split = gguf_find_key(ctx, kSpliteCount.c_str());
     if (key_n_split < 0) {
@@ -756,6 +764,32 @@ HouMoLLModel::~HouMoLLModel() {
 // Forward method calls to the implementation
 bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
     if (impl_ == nullptr) {
+        bool has_prefill_hmm = false;
+        bool has_decode_hmm = false;
+        const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
+        const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
+        const int n_tensors = gguf_get_n_tensors(ml.metadata_ptr.get());
+        for (int i = 0; i < n_tensors; ++i) {
+            const char *name = gguf_get_tensor_name(ml.metadata_ptr.get(), i);
+            if (name == nullptr) {
+                continue;
+            }
+            has_prefill_hmm = has_prefill_hmm || std::regex_match(name, kPrefillPattern);
+            has_decode_hmm = has_decode_hmm || std::regex_match(name, kDecodePattern);
+        }
+        std::string general_name;
+        const int general_name_key = gguf_find_key(ml.metadata_ptr.get(), "general.name");
+        if (general_name_key >= 0) {
+            general_name = gguf_get_val_str(ml.metadata_ptr.get(), general_name_key);
+            std::transform(general_name.begin(), general_name.end(), general_name.begin(),
+                           [](unsigned char c) { return (char) std::tolower(c); });
+        }
+        const bool is_qwen = ml.arch_name.find("qwen") != std::string::npos;
+        const bool is_qwen_asr_force_aligner =
+            is_qwen && has_prefill_hmm && !has_decode_hmm &&
+            (general_name.find("forcealigner") != std::string::npos ||
+             general_name.find("forcedaligner") != std::string::npos ||
+             general_name.find("forced aligner") != std::string::npos);
         if (ml.arch_name.find("gemma4") != std::string::npos) {
             impl_ = new HouMoGemma4();
         } else if (ml.arch_name.find("glm4") != std::string::npos) {
@@ -770,13 +804,17 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
                    ml.arch_name.find("qwen3.5") != std::string::npos ||
                    ml.arch_name.find("qwen3_5") != std::string::npos) {
             impl_ = new HoumoQwen35LLM();
-        } else if (ml.arch_name.find("qwen") != std::string::npos) {
+        } else if (is_qwen) {
             impl_ = new HoumoQwenLLM();
         } else {
             LLAMA_LOG_ERROR("%s: unknown architecture %s\n", __func__,
                             ml.arch_name.c_str());
             exit(1);
             return false;
+        }
+        impl_->set_asr_force_aligner(is_qwen_asr_force_aligner);
+        if (is_qwen_asr_force_aligner) {
+            LLAMA_LOG_INFO("%s: detected Qwen ASR ForceAligner prefill-only model\n", __func__);
         }
     }
 
@@ -798,6 +836,11 @@ int HouMoLLModel::houmo_decode(std::vector<llama_token> &batches,
                                std::vector<int> &seq_ids,
                                std::vector<float *> logits) {
     return impl_->houmo_decode(batches, seq_ids, logits);
+}
+
+int HouMoLLModel::houmo_asr_force_align(std::vector<llama_token> &tokens, int seq_id,
+                                        std::vector<float *> &logits_out) {
+    return impl_->houmo_asr_force_align(tokens, seq_id, logits_out);
 }
 
 int HouMoLLModel::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
@@ -822,6 +865,8 @@ int HouMoLLModel::houmo_embedding(
     return impl_->houmo_embedding(batches, embeddings);
 }
 bool HouMoLLModel::is_embedding() { return impl_->is_embedding(); }
+bool HouMoLLModel::is_asr_force_aligner() { return impl_->is_asr_force_aligner(); }
+bool HouMoLLModel::has_decode_model() { return impl_->has_decode_model(); }
 void HouMoLLModel::lora_init(std::string file_name, void *adapter) {
     impl_->lora_init(file_name, adapter);
 }

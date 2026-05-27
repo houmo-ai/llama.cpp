@@ -548,7 +548,7 @@ bool mtmd_audio_preprocessor_whisper::preprocess(const float *                 s
     // this is to avoid potential issues with stage1/2 padding in log_mel_spectrogram
     // TODO: maybe handle this better
     size_t min_samples = (size_t) hparams.audio_sample_rate * (hparams.audio_chunk_len + 1);  // +1 second margin
-    if (n_samples < min_samples) {
+    if (frames_per_chunk == 0 && n_samples < min_samples) {
         smpl.resize(min_samples, 0.0f);
         std::memcpy(smpl.data(), samples, n_samples * sizeof(float));
         samples   = smpl.data();
@@ -585,22 +585,21 @@ bool mtmd_audio_preprocessor_whisper::preprocess(const float *                 s
         printf("output: n_mel = %d, n_len = %d\n", out_full.n_mel, out_full.n_len);
     }
     const size_t chunk_frames = frames_per_chunk > 0 ? frames_per_chunk : 3000;
-    GGML_ASSERT((size_t) out_full.n_len > chunk_frames);
-    for (size_t off = 0; off < (size_t) out_full.n_len; off += chunk_frames) {
-        int n_len = std::min(chunk_frames, (size_t) out_full.n_len - off);
-        if ((size_t) n_len < chunk_frames) {
-            break;  // last incomplete chunk will always be a padded chunk, safe to ignore
-        }
+    const size_t total_frames = frames_per_chunk > 0
+        ? std::min<size_t>((size_t) out_full.n_len, std::max<size_t>(1, n_samples / params.hop_length))
+        : (size_t) out_full.n_len;
+    for (size_t off = 0; off < total_frames; off += chunk_frames) {
+        int n_len = (int) std::min(chunk_frames, total_frames - off);
 
         mtmd_audio_mel out_chunk;
         out_chunk.n_len     = n_len;
         out_chunk.n_mel     = out_full.n_mel;
-        out_chunk.n_len_org = out_full.n_mel;  // unused
+        out_chunk.n_len_org = n_len;
         out_chunk.data.reserve(out_chunk.n_mel * out_chunk.n_len);
 
         for (int i = 0; i < out_full.n_mel; i++) {
             auto src = out_full.data.begin() + i * out_full.n_len + off;
-            out_chunk.data.insert(out_chunk.data.end(), src, src + chunk_frames);
+            out_chunk.data.insert(out_chunk.data.end(), src, src + n_len);
         }
 
         output.push_back(std::move(out_chunk));

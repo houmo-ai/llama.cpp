@@ -25,6 +25,13 @@
 #include <cstring>
 #include <vector>
 
+static int32_t qwen3_asr_feat_extract_output_lengths(int32_t input_lengths) {
+    input_lengths = std::max<int32_t>(input_lengths, 1);
+    const int32_t input_lengths_leave = input_lengths % 100;
+    const int32_t feat_lengths = (input_lengths_leave - 1) / 2 + 1;
+    return std::max<int32_t>(1, ((feat_lengths - 1) / 2 + 1 - 1) / 2 + 1 + (input_lengths / 100) * 13);
+}
+
 // represents raw image data, layout is RGBRGBRGB...
 // length of data must be nx * ny * 3
 struct mtmd_bitmap {
@@ -566,6 +573,14 @@ struct mtmd_context {
                     // <|audio_bos|> ... (embeddings) ... <|audio_eos|>
                     aud_beg = "<|audio_bos|>";
                     aud_end = "<|audio_eos|>";
+                    if (proj == PROJECTOR_TYPE_QWEN3A &&
+                        clip_is_hmm(ctx_a) &&
+                        hm_audio != nullptr &&
+                        hm_audio->is_force_aligner()) {
+                        // Qwen3 ForceAligner processor emits <|audio_start|><|audio_pad|><|audio_end|>.
+                        aud_beg = "<|audio_start|>";
+                        aud_end = "<|audio_end|>";
+                    }
                     audio_preproc = std::make_unique<mtmd_audio_preprocessor_whisper>(ctx_a);
                 } break;
             case PROJECTOR_TYPE_QWEN3A:
@@ -1011,8 +1026,10 @@ struct mtmd_tokenizer {
                 size_t n_tokens = clip_n_output_tokens(ctx->ctx_a, mel_f32.get());
                 LOG_DBG("mel_spec.n_len = %d, mel_spec.n_mel = %d, n_tokens = %d\n", mel_spec.n_len, mel_spec.n_mel, (int)n_tokens);
                 LOG_INF("%s: mel spectrogram chunk has %d tokens\n", __func__, (int)n_tokens);
-                if (clip_is_hmm(ctx->ctx_a) && ctx->hm_audio != nullptr && ctx->hm_audio->output_tokens() > 0) {
-                    n_tokens = (size_t) ctx->hm_audio->output_tokens();
+                if (clip_is_hmm(ctx->ctx_a) && ctx->hm_audio != nullptr) {
+                    n_tokens = (size_t) qwen3_asr_feat_extract_output_lengths(mel_f32->nx);
+                    LOG_INF("%s: HMM audio dynamic n_tokens = %d from feature_lens = %d\n",
+                            __func__, (int) n_tokens, mel_f32->nx);
                 }
 
                 clip_image_f32_batch batch_f32;
@@ -1136,7 +1153,7 @@ int32_t mtmd_encode_chunk(mtmd_context * ctx, const mtmd_input_chunk * chunk) {
         if (clip_is_hmm(ctx->ctx_a)) {
             // FIXME: 只处理第一段音频
             const clip_image_f32_ptr & audio = chunk->tokens_audio->batch_f32.entries[0];
-            return ctx->hm_audio->encoding(audio->buf, ctx->image_embd_v) ? 0 : 1;
+            return ctx->hm_audio->encoding(audio->buf, ctx->image_embd_v, 0, audio->nx) ? 0 : 1;
         }
         bool ok = clip_image_batch_encode(
             ctx->ctx_a,

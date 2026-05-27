@@ -16,6 +16,8 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
     virtual int houmo_decode(std::vector<llama_token> &batches,
                              std::vector<int> &seq_ids,
                              std::vector<float *> logits) override;
+    virtual int houmo_asr_force_align(std::vector<llama_token> &tokens, int seq_id,
+                                      std::vector<float *> &logits_out) override;
     virtual int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
                              std::vector<float *> &logits_out) override;
     virtual int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,

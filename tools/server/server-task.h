@@ -68,6 +68,10 @@ struct task_params {
 
     std::vector<std::string> antiprompt;
     std::vector<std::string> response_fields;
+    bool asr_force_align = false;
+    llama_token asr_force_align_timestamp_token = LLAMA_TOKEN_NULL;
+    int32_t asr_force_align_timestamp_segment_ms = 80;
+    std::vector<std::string> asr_force_align_words;
 
     bool timings_per_token   = false;
     bool post_sampling_probs = false;
