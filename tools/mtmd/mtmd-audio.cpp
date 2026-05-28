@@ -683,11 +683,12 @@ bool mtmd_audio_preprocessor_qwen3a::preprocess(const float *                 sa
     const int n_eff = std::min(mel_full.n_len,
                                (int)(n_samples / hparams.audio_hop_len) + 1);
 
-    // Split into inference windows matching n_window_infer=800 from model config.
+    // Split into inference windows. HMM-based audio models can override this
+    // with the fixed input frame count read from encode.hmm.
     // Each window is padded to the next multiple of chunk_size for the cgraph.
     // The mtmd caller loops over output entries, so long audio is handled automatically.
     const int chunk_size  = 100; // conv sub-chunk size (n_window * 2, n_window=50)
-    const int window_size = 800; // mel frames per forward pass (n_window_infer=800)
+    const int window_size = frames_per_chunk > 0 ? (int) frames_per_chunk : 800; // default n_window_infer=800
 
     for (int off = 0; off < n_eff; off += window_size) {
         const int win_eff    = std::min(window_size, n_eff - off);

@@ -902,7 +902,7 @@ static void handle_media(
         common_remote_params params;
         params.max_size = 1024 * 1024 * 10; // 10MB
         params.timeout  = 10; // seconds
-        SRV_INF("downloading image from '%s'\n", url.c_str());
+        SRV_INF("downloading media from '%s'\n", url.c_str());
         auto res = common_remote_get_content(url, params);
         if (200 <= res.first && res.first < 300) {
             SRV_INF("downloaded %zu bytes\n", res.second.size());
@@ -910,20 +910,20 @@ static void handle_media(
             data.insert(data.end(), res.second.begin(), res.second.end());
             out_files.push_back(data);
         } else {
-            throw std::runtime_error("Failed to download image");
+            throw std::runtime_error("Failed to download media");
         }
 
     } else if (string_starts_with(url, "file://")) {
         if (media_path.empty()) {
             throw std::invalid_argument("file:// URLs are not allowed unless --media-path is specified");
         }
-        // load local image file
+        // load local media file
         std::string file_path = url.substr(7); // remove "file://"
         raw_buffer data;
         if (!fs_validate_filename(file_path, true)) {
             throw std::invalid_argument("file path is not allowed: " + file_path);
         }
-        SRV_INF("loading image from local file '%s'\n", (media_path + file_path).c_str());
+        SRV_INF("loading media from local file '%s'\n", (media_path + file_path).c_str());
         std::ifstream file(media_path + file_path, std::ios::binary);
         if (!file) {
             throw std::invalid_argument("file does not exist or cannot be opened: " + file_path);
@@ -932,11 +932,11 @@ static void handle_media(
         out_files.push_back(data);
 
     } else {
-        // try to decode base64 image
+        // try to decode base64 media
         std::vector<std::string> parts = string_split<std::string>(url, /*separator*/ ',');
         if (parts.size() != 2) {
             throw std::runtime_error("Invalid url value");
-        } else if (!string_starts_with(parts[0], "data:image/")) {
+        } else if (!string_starts_with(parts[0], "data:image/") && !string_starts_with(parts[0], "data:audio/")) {
             throw std::runtime_error("Invalid url format: " + parts[0]);
         } else if (!string_ends_with(parts[0], "base64")) {
             throw std::runtime_error("url must be base64 encoded");
@@ -1090,21 +1090,50 @@ json oaicompat_chat_params_parse(
                 json input_audio   = json_value(p, "input_audio", json::object());
                 std::string data   = json_value(input_audio, "data", std::string());
                 std::string format = json_value(input_audio, "format", std::string());
-                // while we also support flac, we don't allow it here so we matches the OAI spec
-                if (format != "wav" && format != "mp3") {
-                    throw std::invalid_argument("input_audio.format must be either 'wav' or 'mp3'");
+
+                if (data.empty()) {
+                    throw std::invalid_argument("input_audio.data must not be empty");
                 }
-                auto decoded_data = base64_decode(data); // expected to be base64 encoded
-                out_files.push_back(decoded_data);
+                if (string_starts_with(data, "http") || string_starts_with(data, "file://") || string_starts_with(data, "data:audio/")) {
+                    json audio_url = json{{"url", data}};
+                    handle_media(out_files, audio_url, opt.media_path);
+                } else {
+                    // while we also support flac, we don't allow it here so we matches the OAI spec
+                    if (format != "wav" && format != "mp3") {
+                        throw std::invalid_argument("input_audio.format must be either 'wav' or 'mp3'");
+                    }
+                    auto decoded_data = base64_decode(data); // expected to be base64 encoded
+                    out_files.push_back(decoded_data);
+                }
                 if (out_file_group_sizes) {
                     out_file_group_sizes->push_back(1);
                 }
 
-                // TODO: add audio_url support by reusing handle_media()
-
                 p["type"] = "media_marker";
                 p["text"] = get_media_marker();
                 p.erase("input_audio");
+
+            } else if (type == "audio_url") {
+                if (!opt.allow_audio) {
+                    throw std::runtime_error(
+                        "audio input is not supported - hint: if this is "
+                        "unexpected, you may need to provide the mmproj");
+                }
+
+                json audio_url;
+                if (p.contains("audio_url") && p.at("audio_url").is_string()) {
+                    audio_url = json{{"url", p.at("audio_url").get<std::string>()}};
+                } else {
+                    audio_url = json_value(p, "audio_url", json::object());
+                }
+                handle_media(out_files, audio_url, opt.media_path);
+                if (out_file_group_sizes) {
+                    out_file_group_sizes->push_back(1);
+                }
+
+                p["type"] = "media_marker";
+                p["text"] = get_media_marker();
+                p.erase("audio_url");
 
             } else if (type != "text") {
                 throw std::invalid_argument("unsupported content[].type");
