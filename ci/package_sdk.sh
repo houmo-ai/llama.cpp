@@ -39,7 +39,7 @@ xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2
 
 ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/hlaw_ollama.${ARCH}"
 modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.${ARCH}"
-
+boringssl_url="http://artifactory.houmo.ai:80/artifactory/thirdparty_local/boringssl/boringssl-20260508.tar.gz"
 # 对齐策略说明：
 # - auto(默认): aarch64 默认启用 64K 对齐；x86_64 默认不启用
 # - 64k: 强制启用 64K 对齐
@@ -162,6 +162,30 @@ deploy_dadao_sdk() {
     rm -rf third_party/houmo-sdk
 }
 
+# 部署 BoringSSL
+deploy_boringssl() {
+    local boringssl_dir="vendor/boringssl"
+    local boringssl_archive="vendor/boringssl.tar.gz"
+
+    if [ -f "${boringssl_dir}/CMakeLists.txt" ]; then
+        echo "BoringSSL already exists: ${boringssl_dir}, skipping download."
+        return 0
+    fi
+
+    rm -rf "${boringssl_dir}"
+
+    download_file "${boringssl_url}" "${boringssl_archive}"
+    tar -xzf "${boringssl_archive}" -C vendor
+
+    if [ ! -f "${boringssl_dir}/CMakeLists.txt" ]; then
+        echo "Failed to locate BoringSSL CMakeLists.txt after extracting ${boringssl_archive} to vendor"
+        exit 1
+    fi
+
+    rm -f "${boringssl_archive}"
+    echo "BoringSSL deployed to ${boringssl_dir}"
+}
+
 build_ui_assets() {
     local ui_dir="tools/ui"
     local ui_dist="${ui_dir}/dist"
@@ -225,22 +249,12 @@ build_llama() {
 
     cd build
     if [ "$ARCH" == "aarch64" ]; then
-        if [ "$PLATFORM" == "xh2" ]; then
-            cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON \
-                "${cmake_linker_args[@]}"
-        else
-            cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF \
-                "${cmake_linker_args[@]}"
-        fi
+        cmake .. -DCMAKE_TOOLCHAIN_FILE=../ci/toolchain-aarch64.cmake -DLLAMA_CURL=OFF -DLLAMA_BUILD_BORINGSSL=ON \
+            "${cmake_linker_args[@]}"
+
     else
-        if [ "$PLATFORM" == "xh2" ]; then
-            cmake .. -DLLAMA_CURL=OFF -DENABLE_HOUMO_XH2=ON \
-                "${cmake_linker_args[@]}"
-        else
-            # 默认使用x86_64架构
-            cmake .. -DLLAMA_CURL=OFF \
-                "${cmake_linker_args[@]}"
-        fi
+        cmake .. -DLLAMA_CURL=OFF -DLLAMA_BUILD_BORINGSSL=ON \
+            "${cmake_linker_args[@]}"
     fi
     if [ $? -ne 0 ]; then
         echo "cmake failed."
@@ -374,6 +388,7 @@ main() {
     echo "Deployed Dadao SDK and System SDK for $PLATFORM/$ARCH."
 
     # 编译和打包
+    deploy_boringssl
     build_ui_assets
     build_llama
     package_llama
