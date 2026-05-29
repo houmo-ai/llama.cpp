@@ -26,6 +26,9 @@ class HoumoAudio {
     bool is_force_aligner() const {
         return is_force_aligner_;
     }
+    bool is_glm_asr() const {
+        return is_glm_asr_;
+    }
 
   protected:
     bool houmo_load(const std::string &file_name, std::vector<int> device_ids);
@@ -42,6 +45,7 @@ class HoumoAudio {
     int32_t audio_n_mel_ = 0;
     int32_t audio_n_frames_ = 0;
     bool is_force_aligner_ = false;
+    bool is_glm_asr_ = false;
     std::string audio_input_name_;
     std::string audio_feature_lens_name_;
 };
@@ -50,6 +54,17 @@ class HoumoQwen3Audio : public HoumoAudio {
   public:
     HoumoQwen3Audio() : HoumoAudio() {}
     ~HoumoQwen3Audio() override = default;
+    virtual bool init(const std::string &model_path, std::vector<int> device_ids) override;
+    virtual bool encoding(const std::vector<float> &input_data,
+                          std::vector<float> &output_data,
+                          int out_offset = 0,
+                          int32_t feature_lens = -1) override;
+};
+
+class HoumoGLMAsrAudio : public HoumoAudio {
+  public:
+    HoumoGLMAsrAudio() : HoumoAudio() {}
+    ~HoumoGLMAsrAudio() override = default;
     virtual bool init(const std::string &model_path, std::vector<int> device_ids) override;
     virtual bool encoding(const std::vector<float> &input_data,
                           std::vector<float> &output_data,

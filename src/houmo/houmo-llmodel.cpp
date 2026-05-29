@@ -871,14 +871,24 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
                            [](unsigned char c) { return (char) std::tolower(c); });
         }
         const bool is_qwen = ml.arch_name.find("qwen") != std::string::npos;
+        const auto name_has_any = [&general_name](std::initializer_list<const char *> needles) {
+            for (const char * needle : needles) {
+                if (general_name.find(needle) != std::string::npos) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const bool is_glm_asr =
+            name_has_any({"glm-asr", "glmasr", "glm asr"});
+        const bool is_glm_ocr =
+            name_has_any({"glm-ocr", "glmocr", "glm ocr"});
         const bool is_qwen_asr_force_aligner =
             is_qwen && has_prefill_hmm && !has_decode_hmm &&
-            (general_name.find("forcealigner") != std::string::npos ||
-             general_name.find("forcedaligner") != std::string::npos ||
-             general_name.find("forced aligner") != std::string::npos);
+            name_has_any({"forcealigner", "forcedaligner", "forced aligner"});
         if (ml.arch_name.find("gemma4") != std::string::npos) {
             impl_ = new HouMoGemma4();
-        } else if (ml.arch_name.find("glm4") != std::string::npos) {
+        } else if (is_glm_ocr) {
             impl_ = new HouMoGLMOCRModel();
         } else if (ml.arch_name.find("vl") != std::string::npos) {
             impl_ = new HouMoVLLModel();
@@ -909,7 +919,7 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
                 LLAMA_LOG_INFO("%s: qwen3.5 gguf has no MTP tensors, using HoumoQwen35LLM\n",
                                __func__);
             }
-        } else if (ml.arch_name.find("qwen") != std::string::npos) {
+        } else if (is_glm_asr || is_qwen) {
             impl_ = new HoumoQwenLLM();
         } else {
             LLAMA_LOG_ERROR("%s: unknown architecture %s\n", __func__,

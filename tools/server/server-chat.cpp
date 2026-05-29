@@ -612,6 +612,9 @@ json convert_transcriptions_to_chatcmpl(
         throw std::invalid_argument("Only 'json' response_format is supported for transcription");
     }
     const common_chat_prompt_preset preset = common_chat_get_asr_prompt(tmpls);
+    const std::string tmpl_src = tmpls ? common_chat_templates_source(tmpls) : "";
+    const bool is_glm_asr_template =
+        tmpl_src.find("<|begin_of_audio|><|pad|><|end_of_audio|><|user|>") != std::string::npos;
     std::vector<std::string> asr_force_align_words;
     if (asr_force_align) {
         if (align_text.empty()) {
@@ -627,6 +630,11 @@ json convert_transcriptions_to_chatcmpl(
             prompt += timestamp_token;
             prompt += timestamp_token;
         }
+    } else if (is_glm_asr_template) {
+        if (prompt.empty()) {
+            prompt = "Please transcribe this audio into text";
+        }
+        prompt = get_media_marker() + prompt;
     } else {
         if (prompt.empty()) {
             prompt = preset.user;

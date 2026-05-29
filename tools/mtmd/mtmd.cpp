@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 static int32_t qwen3_asr_feat_extract_output_lengths(int32_t input_lengths) {
@@ -30,6 +31,18 @@ static int32_t qwen3_asr_feat_extract_output_lengths(int32_t input_lengths) {
     const int32_t input_lengths_leave = input_lengths % 100;
     const int32_t feat_lengths = (input_lengths_leave - 1) / 2 + 1;
     return std::max<int32_t>(1, ((feat_lengths - 1) / 2 + 1 - 1) / 2 + 1 + (input_lengths / 100) * 13);
+}
+
+static int32_t glm_asr_feat_extract_output_lengths(int32_t input_lengths) {
+    input_lengths = std::max<int32_t>(input_lengths, 1);
+    for (const auto & conv : { std::pair<int32_t, int32_t>{3, 1}, std::pair<int32_t, int32_t>{3, 2} }) {
+        const int32_t kernel_size = conv.first;
+        const int32_t stride      = conv.second;
+        const int32_t padding     = 1;
+        input_lengths = (input_lengths + 2 * padding - (kernel_size - 1) - 1) / stride + 1;
+    }
+    const int32_t merge_factor = 4;
+    return std::max<int32_t>(1, (input_lengths - merge_factor) / merge_factor + 1);
 }
 
 // represents raw image data, layout is RGBRGBRGB...
@@ -272,8 +285,11 @@ struct mtmd_context {
                         "Failed to load HMM model from %s\n", mmproj_fname));
             }
             if (ctx_a) {
-                // for audio, we currently only support qwen3a
-                hm_audio = new HoumoQwen3Audio();
+                if (clip_get_projector_type(ctx_a) == PROJECTOR_TYPE_GLMA) {
+                    hm_audio = new HoumoGLMAsrAudio();
+                } else {
+                    hm_audio = new HoumoQwen3Audio();
+                }
                 if (!hm_audio->init(mmproj_fname, device_ids))
                     throw std::runtime_error(string_format(
                         "Failed to load HMM audio model from %s\n", mmproj_fname));
@@ -605,6 +621,10 @@ struct mtmd_context {
             case PROJECTOR_TYPE_GLMA:
             case PROJECTOR_TYPE_MERALION:
                 {
+                    if (clip_is_hmm(ctx_a) && hm_audio != nullptr && hm_audio->is_glm_asr()) {
+                        aud_beg = "<|begin_of_audio|>";
+                        aud_end = "<|end_of_audio|><|user|>";
+                    }
                     audio_preproc = std::make_unique<mtmd_audio_preprocessor_whisper>(ctx_a);
                 } break;
             case PROJECTOR_TYPE_LFM2A:
@@ -1023,14 +1043,20 @@ struct mtmd_tokenizer {
                 mel_f32->ny  = mel_spec.n_mel;
                 LOG_INF("%s: mel spectrogram chunk has dimensions %d x %d\n", __func__, mel_f32->nx, mel_f32->ny);
                 mel_f32->buf = std::move(mel_spec.data);
-                size_t n_tokens = clip_n_output_tokens(ctx->ctx_a, mel_f32.get());
-                LOG_DBG("mel_spec.n_len = %d, mel_spec.n_mel = %d, n_tokens = %d\n", mel_spec.n_len, mel_spec.n_mel, (int)n_tokens);
-                LOG_INF("%s: mel spectrogram chunk has %d tokens\n", __func__, (int)n_tokens);
+                size_t n_tokens = 0;
                 if (clip_is_hmm(ctx->ctx_a) && ctx->hm_audio != nullptr) {
-                    n_tokens = (size_t) qwen3_asr_feat_extract_output_lengths(mel_f32->nx);
+                    if (ctx->hm_audio->is_glm_asr() || ctx->proj_type_a() == PROJECTOR_TYPE_GLMA) {
+                        n_tokens = (size_t) glm_asr_feat_extract_output_lengths(mel_f32->nx);
+                    } else {
+                        n_tokens = (size_t) qwen3_asr_feat_extract_output_lengths(mel_f32->nx);
+                    }
                     LOG_INF("%s: HMM audio dynamic n_tokens = %d from feature_lens = %d\n",
                             __func__, (int) n_tokens, mel_f32->nx);
+                } else {
+                    n_tokens = clip_n_output_tokens(ctx->ctx_a, mel_f32.get());
                 }
+                LOG_DBG("mel_spec.n_len = %d, mel_spec.n_mel = %d, n_tokens = %d\n", mel_spec.n_len, mel_spec.n_mel, (int)n_tokens);
+                LOG_INF("%s: mel spectrogram chunk has %d tokens\n", __func__, (int)n_tokens);
 
                 clip_image_f32_batch batch_f32;
                 batch_f32.is_audio = true;

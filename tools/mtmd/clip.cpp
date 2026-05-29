@@ -1484,7 +1484,7 @@ struct clip_model_loader {
                         bool require_stack = model.proj_type == PROJECTOR_TYPE_ULTRAVOX ||
                                              model.proj_type == PROJECTOR_TYPE_VOXTRAL ||
                                              model.proj_type == PROJECTOR_TYPE_MERALION ||
-                                             model.proj_type == PROJECTOR_TYPE_GLMA;
+                                             (model.proj_type == PROJECTOR_TYPE_GLMA && !hparams.is_hmm);
                         get_u32(KEY_A_PROJ_STACK_FACTOR, hparams.proj_stack_factor, require_stack);
                         hparams.ffn_op = FFN_GELU_ERF;
                         log_ffn_op = "gelu_erf"; // temporary solution for logging
@@ -4288,6 +4288,10 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
             }
             return ctx->model.mm_2_w->ne[1];
         case PROJECTOR_TYPE_GLMA:
+            if (clip_is_hmm(ctx)) {
+                return ctx->model.hparams.projection_dim;
+            }
+            return ctx->model.mm_2_w->ne[1];
         case PROJECTOR_TYPE_LFM2:
         case PROJECTOR_TYPE_KIMIVL:
         case PROJECTOR_TYPE_PADDLEOCR:
