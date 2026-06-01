@@ -27,6 +27,7 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cinttypes>
 #include <exception>
@@ -51,6 +52,10 @@ static std::vector<int32_t> fix_asr_force_align_timestamps(const std::vector<int
     return res;
 }
 
+static double asr_force_align_time_s(int32_t timestamp_ms) {
+    return std::round(timestamp_ms / 10.0) / 100.0;
+}
+
 static std::string format_asr_force_align_output(
         const std::vector<std::string> & words,
         const std::vector<int32_t> & timestamp_ms) {
@@ -66,11 +71,30 @@ static std::string format_asr_force_align_output(
         }
         out += words[i];
         out += " ";
-        out += string_format("%.3f", ts[p] / 1000.0f);
+        out += string_format("%.2f", ts[p] / 1000.0f);
         out += " ";
-        out += string_format("%.3f", ts[p + 1] / 1000.0f);
+        out += string_format("%.2f", ts[p + 1] / 1000.0f);
     }
     return out;
+}
+
+static json format_asr_force_align_data(
+        const std::vector<std::string> & words,
+        const std::vector<int32_t> & timestamp_ms) {
+    const std::vector<int32_t> ts = fix_asr_force_align_timestamps(timestamp_ms);
+    json data = json::array();
+    for (size_t i = 0; i < words.size(); ++i) {
+        const size_t p = i * 2;
+        if (p + 1 >= ts.size()) {
+            break;
+        }
+        data.push_back(json {
+            {"text",       words[i]},
+            {"start_time", asr_force_align_time_s(ts[p])},
+            {"end_time",   asr_force_align_time_s(ts[p + 1])},
+        });
+    }
+    return data;
 }
 
 static bool json_asr_force_align_enabled(const json & body) {
@@ -161,6 +185,7 @@ struct server_slot {
 
     std::string  generated_text;
     std::string  debug_generated_text;
+    json         asr_force_align_data = json::array();
     llama_tokens generated_tokens;
     std::vector<int32_t> asr_force_align_timestamps_ms;
 
@@ -258,6 +283,7 @@ struct server_slot {
 
         last_nl_pos    = 0;
         generated_text = "";
+        asr_force_align_data = json::array();
         has_new_line   = false;
         truncated      = false;
         stop           = STOP_TYPE_NONE;
@@ -1827,6 +1853,7 @@ private:
             res->content     = std::move(slot.generated_text);
             res->tokens      = std::move(slot.generated_tokens);
         }
+        res->asr_force_align_data = std::move(slot.asr_force_align_data);
         res->timings         = slot.get_timings();
         res->prompt          = slot.task->tokens.detokenize(ctx_tgt, true);
         res->response_fields = std::move(slot.task->params.response_fields);
@@ -1988,11 +2015,14 @@ private:
         slot.generated_text = format_asr_force_align_output(
             slot.task->params.asr_force_align_words,
             slot.asr_force_align_timestamps_ms);
+        slot.asr_force_align_data = format_asr_force_align_data(
+            slot.task->params.asr_force_align_words,
+            slot.asr_force_align_timestamps_ms);
         SLT_INF(slot,
-                "asr_force_align timestamps=%zu words=%zu text='%s'\n",
+                "asr_force_align timestamps=%zu words=%zu data=%s\n",
                 slot.asr_force_align_timestamps_ms.size(),
                 slot.task->params.asr_force_align_words.size(),
-                slot.generated_text.c_str());
+                slot.asr_force_align_data.dump().c_str());
 
         const int64_t t_current = ggml_time_us();
         slot.n_decoded = (int32_t) slot.task->params.asr_force_align_words.size();

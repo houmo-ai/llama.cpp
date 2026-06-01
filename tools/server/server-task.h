@@ -338,6 +338,7 @@ struct completion_token_output {
 
 struct server_task_result_cmpl_final : server_task_result {
     std::string content;
+    json asr_force_align_data = json::array();
     llama_tokens tokens;
 
     bool stream;

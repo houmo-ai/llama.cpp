@@ -1223,7 +1223,6 @@ json server_task_result_cmpl_final::to_json_oaicompat_asr() {
     const std::string text = oaicompat_msg.content.empty() ? content : oaicompat_msg.content;
     json event = json {
         {"type",  "transcript.text.done"},
-        {"text",  text},
         {"usage", json {
             {"type",         "tokens"},
             {"input_tokens",  n_prompt_tokens},
@@ -1232,6 +1231,11 @@ json server_task_result_cmpl_final::to_json_oaicompat_asr() {
             {"input_tokens_details", json { {"cached_tokens", n_prompt_tokens_cache} }},
         }},
     };
+    if (!asr_force_align_data.empty()) {
+        event["data"] = asr_force_align_data;
+    } else {
+        event["text"] = text;
+    }
     return event;
 }
 
