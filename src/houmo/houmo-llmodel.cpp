@@ -391,9 +391,7 @@ void HouMoLLModel::Impl::decode_input_init() {
         decode_input_map_.insert(
             std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
     }
-    if (!decode_input_map_.empty()) {
-        n_decode_batch_ = decode_input_map_.begin()->second.Info().Shape()[0];
-    }
+    n_decode_batch_ = decode_input_map_[decode_model_->GetInputName(0)].Info().Shape()[0];
 }
 
 void HouMoLLModel::Impl::decode_output_init() {
