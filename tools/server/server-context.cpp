@@ -1249,8 +1249,12 @@ private:
             // 1. It's not explicitly disabled via --reasoning off
             // 2. The chat template supports it
             const bool template_supports_thinking = params_base.use_jinja && common_chat_templates_support_enable_thinking(chat_templates.get());
-            const bool enable_thinking = params_base.enable_reasoning != 0 && template_supports_thinking;
-            SRV_INF("%s: chat template, thinking = %d\n", __func__, enable_thinking);
+            const bool enable_thinking =
+                params_base.enable_reasoning != 0 &&
+                template_supports_thinking &&
+                params_base.sampling.reasoning_budget_tokens != 0;
+            SRV_INF("%s: chat template, thinking = %d\n", __func__,
+                    enable_thinking);
 
             chat_params = {
                 /* use_jinja             */ params_base.use_jinja,
