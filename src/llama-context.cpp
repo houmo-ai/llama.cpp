@@ -1652,8 +1652,7 @@ int llama_context::houmo_decode(const llama_batch & batch) {
         LLAMA_LOG_ERROR("%s: could not reserve space for batch with %d outputs\n", __func__, n_outputs_all);
         return -2;
     }
-    LLAMA_LOG_INFO("houmo_decode: embeddings_pre_norm = %d, embd_pre_norm.data = %p\n",
-                    cparams.embeddings_pre_norm, (void*) embd_pre_norm.data);
+
     if (cparams.embeddings_pre_norm && embd_pre_norm.data) {
         hm_llmodel->set_pre_norm_hidden_dst(embd_pre_norm.data, batch.n_tokens);
     } else {

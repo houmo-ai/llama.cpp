@@ -49,18 +49,18 @@ void HouMoVLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
     }
 
     // qwen3vl decoder模型需要初始化 deepstack_features_ 为0
-    if (decode_input_map_.size() == 9) {
-        for (int i = 0; i < 3; i++) {
-            auto name = decode_model_->GetInputName(6 + i);
-            if (n_decode_batch_ > 1) {
-                if (decode_input_map_.count(name) == 0) {
-                    name = name + "_batch" + std::to_string(i);
+    if (decode_input_map_.size() >= 9) {
+        for (int batch_id = 0; batch_id < n_decode_batch_; batch_id++) {
+            for (int i = 0; i < 3; i++) {
+                auto name = decode_model_->GetInputName(6 + i);
+                if (batch_id > 0) {
+                    name = name + "_batch" + std::to_string(batch_id);
                 }
+                LLAMA_LOG_INFO("init decode input %s for batch_id %d\n", name.c_str(), batch_id);
+                auto deepstack = decode_input_map_.at(name);
+                memset(deepstack.Data(), 0, deepstack.MemSize());
+                decode_model_->SetInput(name, deepstack);
             }
-            auto deepstack =
-                decode_input_map_.at(name);
-            memset(deepstack.Data(), 0, deepstack.MemSize());
-            decode_model_->SetInput(name, deepstack);
         }
     }
     chunk_history_.resize(actual_seq_max);
