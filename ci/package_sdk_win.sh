@@ -9,7 +9,7 @@ PLATFORM=$1
 ARCH=x86_64
 
 # SDK URLs
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.3.0/2026/05/11/2348/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-1.3.0.tar.gz"
+xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.3.0/2026/05/19/0015/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-1.3.0.tar.gz"
 xh2_sw_sdk_url=""
 modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.exe"
 boringssl_url="http://artifactory.houmo.ai:80/artifactory/thirdparty_local/boringssl/boringssl-20260508.tar.gz"
