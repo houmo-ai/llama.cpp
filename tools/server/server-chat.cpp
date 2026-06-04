@@ -1,7 +1,164 @@
 #include "server-chat.h"
 #include "server-common.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <cstring>
 #include <sstream>
+
+static bool utf8_next_codepoint(const std::string & text, size_t & pos, uint32_t & cp, std::string & piece) {
+    if (pos >= text.size()) {
+        return false;
+    }
+
+    const unsigned char c0 = (unsigned char) text[pos];
+    size_t len = 1;
+    cp = c0;
+
+    if ((c0 & 0x80) == 0) {
+        len = 1;
+    } else if ((c0 & 0xE0) == 0xC0 && pos + 1 < text.size()) {
+        len = 2;
+        cp = ((uint32_t) (c0 & 0x1F) << 6) |
+             ((uint32_t) ((unsigned char) text[pos + 1] & 0x3F));
+    } else if ((c0 & 0xF0) == 0xE0 && pos + 2 < text.size()) {
+        len = 3;
+        cp = ((uint32_t) (c0 & 0x0F) << 12) |
+             ((uint32_t) ((unsigned char) text[pos + 1] & 0x3F) << 6) |
+             ((uint32_t) ((unsigned char) text[pos + 2] & 0x3F));
+    } else if ((c0 & 0xF8) == 0xF0 && pos + 3 < text.size()) {
+        len = 4;
+        cp = ((uint32_t) (c0 & 0x07) << 18) |
+             ((uint32_t) ((unsigned char) text[pos + 1] & 0x3F) << 12) |
+             ((uint32_t) ((unsigned char) text[pos + 2] & 0x3F) << 6) |
+             ((uint32_t) ((unsigned char) text[pos + 3] & 0x3F));
+    }
+
+    piece = text.substr(pos, len);
+    pos += len;
+    return true;
+}
+
+static bool is_asr_force_align_cjk(uint32_t cp) {
+    return (cp >= 0x3400  && cp <= 0x4DBF)  ||
+           (cp >= 0x4E00  && cp <= 0x9FFF)  ||
+           (cp >= 0xF900  && cp <= 0xFAFF)  ||
+           (cp >= 0x20000 && cp <= 0x2A6DF) ||
+           (cp >= 0x2A700 && cp <= 0x2B73F) ||
+           (cp >= 0x2B740 && cp <= 0x2B81F) ||
+           (cp >= 0x2B820 && cp <= 0x2CEAF) ||
+           (cp >= 0x3040  && cp <= 0x30FF)  ||
+           (cp >= 0xAC00  && cp <= 0xD7AF);
+}
+
+static bool is_asr_force_align_punct(uint32_t cp) {
+    return (cp < 0x80 && std::ispunct((unsigned char) cp)) ||
+           (cp >= 0x2000 && cp <= 0x206F) ||
+           (cp >= 0x3000 && cp <= 0x303F) ||
+           (cp >= 0xFF00 && cp <= 0xFF65);
+}
+
+static std::vector<std::string> split_asr_force_align_text(const std::string & text) {
+    std::vector<std::string> words;
+    std::string pending;
+
+    auto flush_pending = [&]() {
+        if (!pending.empty()) {
+            words.push_back(pending);
+            pending.clear();
+        }
+    };
+
+    size_t pos = 0;
+    while (pos < text.size()) {
+        uint32_t cp = 0;
+        std::string piece;
+        utf8_next_codepoint(text, pos, cp, piece);
+
+        if (cp < 0x80 && std::isspace((unsigned char) cp)) {
+            flush_pending();
+            continue;
+        }
+
+        if (is_asr_force_align_punct(cp)) {
+            if (!pending.empty()) {
+                pending += piece;
+            } else if (!words.empty()) {
+                words.back() += piece;
+            }
+            continue;
+        }
+
+        if (is_asr_force_align_cjk(cp)) {
+            flush_pending();
+            words.push_back(piece);
+            continue;
+        }
+
+        pending += piece;
+    }
+
+    flush_pending();
+    return words;
+}
+
+static uint16_t read_le_u16(const raw_buffer & data, size_t off) {
+    return (uint16_t) data[off] | ((uint16_t) data[off + 1] << 8);
+}
+
+static uint32_t read_le_u32(const raw_buffer & data, size_t off) {
+    return (uint32_t) data[off] |
+           ((uint32_t) data[off + 1] << 8) |
+           ((uint32_t) data[off + 2] << 16) |
+           ((uint32_t) data[off + 3] << 24);
+}
+
+static double wav_duration_seconds(const raw_buffer & data) {
+    if (data.size() < 12 ||
+        std::memcmp(data.data(), "RIFF", 4) != 0 ||
+        std::memcmp(data.data() + 8, "WAVE", 4) != 0) {
+        return -1.0;
+    }
+
+    uint16_t channels = 0;
+    uint32_t sample_rate = 0;
+    uint16_t bits_per_sample = 0;
+    uint32_t data_size = 0;
+
+    size_t off = 12;
+    while (off + 8 <= data.size()) {
+        const char * chunk_id = (const char *) data.data() + off;
+        const uint32_t chunk_size = read_le_u32(data, off + 4);
+        const size_t chunk_data = off + 8;
+        if (chunk_data + chunk_size > data.size()) {
+            break;
+        }
+
+        if (std::memcmp(chunk_id, "fmt ", 4) == 0 && chunk_size >= 16) {
+            channels = read_le_u16(data, chunk_data + 2);
+            sample_rate = read_le_u32(data, chunk_data + 4);
+            bits_per_sample = read_le_u16(data, chunk_data + 14);
+        } else if (std::memcmp(chunk_id, "data", 4) == 0) {
+            data_size = chunk_size;
+        }
+
+        off = chunk_data + chunk_size + (chunk_size & 1);
+    }
+
+    const uint32_t bytes_per_sample = (uint32_t) channels * ((uint32_t) bits_per_sample / 8);
+    if (sample_rate == 0 || bytes_per_sample == 0 || data_size == 0) {
+        return -1.0;
+    }
+
+    return (double) data_size / (double) bytes_per_sample / (double) sample_rate;
+}
+
+static std::string normalize_asr_language(std::string language) {
+    std::transform(language.begin(), language.end(), language.begin(),
+                   [](unsigned char c) { return (char) std::tolower(c); });
+    return language;
+}
 
 json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
     if (!response_body.contains("input")) {
@@ -608,8 +765,8 @@ json convert_transcriptions_to_chatcmpl(
     }
     std::string align_text = json_value(inp_body, "text", std::string());
     std::string timestamp_token = json_value(inp_body, "timestamp_token", std::string("<timestamp>"));
-    if (response_format != "json") {
-        throw std::invalid_argument("Only 'json' response_format is supported for transcription");
+    if (response_format != "json" && response_format != "verbose_json") {
+        throw std::invalid_argument("Only 'json' and 'verbose_json' response_format are supported for transcription");
     }
     const common_chat_prompt_preset preset = common_chat_get_asr_prompt(tmpls);
     const std::string tmpl_src = tmpls ? common_chat_templates_source(tmpls) : "";
@@ -622,9 +779,7 @@ json convert_transcriptions_to_chatcmpl(
         }
         prompt.clear();
         prompt += get_media_marker();
-        std::istringstream iss(align_text);
-        std::string word;
-        while (iss >> word) {
+        for (const std::string & word : split_asr_force_align_text(align_text)) {
             asr_force_align_words.push_back(word);
             prompt += word;
             prompt += timestamp_token;
@@ -658,6 +813,14 @@ json convert_transcriptions_to_chatcmpl(
         chatcmpl_body["asr_force_align_words"] = asr_force_align_words;
         chatcmpl_body["timestamp_token"] = timestamp_token;
         chatcmpl_body["asr_force_align_raw_prompt"] = prompt;
+        chatcmpl_body["asr_text"] = align_text;
+        if (!language.empty()) {
+            chatcmpl_body["asr_language"] = normalize_asr_language(language);
+        }
+        const double duration = wav_duration_seconds(it->second.data);
+        if (duration >= 0.0) {
+            chatcmpl_body["asr_duration"] = duration;
+        }
     }
 
     // because input from form-data, everything is string, we need to correct the types here

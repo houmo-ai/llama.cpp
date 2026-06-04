@@ -10,6 +10,7 @@
 #include "speculative.h"
 #include "server-common.h"
 
+#include <cmath>
 #include <cstdlib>
 
 using json = nlohmann::ordered_json;
@@ -363,6 +364,9 @@ task_params server_task::params_from_json_cmpl(
     params.asr_force_align_words =
         json_value(data, "asr_force_align_words",
             json_value(data, "force_align_words", std::vector<std::string>()));
+    params.asr_text = json_value(data, "asr_text", std::string());
+    params.asr_language = json_value(data, "asr_language", std::string());
+    params.asr_duration = json_value(data, "asr_duration", -1.0);
     params.asr_force_align_timestamp_segment_ms =
         json_value_i32_or_string(data, "timestamp_segment_time_ms",
             json_value_i32_or_string(data, "timestamp_segment_time", defaults.asr_force_align_timestamp_segment_ms));
@@ -1220,9 +1224,32 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp_stream() {
 }
 
 json server_task_result_cmpl_final::to_json_oaicompat_asr() {
-    const std::string text = oaicompat_msg.content.empty() ? content : oaicompat_msg.content;
-    json event = json {
-        {"type",  "transcript.text.done"},
+    const std::string text = generation_params.asr_force_align && !generation_params.asr_text.empty()
+        ? generation_params.asr_text
+        : (oaicompat_msg.content.empty() ? content : oaicompat_msg.content);
+
+    if (!asr_force_align_data.empty()) {
+        json res = json {
+            {"task",  "transcribe"},
+            {"text",  text},
+            {"words", asr_force_align_data},
+        };
+
+        if (!generation_params.asr_language.empty()) {
+            res["language"] = generation_params.asr_language;
+        }
+        if (generation_params.asr_duration >= 0.0) {
+            res["duration"] = generation_params.asr_duration;
+            res["usage"] = json {
+                {"type",    "duration"},
+                {"seconds", (int) std::ceil(generation_params.asr_duration)},
+            };
+        }
+        return res;
+    }
+
+    json res = json {
+        {"text", text},
         {"usage", json {
             {"type",         "tokens"},
             {"input_tokens",  n_prompt_tokens},
@@ -1231,12 +1258,7 @@ json server_task_result_cmpl_final::to_json_oaicompat_asr() {
             {"input_tokens_details", json { {"cached_tokens", n_prompt_tokens_cache} }},
         }},
     };
-    if (!asr_force_align_data.empty()) {
-        event["data"] = asr_force_align_data;
-    } else {
-        event["text"] = text;
-    }
-    return event;
+    return res;
 }
 
 json server_task_result_cmpl_final::to_json_anthropic() {

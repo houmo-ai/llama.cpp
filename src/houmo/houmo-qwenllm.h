@@ -1,4 +1,7 @@
 #include "houmo-llmodel.h"
+
+#include <functional>
+
 /**
  * @brief HoumoQwenLLM is the derived class for single-card HouMo model.
  */
@@ -24,5 +27,9 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
                         std::map<int, float *> &embeddings) override;
     virtual bool is_embedding() override;
   private:
+    using prefill_round_callback = std::function<void(size_t, int32_t, const float *, size_t)>;
+    int houmo_prefill_impl(std::vector<llama_token> &tokens, int seq_id, float *logits,
+                           const prefill_round_callback &on_round_output);
+
     std::map<int32_t, std::vector<uint16_t>> input_embedding_ids_;
 };

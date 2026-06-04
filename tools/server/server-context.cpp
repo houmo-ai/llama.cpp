@@ -27,7 +27,6 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cinttypes>
 #include <exception>
@@ -50,10 +49,6 @@ static std::vector<int32_t> fix_asr_force_align_timestamps(const std::vector<int
         }
     }
     return res;
-}
-
-static double asr_force_align_time_s(int32_t timestamp_ms) {
-    return std::round(timestamp_ms / 10.0) / 100.0;
 }
 
 static std::string format_asr_force_align_output(
@@ -89,9 +84,9 @@ static json format_asr_force_align_data(
             break;
         }
         data.push_back(json {
-            {"text",       words[i]},
-            {"start_time", asr_force_align_time_s(ts[p])},
-            {"end_time",   asr_force_align_time_s(ts[p + 1])},
+            {"word",  words[i]},
+            {"start", ts[p] / 1000.0},
+            {"end",   ts[p + 1] / 1000.0},
         });
     }
     return data;
