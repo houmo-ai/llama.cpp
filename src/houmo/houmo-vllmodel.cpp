@@ -121,6 +121,7 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         } else {
             current_length = prefill_length_;
         }
+        PERF_START(PREFILL_SETINPUT_ONCE);
         auto input_data =
             prefill_input_map_.at(prefill_model_->GetInputName(0));
         input_data.Buffer().CopyFromHost(input_embedding_ids_[seq_id].data() +
@@ -158,6 +159,8 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                  prefill_current_length);
         if (round == 0)
             set_kv_cache_for_prefill(seq_id);
+        PERF_STOP(PREFILL_SETINPUT_ONCE);
+        PERF_START(PREFILL_RUN_ONCE);
         auto status = prefill_model_->Run();
         if (status != tcim::Status::OK) {
             LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
@@ -170,16 +173,19 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             reset_position_ids(seq_id);
             return 2;
         }
+        PERF_STOP(PREFILL_RUN_ONCE);
         valid_length += prefill_length_;
     }
     decode_valid_length_[seq_id] = input_echo_len + kv_offset;
     memory_->seq_add(seq_id, 0, 0, input_echo_len);
+    PERF_START(PREFILL_GETOUTPUT);
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
     // 转浮点
     auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
     prefill_output_data.CastTo(prefill_output_float);
     memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+    PERF_STOP(PREFILL_GETOUTPUT);
     // reset input_embedding_ids_
     reset_position_ids(seq_id);
     return 0;
@@ -310,19 +316,32 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
             batch_id = 0;
         position_vec[batch_id]= position_indexs_[seq_ids[k]];
     }
-    auto time_position_id =
-        decode_input_map_.at(decode_model_->GetInputName(1));
-    auto hight_position_id =
-        decode_input_map_.at(decode_model_->GetInputName(2));
-    auto width_position_id =
-        decode_input_map_.at(decode_model_->GetInputName(3));
 
-    set_input_data(time_position_id, position_vec);
-    set_input_data(hight_position_id, position_vec);
-    set_input_data(width_position_id, position_vec);
-    decode_model_->SetInput(decode_model_->GetInputName(1), time_position_id);
-    decode_model_->SetInput(decode_model_->GetInputName(2), hight_position_id);
-    decode_model_->SetInput(decode_model_->GetInputName(3), width_position_id);
+    const std::string time_position_name = decode_model_->GetInputName(1);
+    const std::string height_position_name = decode_model_->GetInputName(2);
+    const std::string width_position_name = decode_model_->GetInputName(3);
+
+    for (int batch_id = 0; batch_id < n_decode_batch_; ++batch_id) {
+        std::string time_name = time_position_name;
+        std::string height_name = height_position_name;
+        std::string width_name = width_position_name;
+        if (batch_id > 0) {
+            time_name += "_batch" + std::to_string(batch_id);
+            height_name += "_batch" + std::to_string(batch_id);
+            width_name += "_batch" + std::to_string(batch_id);
+        }
+
+        auto time_position_id = decode_input_map_.at(time_name);
+        auto height_position_id = decode_input_map_.at(height_name);
+        auto width_position_id = decode_input_map_.at(width_name);
+
+        set_input_data(time_position_id, 1, position_vec[batch_id]);
+        set_input_data(height_position_id, 1, position_vec[batch_id]);
+        set_input_data(width_position_id, 1, position_vec[batch_id]);
+        decode_model_->SetInput(time_name, time_position_id);
+        decode_model_->SetInput(height_name, height_position_id);
+        decode_model_->SetInput(width_name, width_position_id);
+    }
 
     // 4. set kv_cache
     set_kv_cache_for_decode(seq_ids);

@@ -562,7 +562,7 @@ struct server_slot {
         double n_prompt_second = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
         const double t_gen        =       t_token_generation / n_decoded;
         const double n_gen_second = 1e3 / t_token_generation * n_decoded;
-        const double percent_used = (n_prompt_tokens_processed + n_decoded) / (double) n_ctx * 100.0;
+        const double percent_used = (task->n_tokens() + n_decoded) / (double) n_ctx * 100.0;
 
         PerfRegistry::Instance().PrintAll();
 

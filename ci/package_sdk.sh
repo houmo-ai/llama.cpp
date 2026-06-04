@@ -101,11 +101,43 @@ verify_elf_64k_alignment() {
         return 0
     fi
 
-    if readelf -l "$target" 2>/dev/null | awk '$1=="LOAD"{ if (tolower($NF) != "0x10000") bad=1 } END { exit bad ? 1 : 0 }'; then
+    if readelf -W -l "$target" 2>/dev/null | awk '$1=="LOAD"{ if (tolower($NF) != "0x10000") bad=1 } END { exit bad ? 1 : 0 }'; then
         echo "Verified 64K ELF LOAD alignment: $target"
     else
         echo "Warning: non-64K ELF LOAD alignment detected after patchelf: $target"
     fi
+}
+
+get_strip_tool() {
+    if [ "$ARCH" = "aarch64" ] && command -v aarch64-linux-gnu-strip >/dev/null 2>&1; then
+        echo "aarch64-linux-gnu-strip"
+    elif command -v strip >/dev/null 2>&1; then
+        echo "strip"
+    else
+        echo ""
+    fi
+}
+
+strip_elf_binary() {
+    local target="$1"
+    local strip_tool
+
+    if [ ! -f "$target" ]; then
+        return 0
+    fi
+
+    if ! file "$target" 2>/dev/null | grep -q "ELF"; then
+        return 0
+    fi
+
+    strip_tool=$(get_strip_tool)
+    if [ -z "$strip_tool" ]; then
+        echo "Warning: strip tool not found, skip stripping: $target"
+        return 0
+    fi
+
+    echo "Stripping ELF binary: $target"
+    "$strip_tool" --strip-unneeded "$target"
 }
 
 # 检测主机页大小（仅用于日志），具体对齐策略由 SDK_ALIGN_MODE 决定
@@ -316,6 +348,7 @@ package_llama() {
     cp build/bin/llama-gguf-split "$release_dir/bin/" || true
     cp build/bin/llama-cli "$release_dir/bin/" || true
     for file in "$release_dir/bin/"*; do
+        strip_elf_binary "$file"
         patchelf_set_rpath '$ORIGIN/../lib' "$file"
         verify_elf_64k_alignment "$file"
     done
