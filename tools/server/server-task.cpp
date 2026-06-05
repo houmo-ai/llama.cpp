@@ -538,6 +538,7 @@ task_params server_task::params_from_json_cmpl(
         params.sampling.generation_prompt = params.chat_parser_params.generation_prompt;
         SRV_DBG("Generation prompt: '%s'\n", params.chat_parser_params.generation_prompt.c_str());
         params.chat_parser_params.parse_tool_calls = json_value(data, "parse_tool_calls", false);
+        params.chat_parser_params.assistant_prefill = json_value(data, "assistant_prefill", false);
         if (data.contains("chat_parser")) {
             params.chat_parser_params.parser.load(data.at("chat_parser").get<std::string>());
         }

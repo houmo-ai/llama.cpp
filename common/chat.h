@@ -220,6 +220,7 @@ struct common_chat_parser_params {
     std::string             generation_prompt;
     bool                    parse_tool_calls     = true;
     bool                    echo                 = false;  // Include assistant prefilled msg in output
+    bool                    assistant_prefill    = false;  // Final assistant message is used as prefill/continuation
     bool                    debug                = false;  // Enable debug output for PEG parser
     common_peg_arena        parser               = {};
     common_chat_parser_params() = default;

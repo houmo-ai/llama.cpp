@@ -389,6 +389,24 @@ struct server_task_result_cmpl_final : server_task_result {
         is_updated = true;
         oaicompat_msg = state.update_chat_msg(content, false, oaicompat_msg_diffs);
 
+        if (!state.chat_parser_params.echo && state.chat_parser_params.assistant_prefill) {
+            common_chat_msg delta_msg;
+            delta_msg.role = oaicompat_msg.role.empty() ? "assistant" : oaicompat_msg.role;
+
+            for (const auto & diff : oaicompat_msg_diffs) {
+                delta_msg.reasoning_content += diff.reasoning_content_delta;
+                delta_msg.content += diff.content_delta;
+                if (diff.tool_call_index != std::string::npos) {
+                    if (delta_msg.tool_calls.size() <= diff.tool_call_index) {
+                        delta_msg.tool_calls.resize(diff.tool_call_index + 1);
+                    }
+                    delta_msg.tool_calls[diff.tool_call_index] = diff.tool_call_delta;
+                }
+            }
+
+            oaicompat_msg = std::move(delta_msg);
+        }
+
         oai_resp_id = state.oai_resp_id;
         oai_resp_reasoning_id = state.oai_resp_reasoning_id;
         oai_resp_message_id = state.oai_resp_message_id;

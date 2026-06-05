@@ -1235,6 +1235,7 @@ json oaicompat_chat_params_parse(
     llama_params["grammar_triggers"]  = grammar_triggers;
     llama_params["preserved_tokens"]  = chat_params.preserved_tokens;
     llama_params["generation_prompt"] = chat_params.generation_prompt;
+    llama_params["assistant_prefill"] = inputs.continue_final_message != COMMON_CHAT_CONTINUATION_NONE;
     for (const auto & stop : chat_params.additional_stops) {
         llama_params["stop"].push_back(stop);
     }
