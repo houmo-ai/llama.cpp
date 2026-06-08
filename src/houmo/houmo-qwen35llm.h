@@ -169,17 +169,17 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     };
 
     struct PrefillSnapshot {
-        std::vector<llama_token> tokens;               // cumulative tokens processed
+        std::vector<llama_token> tokens;
         // Fixed-size pre-allocated checkpoint pool (size == checkpoint_max_count_).
-        // Slots are reused via the used flag — no dynamic alloc/free per save.
         std::vector<StateCheckpoint> checkpoint_pool;
         // Position → pool slot index for ordered lookup (upper_bound, gap eviction).
         std::map<int, size_t> checkpoint_index;
-        int last_processed_pos = 0;                    // state cache valid up to this position
+        int last_processed_pos = 0;           // state cache valid up to this position
         bool valid = false;
-        // tokens 中保证为真实 token id 的最小绝对位置。
-        // [0, first_safe_position) 可能是代表 vision embedding 的占位 0，
-        // 不能作为 gap-replay 起点。0 表示整段历史均为真实文本。
+        // vision sentinel 占位 token 的绝对区间：
+        // [first_unsafe_position, first_safe_position)。该区间不能通过
+        // text embedding replay。0/0 表示当前历史没有 vision sentinel。
+        int first_unsafe_position = 0;
         int first_safe_position = 0;
     };
     std::map<int, PrefillSnapshot> prefill_snapshots_;
@@ -193,7 +193,22 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     std::map<int, VerifyPending> pending_verify_;
 
     int commit_verify_accept(int seq_id, int accepted_steps);
-    int copy_verify_state_to_cache(int seq_id, int accept_pos);
+    int bind_verify_state_to_cache(int seq_id, int accept_pos);
+    std::string state_output_name(size_t idx, int accept_pos) const;
+
+    // State cache initialization helpers.  Keep init_state_cache() as a
+    // high-level orchestration function and isolate model-name discovery,
+    // tensor allocation, and snapshot initialization.
+    void reset_state_cache_metadata();
+    std::vector<std::string> collect_decode_output_names() const;
+    std::vector<std::string> collect_state_split_outputs(
+      const std::vector<std::string> &all_output_names,
+      const std::string &bare_name) const;
+    void discover_state_cache_bindings(
+      const std::vector<std::string> &all_output_names);
+    void init_checkpoint_tensor_indices();
+    void allocate_state_cache_entries(int seq_max);
+    void init_state_cache_snapshots();
 
     // Mark all slots as free and clear the index.  Pre-allocated tensor
     // buffers are kept — only the occupancy bookkeeping is reset.
@@ -208,7 +223,7 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     // Find a free slot (or evict the gap-best in-use slot) and return its
     // index inside snapshot.checkpoint_pool.  Caller is responsible for
     // populating the slot and inserting into checkpoint_index.
-    size_t acquire_checkpoint_slot(PrefillSnapshot &snapshot, int position);
+    size_t acquire_checkpoint_slot(PrefillSnapshot &snapshot);
     // Mark all slots whose position > after_pos as free and erase from index.
     void release_checkpoints_after(PrefillSnapshot &snapshot, int after_pos);
 };

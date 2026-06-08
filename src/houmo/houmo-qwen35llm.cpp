@@ -117,6 +117,28 @@ void zero_tensor(tcim::Tensor &tensor) {
     }
 }
 
+bool is_state_cache_name(const std::string &name) {
+    return name.find("conv_cache") != std::string::npos ||
+           name.find("recurrent_state") != std::string::npos;
+}
+
+std::string make_state_output_name(const std::string &input_name) {
+    std::string output_name = input_name;
+    auto conv_pos = output_name.find("past_conv_cache_");
+    if (conv_pos != std::string::npos) {
+        output_name.replace(conv_pos, std::strlen("past_conv_cache_"),
+                            "conv_cache_out_");
+        return output_name;
+    }
+
+    auto rec_pos = output_name.find("past_recurrent_state_");
+    if (rec_pos != std::string::npos) {
+        output_name.replace(rec_pos, std::strlen("past_recurrent_state_"),
+                            "recurrent_state_out_");
+    }
+    return output_name;
+}
+
 
 } // namespace
 
@@ -151,6 +173,22 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
             checkpoint_max_count_ = 80;
         }
     }
+
+    if (const char *env = std::getenv("LLAMA_CHECKPOINT_MAX_COUNT")) {
+        errno = 0;
+        char *end = nullptr;
+        long v = std::strtol(env, &end, 10);
+        if (errno == 0 && end != env && *end == '\0' && v > 0 && v <= 80) {
+            checkpoint_max_count_ = static_cast<size_t>(v);
+            LLAMA_LOG_INFO("%s: set checkpoint_max_count_ from env LLAMA_CHECKPOINT_MAX_COUNT=%zu\n",
+                           __func__, checkpoint_max_count_);
+        } else {
+            LLAMA_LOG_WARN("%s: invalid LLAMA_CHECKPOINT_MAX_COUNT='%s', keep default=%zu\n",
+                           __func__, env, checkpoint_max_count_);
+        }
+    }
+
+
     model_inout_init(seq_max);
     if (is_embedding()) {
         memory_ = nullptr;
@@ -186,52 +224,93 @@ void HoumoQwen35LLM::resolve_input_names() {
 
 
 void HoumoQwen35LLM::init_state_cache(int seq_max) {
+    reset_state_cache_metadata();
+    if (decode_model_ == nullptr) {
+        return;
+    }
+
+    const auto all_output_names = collect_decode_output_names();
+    discover_state_cache_bindings(all_output_names);
+    if (state_cache_names_.empty()) {
+        return;
+    }
+
+    decode_verify_seq_ =
+        decode_input_map_[decode_model_->GetInputName(0)].Info().Shape()[1];
+    LLAMA_LOG_INFO("%s: detected verify-style decode model, verify_seq=%d\n",
+                   __func__, decode_verify_seq_);
+
+    init_checkpoint_tensor_indices();
+    allocate_state_cache_entries(seq_max);
+
+    if (device_ids_.size() > 1) {
+        LLAMA_LOG_INFO("%s: using host checkpoint storage for multi device "
+                       "model, device_ids_.size() = %zu\n",
+                       __func__, device_ids_.size());
+        checkpoint_storage_ = CheckpointStorage::kHost;
+    }
+
+    init_state_cache_snapshots();
+}
+
+void HoumoQwen35LLM::reset_state_cache_metadata() {
     state_cache_names_.clear();
     state_cache_output_names_.clear();
     state_cache_split_output_names_.clear();
+    checkpoint_tensor_indices_.clear();
     decode_verify_seq_ = 1;
     state_cache_.clear();
     state_cache_initialized_.clear();
     prefill_snapshots_.clear();
+}
+
+std::vector<std::string> HoumoQwen35LLM::collect_decode_output_names() const {
+    std::vector<std::string> names;
     if (decode_model_ == nullptr) {
-        return;
+        return names;
     }
-    // 收集 decode 模型所有输出名，便于探测 verify 形态下的 split 输出
-    // (conv_cache_out_<layer>_<pos> / recurrent_state_out_<layer>_<pos>)。
-    std::vector<std::string> all_output_names;
-    all_output_names.reserve(decode_model_->GetOutputNum());
+    names.reserve(decode_model_->GetOutputNum());
     for (size_t i = 0; i < decode_model_->GetOutputNum(); ++i) {
-        all_output_names.push_back(decode_model_->GetOutputName(i));
+        names.push_back(decode_model_->GetOutputName(i));
     }
-    auto collect_split_outputs = [&](const std::string &bare_name)
-        -> std::vector<std::string> {
-        std::vector<std::pair<int, std::string>> indexed;
-        const std::string prefix = bare_name + "_";
-        for (const auto &out : all_output_names) {
-            if (out.size() <= prefix.size() ||
-                out.compare(0, prefix.size(), prefix) != 0) {
-                continue;
-            }
-            const std::string suffix = out.substr(prefix.size());
-            if (suffix.empty() ||
-                !std::all_of(suffix.begin(), suffix.end(), ::isdigit)) {
-                continue;
-            }
-            try {
-                indexed.emplace_back(std::stoi(suffix), out);
-            } catch (...) {
-                continue;
-            }
+    return names;
+}
+
+std::vector<std::string> HoumoQwen35LLM::collect_state_split_outputs(
+    const std::vector<std::string> &all_output_names,
+    const std::string &bare_name) const {
+    std::vector<std::pair<int, std::string>> indexed;
+    const std::string prefix = bare_name + "_";
+    for (const auto &out : all_output_names) {
+        if (out.size() <= prefix.size() ||
+            out.compare(0, prefix.size(), prefix) != 0) {
+            continue;
         }
-        std::sort(indexed.begin(), indexed.end(),
-                  [](const auto &a, const auto &b) { return a.first < b.first; });
-        std::vector<std::string> ordered;
-        ordered.reserve(indexed.size());
-        for (auto &p : indexed) {
-            ordered.push_back(std::move(p.second));
+        const std::string suffix = out.substr(prefix.size());
+        if (suffix.empty() ||
+            !std::all_of(suffix.begin(), suffix.end(), ::isdigit)) {
+            continue;
         }
-        return ordered;
-    };
+        try {
+            indexed.emplace_back(std::stoi(suffix), out);
+        } catch (...) {
+            continue;
+        }
+    }
+
+    std::sort(indexed.begin(), indexed.end(),
+              [](const auto &a, const auto &b) { return a.first < b.first; });
+
+    std::vector<std::string> ordered;
+    ordered.reserve(indexed.size());
+    for (auto &p : indexed) {
+        ordered.push_back(std::move(p.second));
+    }
+    return ordered;
+}
+
+void HoumoQwen35LLM::discover_state_cache_bindings(
+    const std::vector<std::string> &all_output_names) {
     auto add_name = [&](const std::string &name, const std::string &output_name,
                         std::vector<std::string> &&split_outputs) {
         auto iter = std::find(state_cache_names_.begin(), state_cache_names_.end(), name);
@@ -243,56 +322,37 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
     };
     for (size_t idx = 0; idx < decode_model_->GetInputNum(); ++idx) {
         auto input_name = decode_model_->GetInputName(idx);
-        if (input_name.find("conv_cache") != std::string::npos ||
-            input_name.find("recurrent_state") != std::string::npos) {
-            std::string output_name;
-            if (input_name.find("conv_cache") != std::string::npos) {
-                output_name = input_name;
-                auto pos = output_name.find("past_conv_cache_");
-                if (pos != std::string::npos) {
-                    output_name.replace(pos, std::strlen("past_conv_cache_"),
-                                        "conv_cache_out_");
-                }
-            } else if (input_name.find("recurrent_state") != std::string::npos) {
-                output_name = input_name;
-                auto pos = output_name.find("past_recurrent_state_");
-                if (pos != std::string::npos) {
-                    output_name.replace(pos, std::strlen("past_recurrent_state_"),
-                                        "recurrent_state_out_");
-                }
-            }
-            // 优先看 bare 名是否真的存在于 decode 输出里 (普通 1-token decode);
-            // 否则按 verify 形态尝试 <bare>_<pos> 收集 split 输出。
-            std::vector<std::string> split_outs;
-            const bool has_bare =
-                std::find(all_output_names.begin(), all_output_names.end(),
-                          output_name) != all_output_names.end();
-            if (!has_bare) {
-                split_outs = collect_split_outputs(output_name);
-            }
-            add_name(input_name, output_name, std::move(split_outs));
+        if (!is_state_cache_name(input_name)) {
+            continue;
         }
+
+        const std::string output_name = make_state_output_name(input_name);
+        // 优先看 bare 名是否真的存在于 decode 输出里 (普通 1-token decode);
+        // 否则按 verify 形态尝试 <bare>_<pos> 收集 split 输出。
+        std::vector<std::string> split_outs;
+        const bool has_bare =
+            std::find(all_output_names.begin(), all_output_names.end(),
+                      output_name) != all_output_names.end();
+        if (!has_bare) {
+            split_outs = collect_state_split_outputs(all_output_names, output_name);
+        }
+        add_name(input_name, output_name, std::move(split_outs));
     }
-    if (state_cache_names_.empty()) {
-        return;
-    }
-    decode_verify_seq_ =
-        decode_input_map_[decode_model_->GetInputName(0)].Info().Shape()[1];
-    LLAMA_LOG_INFO("%s: detected verify-style decode model, verify_seq=%d\n",
-                   __func__, decode_verify_seq_);
-    // Build checkpoint_tensor_indices_: only conv_cache and recurrent_state
-    // tensors need to be saved/restored in checkpoints.  KV cache tensors
-    // are managed by the KV cache system and must be excluded.
+}
+
+void HoumoQwen35LLM::init_checkpoint_tensor_indices() {
     checkpoint_tensor_indices_.clear();
     for (size_t idx = 0; idx < state_cache_names_.size(); ++idx) {
         const auto &name = state_cache_names_[idx];
-        if (name.find("conv_cache") != std::string::npos ||
-            name.find("recurrent_state") != std::string::npos) {
+        if (is_state_cache_name(name)) {
             checkpoint_tensor_indices_.push_back(idx);
         }
     }
     LLAMA_LOG_INFO("%s: checkpoint_tensor_indices_ size=%zu (total state_cache_names_=%zu)\n",
                    __func__, checkpoint_tensor_indices_.size(), state_cache_names_.size());
+}
+
+void HoumoQwen35LLM::allocate_state_cache_entries(int seq_max) {
     int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
     size = std::max(size, n_decode_batch_);
     for (int i = 0; i < size; ++i) {
@@ -308,16 +368,9 @@ void HoumoQwen35LLM::init_state_cache(int seq_max) {
         state_cache_[i] = std::move(entry);
         state_cache_initialized_[i] = false;
     }
+}
 
-    if (device_ids_.size() > 1) {
-        LLAMA_LOG_INFO("%s: using host checkpoint storage for multi device "
-                       "model, device_ids_.size() = %zu\n",
-                       __func__, device_ids_.size());
-        checkpoint_storage_ = CheckpointStorage::kHost;
-        checkpoint_max_count_ *= 2;
-    }
-
-    // Zero-initialize all state cache entries so model I/O is connected.
+void HoumoQwen35LLM::init_state_cache_snapshots() {
     for (auto &[seq_id, entry] : state_cache_) {
         for (size_t idx = 0; idx < entry.tensors.size(); ++idx) {
             zero_tensor(entry.tensors[idx]);
@@ -397,43 +450,18 @@ void HoumoQwen35LLM::init_checkpoint_pool(int seq_id) {
                        ? "device" : "host");
 }
 
-size_t HoumoQwen35LLM::acquire_checkpoint_slot(PrefillSnapshot &snapshot,
-                                                int position) {
+size_t HoumoQwen35LLM::acquire_checkpoint_slot(PrefillSnapshot &snapshot) {
     // Prefer a free slot — no eviction needed.
     for (size_t i = 0; i < snapshot.checkpoint_pool.size(); ++i) {
         if (!snapshot.checkpoint_pool[i].used) {
             return i;
         }
     }
-    // All slots in use — evict the in-use slot whose distance to its nearest
-    // neighbor (by position) is smallest, but never the lowest or highest
-    // checkpoint (preserve maximal rollback range).
+    // All slots in use — evict from the front.  Prefix reuse normally needs
+    // the latest reachable checkpoint, and for vision flows the safe
+    // post-vision checkpoint must not be displaced by middle-gap balancing.
     auto &index = snapshot.checkpoint_index;
-    auto best_evict = index.end();
-    int best_gap = INT_MAX;
-    for (auto it = index.begin(); it != index.end(); ++it) {
-        if (it == index.begin()) continue;
-        auto next = std::next(it);
-        if (next == index.end()) continue;
-        auto prev = std::prev(it);
-        int gap = std::min(it->first - prev->first, next->first - it->first);
-        if (gap < best_gap) {
-            best_gap = gap;
-            best_evict = it;
-        }
-    }
-    // Fallback: if pool size <= 2 (degenerate), evict the closest neighbor
-    // of `position` to keep the spread balanced.
-    if (best_evict == index.end()) {
-        int best_dist = INT_MAX;
-        for (auto it = index.begin(); it != index.end(); ++it) {
-            int d = std::abs(it->first - position);
-            if (d < best_dist) {
-                best_dist = d;
-                best_evict = it;
-            }
-        }
-    }
+    auto best_evict = index.begin();
     size_t slot_idx = best_evict->second;
     LLAMA_LOG_INFO("%s: evicting checkpoint pos=%d slot=%zu (pool full, "
                    "max=%zu)\n",
@@ -503,31 +531,31 @@ void HoumoQwen35LLM::set_state_cache_for_decode(
         auto &tensors = iter->second.tensors;
         for (size_t idx = 0; idx < tensors.size(); ++idx) {
             decode_model_->SetDevInput(state_cache_names_[idx], tensors[idx]);
-            // 优先尝试 verify 形态下的 split 输出 (按 accept_pos 选择)，
-            // 退化到 bare 输出名。
-            std::string out_name;
-            if (idx < state_cache_split_output_names_.size() &&
-                !state_cache_split_output_names_[idx].empty()) {
-                const auto &split = state_cache_split_output_names_[idx];
-                const int last = static_cast<int>(split.size()) - 1;
-                int sel = accept_pos;
-                if (sel < 0) sel = 0;
-                if (sel > last) sel = last;
-                out_name = split[static_cast<size_t>(sel)];
-            } else if (idx < state_cache_output_names_.size()) {
-                out_name = state_cache_output_names_[idx];
-            }
+            const std::string out_name = state_output_name(idx, accept_pos);
             if (bind_outputs && !out_name.empty()) {
                 decode_model_->SetDevOutput(out_name, tensors[idx]);
-            } else if (bind_outputs && !out_name.empty()) {
-                LLAMA_LOG_DEBUG("%s: skip state output not in decode model: %s\n",
-                                __func__, out_name.c_str());
             }
         }
     }
 }
 
-int HoumoQwen35LLM::copy_verify_state_to_cache(int seq_id, int accept_pos) {
+std::string HoumoQwen35LLM::state_output_name(size_t idx, int accept_pos) const {
+    if (idx < state_cache_split_output_names_.size() &&
+        !state_cache_split_output_names_[idx].empty()) {
+        const auto &split = state_cache_split_output_names_[idx];
+        const int last = static_cast<int>(split.size()) - 1;
+        int sel = accept_pos;
+        if (sel < 0) sel = 0;
+        if (sel > last) sel = last;
+        return split[static_cast<size_t>(sel)];
+    }
+    if (idx < state_cache_output_names_.size()) {
+        return state_cache_output_names_[idx];
+    }
+    return "";
+}
+
+int HoumoQwen35LLM::bind_verify_state_to_cache(int seq_id, int accept_pos) {
     if (decode_model_ == nullptr) {
         return -1;
     }
@@ -538,25 +566,18 @@ int HoumoQwen35LLM::copy_verify_state_to_cache(int seq_id, int accept_pos) {
 
     auto &tensors = iter->second.tensors;
     for (size_t idx = 0; idx < tensors.size(); ++idx) {
-        std::string out_name;
-        if (idx < state_cache_split_output_names_.size() &&
-            !state_cache_split_output_names_[idx].empty()) {
-            const auto &split = state_cache_split_output_names_[idx];
-            const int last = static_cast<int>(split.size()) - 1;
-            int sel = accept_pos;
-            if (sel < 0) sel = 0;
-            if (sel > last) sel = last;
-            out_name = split[static_cast<size_t>(sel)];
-        } else if (idx < state_cache_output_names_.size()) {
-            out_name = state_cache_output_names_[idx];
-        }
-
+        const std::string out_name = state_output_name(idx, accept_pos);
         if (out_name.empty()) {
             continue;
         }
 
-        auto out = decode_model_->GetOutput(out_name);
-        out.CopyTo(tensors[idx]);
+        auto out = decode_model_->GetDevOutput(out_name);
+        if (decode_model_->SetDevInput(state_cache_names_[idx], out) != tcim::Status::OK) {
+            LLAMA_LOG_ERROR("%s: failed to bind verify state output '%s' to input '%s'\n",
+                            __func__, out_name.c_str(), state_cache_names_[idx].c_str());
+            return -1;
+        }
+        tensors[idx] = out;
     }
 
     state_cache_initialized_[seq_id] = true;
@@ -564,6 +585,7 @@ int HoumoQwen35LLM::copy_verify_state_to_cache(int seq_id, int accept_pos) {
 }
 
 int HoumoQwen35LLM::commit_verify_accept(int seq_id, int accepted_steps) {
+    PERF_START(commit_verify_accept);
     auto it = pending_verify_.find(seq_id);
     if (it == pending_verify_.end() || !it->second.valid) {
         return 0;
@@ -581,8 +603,8 @@ int HoumoQwen35LLM::commit_verify_accept(int seq_id, int accepted_steps) {
     const int32_t keep_pos = pending.start_pos + accepted_steps;
 
     if (!state_cache_names_.empty()) {
-        if (copy_verify_state_to_cache(seq_id, accepted_steps - 1) != 0) {
-            LLAMA_LOG_ERROR("%s: failed to copy verify state outputs seq_id=%d accept_pos=%d\n",
+        if (bind_verify_state_to_cache(seq_id, accepted_steps - 1) != 0) {
+            LLAMA_LOG_ERROR("%s: failed to bind verify state outputs seq_id=%d accept_pos=%d\n",
                             __func__, seq_id, accepted_steps - 1);
             return -1;
         }
@@ -606,9 +628,10 @@ int HoumoQwen35LLM::commit_verify_accept(int seq_id, int accepted_steps) {
     snapshot.valid = true;
 
     decode_valid_length_[seq_id] = keep_pos;
-    if (!state_cache_names_.empty()) {
-        save_state_checkpoint(seq_id, keep_pos);
-    }
+    // MTP verify commit only advances the current continuous decode state.
+    // Prefix-reuse checkpoints are maintained by prefill; saving a checkpoint
+    // for every verify accept adds heavy per-round copy overhead and is not
+    // needed for the speculative decode path.
 
     LLAMA_LOG_INFO("%s: seq_id=%d start_pos=%d accepted_steps=%d keep_pos=%d n_verify=%d\n",
                    __func__, seq_id, (int) pending.start_pos, accepted_steps,
@@ -617,6 +640,8 @@ int HoumoQwen35LLM::commit_verify_accept(int seq_id, int accepted_steps) {
     pending.valid = false;
     pending.tokens.clear();
     pending.n_verify = 0;
+    PERF_STOP(commit_verify_accept);
+
     return 0;
 }
 
@@ -668,7 +693,7 @@ void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
     if (existing != snapshot.checkpoint_index.end()) {
         slot_idx = existing->second;
     } else {
-        slot_idx = acquire_checkpoint_slot(snapshot, position);
+        slot_idx = acquire_checkpoint_slot(snapshot);
         snapshot.checkpoint_index[position] = slot_idx;
     }
 
@@ -790,17 +815,29 @@ void HoumoQwen35LLM::trim_snapshot_to_kv_offset(int seq_id,
     // prefill may mis-detect "continuation" and skip required rollback/
     // replay, causing duplicated-token state advance.
 
+    if (snapshot.first_unsafe_position > trim_pos) {
+        snapshot.first_unsafe_position = trim_pos;
+        changed = true;
+    }
+
     if (snapshot.first_safe_position > trim_pos) {
         snapshot.first_safe_position = trim_pos;
         changed = true;
     }
 
+    if (snapshot.first_safe_position <= snapshot.first_unsafe_position) {
+        snapshot.first_unsafe_position = 0;
+        snapshot.first_safe_position = 0;
+    }
+
     if (changed) {
         LLAMA_LOG_INFO(
             "%s: trimmed snapshot by boundary seq_id=%d valid_length=%d "
-            "tokens=%zu ckpts=%zu state_pos=%d first_safe_position=%d\n",
+            "tokens=%zu ckpts=%zu state_pos=%d first_unsafe_position=%d "
+            "first_safe_position=%d\n",
             __func__, seq_id, trim_pos, snapshot.tokens.size(),
             snapshot.checkpoint_index.size(), snapshot.last_processed_pos,
+            snapshot.first_unsafe_position,
             snapshot.first_safe_position);
     }
 }
@@ -1037,10 +1074,17 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             // Try to find a checkpoint at or before kv_offset.
             const auto &saved_history = snap_iter->second.tokens;
             int best_ckpt = -1;
+            const int first_unsafe_pos = snap_iter->second.first_unsafe_position;
+            const int first_safe_pos = snap_iter->second.first_safe_position;
 
             if (!snap_iter->second.checkpoint_index.empty()) {
-                best_ckpt =
-                    find_and_restore_best_checkpoint(seq_id, kv_offset);
+                const int min_ckpt = std::min(first_safe_pos, kv_offset);
+                auto ckpt_it = snap_iter->second.checkpoint_index.find(min_ckpt);
+                if (first_safe_pos > 0 && ckpt_it != snap_iter->second.checkpoint_index.end()) {
+                    best_ckpt = find_and_restore_best_checkpoint(seq_id, min_ckpt);
+                } else {
+                    best_ckpt = find_and_restore_best_checkpoint(seq_id, kv_offset);
+                }
             }
 
             // Determine the rollback position.
@@ -1054,27 +1098,29 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             // state cache is sequential and must see ALL tokens.
             int rollback_pos = (best_ckpt > 0) ? best_ckpt : 0;
 
-            // Sentinel guard: history positions in
-            // [0 .. first_safe_position) may be vision-sentinel zeros
-            // (placeholders for image embeddings), which cannot be replayed
-            // through the text embedding path.  If our rollback would land
-            // before first_safe_position the gap would contain sentinels
-            // and produce wrong state — treat this case as "unrecoverable"
-            // and degrade gracefully.
-            const int first_safe_pos = snap_iter->second.first_safe_position;
+            // Sentinel guard: only
+            // [first_unsafe_position .. first_safe_position) contains
+            // vision-sentinel zeros (placeholders for image embeddings).
+            // Text before the first vision chunk is still replayable.
+            // Block only if replay gap [rollback_pos .. kv_offset) overlaps
+            // the actual sentinel interval.
             const bool sentinel_block =
-                (rollback_pos < first_safe_pos) && (kv_offset > 0);
+                (first_unsafe_pos < first_safe_pos) &&
+                (rollback_pos < first_safe_pos) &&
+                (kv_offset > first_unsafe_pos);
 
             if (sentinel_block) {
                 LLAMA_LOG_WARN(
-                    "%s: rollback_pos=%d < first_safe_position=%d for "
-                    "seq_id=%d (vision sentinels in gap), refusing replay; "
+                    "%s: replay gap [%d,%d) overlaps vision sentinel "
+                    "[%d,%d) for seq_id=%d, refusing replay; "
                     "state will be inaccurate. should never come here\n",
-                    __func__, rollback_pos, first_safe_pos, seq_id);
+                    __func__, rollback_pos, kv_offset, first_unsafe_pos,
+                    first_safe_pos, seq_id);
                 effective_tokens = tokens;
                 state_cache_initialized_[seq_id] = true;
                 snap_iter->second.valid = false;
                 clear_all_checkpoints(snap_iter->second);
+                snap_iter->second.first_unsafe_position = 0;
                 snap_iter->second.first_safe_position = 0;
             } else if (rollback_pos < kv_offset) {
                 // Need gap tokens [rollback_pos .. kv_offset).
@@ -1123,6 +1169,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                     state_cache_initialized_[seq_id] = true;
                     snap_iter->second.valid = false;
                     clear_all_checkpoints(snap_iter->second);
+                    snap_iter->second.first_unsafe_position = 0;
                     snap_iter->second.first_safe_position = 0;
                 }
                 snap_iter->second.valid = false;
@@ -1162,6 +1209,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             state_cache_initialized_[seq_id] = true;
             auto snap_iter2 = prefill_snapshots_.find(seq_id);
             if (snap_iter2 != prefill_snapshots_.end()) {
+                snap_iter2->second.first_unsafe_position = 0;
                 snap_iter2->second.first_safe_position = 0;
             }
         }
@@ -1174,6 +1222,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             snap_iter->second.valid = false;
             clear_all_checkpoints(snap_iter->second);
             snap_iter->second.last_processed_pos = 0;
+            snap_iter->second.first_unsafe_position = 0;
             snap_iter->second.first_safe_position = 0;
         }
     } else {
@@ -1192,9 +1241,11 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         if (snap_iter2 != prefill_snapshots_.end()) {
             LLAMA_LOG_INFO(
                 "%s: cleanup-by-valid_length seq_id=%d kv_offset=%d "
-                "effective_kv_offset=%d first_safe_position=%d "
+                "effective_kv_offset=%d first_unsafe_position=%d "
+                "first_safe_position=%d "
                 "history=%zu ckpts=%zu\n",
                 __func__, seq_id, kv_offset, effective_kv_offset,
+                snap_iter2->second.first_unsafe_position,
                 snap_iter2->second.first_safe_position,
                 snap_iter2->second.tokens.size(),
                 snap_iter2->second.checkpoint_index.size());
@@ -1230,6 +1281,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         if (effective_kv_offset == 0) {
             // Pure-text prefill rebuilt from position 0; any prior
             // vision-sentinel boundary is stale and must be cleared.
+            snapshot.first_unsafe_position = 0;
             snapshot.first_safe_position = 0;
         }
         snapshot.last_processed_pos = effective_kv_offset;
@@ -1340,30 +1392,30 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
 
     decode_valid_length_[seq_id] = effective_kv_offset + static_cast<int32_t>(process_tokens);
-    PERF_START(PREFILL_GETOUTPUT);
-    tcim::Tensor prefill_output_data =
-        prefill_model_->GetOutput(prefill_output_names_[0]);
-    auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
-    PERF_STOP(PREFILL_GETOUTPUT);
-    PERF_START(PREFILL_CAST_OUTPUT);
-    prefill_output_data.CastTo(prefill_output_float);
-    PERF_STOP(PREFILL_CAST_OUTPUT);
     if (logits != nullptr) {
-        const size_t row_elems = static_cast<size_t>(n_vocab_);
-        const size_t row_bytes = row_elems * sizeof(float);
-        const size_t n_rows = row_bytes > 0 ? prefill_output_float.MemSize() / row_bytes : 0;
-        if (n_rows == 0) {
-            LLAMA_LOG_ERROR(
-                "%s: invalid prefill logits output size=%zu, n_vocab=%ld\n",
-                __func__, prefill_output_float.MemSize(), n_vocab_);
+        PERF_START(PREFILL_GETOUTPUT);
+        tcim::Tensor prefill_output_data =
+            prefill_model_->GetOutput(prefill_output_names_[0]);
+        const auto out_info = prefill_output_data.Info();
+        PERF_STOP(PREFILL_GETOUTPUT);
+
+        PERF_START(PREFILL_CAST_OUTPUT);
+        if (out_info.DataType() != tcim::DataType::FLOAT16) {
+            PERF_STOP(PREFILL_CAST_OUTPUT);
+            LLAMA_LOG_ERROR("%s: unsupported prefill output dtype=%d\n", __func__,
+                            static_cast<int>(out_info.DataType()));
             return -1;
         }
+        const size_t row_elems = static_cast<size_t>(n_vocab_);
+        const size_t n_rows = prefill_output_data.MemSize() /
+                    sizeof(ggml_fp16_t) / row_elems;
         const size_t row_idx = std::min<size_t>(
             n_rows - 1,
             current_length > 0 ? static_cast<size_t>(current_length - 1) : 0);
-        const float *src = static_cast<const float *>(prefill_output_float.Data()) +
-                           row_idx * row_elems;
-        memcpy(logits, src, row_bytes);
+        auto *src = static_cast<const ggml_fp16_t *>(prefill_output_data.Buffer().Data()) +
+                    row_idx * row_elems;
+        ggml_fp16_to_fp32_row(src, logits, static_cast<int64_t>(row_elems));
+        PERF_STOP(PREFILL_CAST_OUTPUT);
     }
 
     if (memory_) {
@@ -1410,6 +1462,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         if (effective_kv_offset == 0) {
             // Text prefill from offset 0 rebuilds history with real text
             // token ids, so any previous vision sentinel guard is stale.
+            snapshot.first_unsafe_position = 0;
             snapshot.first_safe_position = 0;
         }
 
@@ -1523,17 +1576,20 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
              tokens});
     }
 
-    // Compute total tokens, and the local position right after the LAST
-    // vision chunk completes.  Token positions in the snapshot covered by
-    // text-only suffix [last_vision_end_local .. total_tokens) are safe to
-    // replay (real ids), while [0 .. last_vision_end_local) may contain
-    // vision sentinels — checkpoints that fall before last_vision_end_local
-    // must NOT be used as a rollback point for gap replay.
+    // Compute total tokens, the local position where the first vision chunk
+    // starts, and the local position right after the LAST vision chunk
+    // completes. Only [first_vision_start_local .. last_vision_end_local)
+    // contains vision sentinels; text before the image is safe to replay.
     size_t total_tokens = 0;
+    size_t first_vision_start_local = 0;
     size_t last_vision_end_local = 0;
     for (auto &chunk : pending_chunks_[seq_id]) {
+        size_t chunk_start = total_tokens;
         total_tokens += chunk.size;
         if (chunk.is_vision) {
+            if (last_vision_end_local == 0) {
+                first_vision_start_local = chunk_start;
+            }
             last_vision_end_local = total_tokens;
         }
     }
@@ -1547,15 +1603,28 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         return 1;
     }
 
-    // Reset state for fresh vision prefill
+    // Prepare state for vision prefill.
     if (!state_cache_names_.empty()) {
-        state_cache_initialized_[seq_id] = false;
         auto snap_iter = prefill_snapshots_.find(seq_id);
-        if (snap_iter != prefill_snapshots_.end()) {
-            snap_iter->second.valid = false;
-            clear_all_checkpoints(snap_iter->second);
-            snap_iter->second.last_processed_pos = 0;
-            snap_iter->second.first_safe_position = 0;
+        if (kv_offset == 0) {
+            state_cache_initialized_[seq_id] = false;
+            if (snap_iter != prefill_snapshots_.end()) {
+                snap_iter->second.valid = false;
+                clear_all_checkpoints(snap_iter->second);
+                snap_iter->second.last_processed_pos = 0;
+                snap_iter->second.first_unsafe_position = 0;
+                snap_iter->second.first_safe_position = 0;
+            }
+        } else if (snap_iter != prefill_snapshots_.end()) {
+            if (snap_iter->second.last_processed_pos != kv_offset) {
+                LLAMA_LOG_WARN(
+                    "%s: state prefix may be stale before vision seq_id=%d "
+                    "kv_offset=%d last_processed_pos=%d; keeping prefix "
+                    "checkpoints for replay\n",
+                    __func__, seq_id, kv_offset,
+                    snap_iter->second.last_processed_pos);
+            }
+            state_cache_initialized_[seq_id] = true;
         }
     }
 
@@ -1648,7 +1717,7 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         // boundary at safe_pos_abs, so this branch fires reliably even
         // when total_tokens fits in a single prefill_length_ window.
         if (!safe_ckpt_saved && last_vision_end_local > 0 &&
-            valid_length >= safe_pos_abs && valid_length < total_end) {
+            valid_length >= safe_pos_abs) {
             save_state_checkpoint(seq_id, valid_length);
             safe_ckpt_saved = true;
             LLAMA_LOG_INFO(
@@ -1660,29 +1729,31 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
 
     decode_valid_length_[seq_id] = kv_offset + static_cast<int32_t>(total_tokens);
 
-    PERF_START(PREFILL_GETOUTPUT);
-    tcim::Tensor prefill_output_data =
-        prefill_model_->GetOutput(prefill_output_names_[0]);
-    auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
-    prefill_output_data.CastTo(prefill_output_float);
-    PERF_STOP(PREFILL_GETOUTPUT);
     if (logits != nullptr) {
-        const size_t row_elems = static_cast<size_t>(n_vocab_);
-        const size_t row_bytes = row_elems * sizeof(float);
-        const size_t n_rows = row_bytes > 0 ? prefill_output_float.MemSize() / row_bytes : 0;
-        if (n_rows == 0) {
-            LLAMA_LOG_ERROR(
-                "%s: invalid prefill logits output size=%zu, n_vocab=%ld\n",
-                __func__, prefill_output_float.MemSize(), n_vocab_);
+        PERF_START(PREFILL_GETOUTPUT);
+        tcim::Tensor prefill_output_data =
+            prefill_model_->GetOutput(prefill_output_names_[0]);
+        const auto out_info = prefill_output_data.Info();
+        PERF_STOP(PREFILL_GETOUTPUT);
+
+        PERF_START(PREFILL_CAST_OUTPUT);
+        if (out_info.DataType() != tcim::DataType::FLOAT16) {
+            PERF_STOP(PREFILL_CAST_OUTPUT);
+            LLAMA_LOG_ERROR("%s: unsupported prefill output dtype=%d\n", __func__,
+                            static_cast<int>(out_info.DataType()));
             clear_vision_cache(seq_id);
             return -1;
         }
+        const size_t row_elems = static_cast<size_t>(n_vocab_);
+        const size_t n_rows = prefill_output_data.MemSize() /
+                    sizeof(ggml_fp16_t) / row_elems;
         const size_t row_idx = std::min<size_t>(
             n_rows - 1,
             current_length > 0 ? static_cast<size_t>(current_length - 1) : 0);
-        const float *src = static_cast<const float *>(prefill_output_float.Data()) +
-                           row_idx * row_elems;
-        memcpy(logits, src, row_bytes);
+        auto *src = static_cast<const ggml_fp16_t *>(prefill_output_data.Buffer().Data()) +
+                    row_idx * row_elems;
+        ggml_fp16_to_fp32_row(src, logits, static_cast<int64_t>(row_elems));
+        PERF_STOP(PREFILL_CAST_OUTPUT);
     }
 
     if (memory_) {
@@ -1738,11 +1809,13 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
                 }
             }
         }
-        // first_safe_position is also an ABSOLUTE position — translate the
-        // local end-of-vision marker into the snapshot coordinate space.
+        // Sentinel range is also ABSOLUTE — translate the local vision
+        // markers into snapshot coordinate space.
+        snapshot.first_unsafe_position =
+            kv_offset + static_cast<int>(first_vision_start_local);
         snapshot.first_safe_position =
             kv_offset + static_cast<int>(last_vision_end_local);
-        if (valid_length > 0) {
+        if (valid_length > 0 && (!safe_ckpt_saved || valid_length == safe_pos_abs)) {
             save_state_checkpoint(seq_id, valid_length);
         }
         snapshot.last_processed_pos = valid_length;
@@ -1811,7 +1884,7 @@ int HoumoQwen35LLM::set_decode_rope_and_mask(const std::vector<int> &seq_ids) {
 int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
                                 std::vector<int> &seq_ids,
                                 std::vector<float *> logits) {
-    LLAMA_LOG_INFO("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
+    LLAMA_LOG_DEBUG("%s: seq_ids size = %zu, batches size = %zu\n", __func__,
                     seq_ids.size(), batches.size());
     for (size_t bi = 0; bi < batches.size(); ++bi) {
         LLAMA_LOG_DEBUG("%s: batch[%zu] token=%d seq_id=%d\n",
@@ -1842,14 +1915,14 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
                 state_pos = snap_iter->second.last_processed_pos;
             }
 
-            LLAMA_LOG_INFO("%s: state check seq_id=%d state_pos=%d target_vl=%d "
+            LLAMA_LOG_DEBUG("%s: state check seq_id=%d state_pos=%d target_vl=%d "
                           "state_names=%zu\n",
                           __func__, seq_id, state_pos, target_vl,
                           state_cache_names_.size());
 
             if (state_pos >= 0 && state_pos != target_vl) {
                 // State gap detected — route through prefill instead.
-                LLAMA_LOG_INFO(
+                LLAMA_LOG_DEBUG(
                     "%s: state gap seq_id=%d state_pos=%d target_vl=%d, "
                     "redirecting token to prefill\n",
                     __func__, seq_id, state_pos, target_vl);

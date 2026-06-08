@@ -34,6 +34,9 @@ public:
             uint64_t cnt = *m.count;
             double cur = *m.current_ns;
             double maxv = *m.max_ns;
+            if (cnt == 0) {
+                continue;
+            }
             double avg = (cnt > 0) ? (total / cnt) : 0;
             // 直接传入浮点数，不再使用 std::to_string
             LOG_INF("%-25s %-12.4f %-12.4f %-12.4f %-10llu\n",

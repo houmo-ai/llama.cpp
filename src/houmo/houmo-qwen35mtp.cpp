@@ -445,17 +445,20 @@ int HoumoQwen35MTP::run_mtp_prefill(const float *h_in,
                             ns.mtp_logits_out.c_str());
             return -1;
         }
-        auto &host_fp32 = out_it->second;
-        dev.CastTo(host_fp32);
-        const float *base = static_cast<const float *>(host_fp32.Data());
-        const size_t row = last_dim(host_fp32.Info());
+        const auto info = dev.Info();
+        if (info.DataType() != tcim::DataType::FLOAT16) {
+            LLAMA_LOG_ERROR("[MTP-PREFILL] unexpected logits output dtype=%d\n",
+                            (int)info.DataType());
+            return -1;
+        }
+        auto *base = static_cast<const ggml_fp16_t *>(dev.Buffer().Data());
+        const size_t row = last_dim(info);
         for (size_t i = 0; i < mtp_valid; ++i) {
             if (logits_out[cursor + i] == nullptr) {
                 continue;
             }
-            std::memcpy(logits_out[cursor + i],
-                        base + i * row,
-                        row * sizeof(float));
+            ggml_fp16_to_fp32_row(base + i * row, logits_out[cursor + i],
+                                  static_cast<int64_t>(row));
         }
         cursor += mtp_valid;
     }
@@ -607,18 +610,16 @@ int HoumoQwen35MTP::run_mtp_decode(const float *h_in,
     // 5. Read logits
     {
         auto dev = m->GetOutput(ns.mtp_logits_out);
-        auto out_it = out_map.find(ns.mtp_logits_out);
-        if (out_it == out_map.end()) {
-            LLAMA_LOG_ERROR("[MTP-DECODE] missing logits output '%s'\n",
-                            ns.mtp_logits_out.c_str());
+        const auto info = dev.Info();
+        if (info.DataType() != tcim::DataType::FLOAT16) {
+            LLAMA_LOG_ERROR("[MTP-DECODE] unexpected logits output dtype=%d\n",
+                            (int)info.DataType());
             return -1;
         }
-        auto &host_fp32 = out_it->second;
-        dev.CastTo(host_fp32);
-        const float *base = static_cast<const float *>(host_fp32.Data());
-        const size_t row = last_dim(host_fp32.Info());
         if (logits_out[0] != nullptr) {
-            std::memcpy(logits_out[0], base, row * sizeof(float));
+            auto *base = static_cast<const ggml_fp16_t *>(dev.Buffer().Data());
+            const size_t row = last_dim(info);
+            ggml_fp16_to_fp32_row(base, logits_out[0], static_cast<int64_t>(row));
         }
     }
 
@@ -637,14 +638,9 @@ int HoumoQwen35MTP::run_mtp_decode(const float *h_in,
             const void *base = dev.Buffer().Data();
             std::memcpy(h_out, base, hrow * sizeof(ggml_fp16_t));
         } else {
-            auto &host_fp32 = out_it->second;
-            dev.CastTo(host_fp32);
-            const float *base = static_cast<const float *>(host_fp32.Data());
-            std::vector<ggml_fp16_t> tmp(hrow);
-            for (size_t j = 0; j < hrow; ++j) {
-                tmp[j] = ggml_fp32_to_fp16(base[j]);
-            }
-            std::memcpy(h_out, tmp.data(), hrow * sizeof(ggml_fp16_t));
+            LLAMA_LOG_ERROR("[MTP-DECODE] unexpected hidden output dtype=%d\n",
+                            (int)info.DataType());
+            return -1;
         }
     }
 
