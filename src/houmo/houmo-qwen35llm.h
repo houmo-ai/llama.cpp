@@ -157,7 +157,7 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     //   kDevice — keep on device memory; faster save/restore (device↔device
     //             copy) but consumes extra device memory per checkpoint.
     enum class CheckpointStorage { kHost, kDevice };
-    CheckpointStorage checkpoint_storage_ = CheckpointStorage::kDevice;
+    CheckpointStorage checkpoint_storage_ = CheckpointStorage::kHost;
 
     struct StateCheckpoint {
         int position = 0;                           // token position after processing
