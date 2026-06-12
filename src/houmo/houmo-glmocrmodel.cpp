@@ -286,12 +286,42 @@ int HouMoGLMOCRModel::houmo_decode(std::vector<llama_token> &batches,
         }
     }
 
-    auto decode_valid_length = decode_input_map_.at(decode_model_->GetInputName(2));
-    auto decode_current_length = decode_input_map_.at(decode_model_->GetInputName(3));
-    set_input_data(decode_valid_length, valid_length_vec);
-    set_input_data(decode_current_length, current_length_vec);
-    decode_model_->SetInput(decode_model_->GetInputName(2), decode_valid_length);
-    decode_model_->SetInput(decode_model_->GetInputName(3), decode_current_length);
+    if (decode_valid_length_names_.size() == 1 &&
+        decode_current_length_names_.size() == 1) {
+        auto decode_valid_length =
+            decode_input_map_.at(decode_valid_length_names_[0]);
+        auto decode_current_length =
+            decode_input_map_.at(decode_current_length_names_[0]);
+        set_input_data(decode_valid_length, valid_length_vec);
+        set_input_data(decode_current_length, current_length_vec);
+        decode_model_->SetInput(decode_valid_length_names_[0],
+                                decode_valid_length);
+        decode_model_->SetInput(decode_current_length_names_[0],
+                                decode_current_length);
+    } else {
+        if (decode_valid_length_names_.size() != (size_t)n_decode_batch_ ||
+            decode_current_length_names_.size() != (size_t)n_decode_batch_) {
+            LLAMA_LOG_ERROR(
+                "%s: invalid GLM-OCR decode length inputs: valid=%zu, current=%zu, batch=%d\n",
+                __func__, decode_valid_length_names_.size(),
+                decode_current_length_names_.size(), n_decode_batch_);
+            return -1;
+        }
+
+        for (int batch_id = 0; batch_id < n_decode_batch_; batch_id++) {
+            const std::string &valid_name =
+                decode_valid_length_names_[batch_id];
+            auto valid_length = decode_input_map_.at(valid_name);
+            set_input_data(valid_length, 1, valid_length_vec[batch_id]);
+            decode_model_->SetInput(valid_name, valid_length);
+
+            const std::string &current_name =
+                decode_current_length_names_[batch_id];
+            auto current_length = decode_input_map_.at(current_name);
+            set_input_data(current_length, 1, current_length_vec[batch_id]);
+            decode_model_->SetInput(current_name, current_length);
+        }
+    }
 
     std::vector<int32_t> position_vec(n_decode_batch_, 1);
     for (size_t k = 0; k < seq_ids.size(); k++) {
@@ -302,15 +332,38 @@ int HouMoGLMOCRModel::houmo_decode(std::vector<llama_token> &batches,
         position_vec[batch_id] = position_indexs_[seq_ids[k]];
     }
 
-    auto position_ids = decode_input_map_.at(decode_model_->GetInputName(1));
-    set_decode_position_input(position_ids, position_vec);
-    decode_model_->SetInput(decode_model_->GetInputName(1), position_ids);
+    const std::string position_name = decode_model_->GetInputName(1);
+    const bool split_position_inputs =
+        n_decode_batch_ > 1 &&
+        decode_input_map_.count(position_name + "_batch1") > 0;
+    if (split_position_inputs) {
+        for (int batch_id = 0; batch_id < n_decode_batch_; batch_id++) {
+            std::string name = position_name;
+            if (batch_id > 0) {
+                name += "_batch" + std::to_string(batch_id);
+            }
+            auto position_ids = decode_input_map_.at(name);
+            std::vector<int32_t> position = { position_vec[batch_id] };
+            set_decode_position_input(position_ids, position);
+            decode_model_->SetInput(name, position_ids);
+        }
+    } else {
+        auto position_ids = decode_input_map_.at(position_name);
+        set_decode_position_input(position_ids, position_vec);
+        decode_model_->SetInput(position_name, position_ids);
+    }
 
     set_kv_cache_for_decode(seq_ids);
     PERF_STOP(DECODE_SETINPUT);
 
     PERF_START(DECODE_RUN);
-    decode_model_->Run();
+    const auto status = decode_model_->Run();
+    if (status != tcim::Status::OK) {
+        PERF_STOP(DECODE_RUN);
+        LLAMA_LOG_ERROR("%s: decode_model_->Run() failed, result = %d\n",
+                        __func__, static_cast<int>(status));
+        return -1;
+    }
     decode_model_->Sync();
     PERF_STOP(DECODE_RUN);
 
