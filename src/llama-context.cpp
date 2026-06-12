@@ -1763,17 +1763,27 @@ int llama_context::houmo_decode(const llama_batch & batch) {
 }
 
 int llama_context::houmo_embedding(const llama_batch & batch) {
-    n_outputs = batch.n_tokens;
+    const uint32_t n_outputs_all = batch.n_tokens;
     const int32_t n_embd = model.hparams.n_embd;
     std::map<int32_t, std::vector<llama_token>> seqid_token_map;
     std::map<int, float *> seqid_embd_map;
     int seq_id = 0;
+
+    if (output_reserve(n_outputs_all) < n_outputs_all) {
+        LLAMA_LOG_ERROR("%s: could not reserve space for batch with %d outputs\n", __func__, n_outputs_all);
+        return -2;
+    }
+
+    n_outputs = n_outputs_all;
 
     if (batch.seq_id == nullptr) {
         for (int j = 0; j < batch.n_tokens; j++) {
             seqid_token_map[seq_id].push_back(batch.token[j]);
             if (batch.logits && batch.logits[j] == 1) {
                 seqid_embd_map[seq_id] = embd.data + seq_id * n_embd;
+                if ((model.arch == LLM_ARCH_QWEN3) && model.hparams.pooling_type == LLAMA_POOLING_TYPE_RANK) {
+                    seqid_embd_map[seq_id] = logits.data + seq_id * model.vocab.n_tokens();
+                }
             }
         }
     } else {
@@ -1783,6 +1793,9 @@ int llama_context::houmo_embedding(const llama_batch & batch) {
                 seqid_token_map[seq_id].push_back(batch.token[j]);
                 if (batch.logits && batch.logits[j] == 1) {
                     seqid_embd_map[seq_id] = embd.data + seq_id * n_embd;
+                    if ((model.arch == LLM_ARCH_QWEN3) && model.hparams.pooling_type == LLAMA_POOLING_TYPE_RANK) {
+                        seqid_embd_map[seq_id] = logits.data + seq_id * model.vocab.n_tokens();
+                    }
                 }
             }
         }
