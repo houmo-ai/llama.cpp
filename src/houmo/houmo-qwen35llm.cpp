@@ -199,12 +199,18 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
 }
 
 void HoumoQwen35LLM::resolve_input_names() {
-    prefill_time_pos_name_ = prefill_model_->GetInputName(1);
-    prefill_height_pos_name_ = prefill_model_->GetInputName(2);
-    prefill_width_pos_name_ = prefill_model_->GetInputName(3);
-    prefill_valid_length_name_ = prefill_model_->GetInputName(4);
-    prefill_current_length_name_ = prefill_model_->GetInputName(5);
-    prefill_linear_mask_name_ = prefill_model_->GetInputName(6);
+    prefill_time_pos_name_ =
+        find_input_name_any(prefill_input_map_, {"time_position"});
+    prefill_height_pos_name_ =
+        find_input_name_any(prefill_input_map_, {"height_position", "hight_position"});
+    prefill_width_pos_name_ =
+        find_input_name_any(prefill_input_map_, {"width_position"});
+    prefill_valid_length_name_ =
+        find_input_name_any(prefill_input_map_, {"valid_length"});
+    prefill_current_length_name_ =
+        find_input_name_any(prefill_input_map_, {"current_length"});
+    prefill_linear_mask_name_ =
+        find_input_name_any(prefill_input_map_, {"linear_attn_mask"});
 
     decode_time_pos_names_.clear();
     decode_height_pos_names_.clear();
@@ -213,12 +219,18 @@ void HoumoQwen35LLM::resolve_input_names() {
     decode_valid_length_names_.clear();
     decode_current_length_names_.clear();
 
-    decode_time_pos_names_.push_back(decode_model_->GetInputName(1));
-    decode_height_pos_names_.push_back(decode_model_->GetInputName(2));
-    decode_width_pos_names_.push_back(decode_model_->GetInputName(3));
-    decode_valid_length_names_.push_back(decode_model_->GetInputName(4));
-    decode_current_length_names_.push_back(decode_model_->GetInputName(5));
-    decode_linear_mask_names_.push_back(decode_model_->GetInputName(6));
+    decode_time_pos_names_ = collect_input_names_any(
+        decode_input_map_, {"time_position"});
+    decode_height_pos_names_ = collect_input_names_any(
+        decode_input_map_, {"height_position", "hight_position"});
+    decode_width_pos_names_ = collect_input_names_any(
+        decode_input_map_, {"width_position"});
+    decode_valid_length_names_ = collect_input_names_any(
+        decode_input_map_, {"valid_length"});
+    decode_current_length_names_ = collect_input_names_any(
+        decode_input_map_, {"current_length"});
+    decode_linear_mask_names_ = collect_input_names_any(
+        decode_input_map_, {"linear_attn_mask"});
 }
 
 
@@ -398,6 +410,7 @@ void HoumoQwen35LLM::init_checkpoint_pool(int seq_id) {
     snapshot.checkpoint_pool.resize(checkpoint_max_count_);
     size_t allocated_slots = 0;
     bool alloc_failed = false;
+    double total_mb = 0.0;
     for (auto &slot : snapshot.checkpoint_pool) {
         slot.used = false;
         slot.position = -1;
@@ -416,6 +429,7 @@ void HoumoQwen35LLM::init_checkpoint_pool(int seq_id) {
                 // CopyTo on first save.
                 dst = src.ToHost(false);
             }
+            total_mb += dst.Buffer().Size() / 1024.0 / 1024.0;
             if (dst.GetInitStatus() != tcim::Status::OK) {
                 LLAMA_LOG_WARN("%s: failed to pre-allocate checkpoint tensor "
                                "seq_id=%d name=%s storage=%s — stopping pool "
@@ -442,11 +456,12 @@ void HoumoQwen35LLM::init_checkpoint_pool(int seq_id) {
         snapshot.checkpoint_pool.resize(allocated_slots);
     }
     LLAMA_LOG_INFO("%s: pre-allocated checkpoint pool seq_id=%d slots=%zu "
-                   "tensors_per_slot=%zu storage=%s\n",
+                   "tensors_per_slot=%zu storage=%s total_mb=%.2f\n",
                    __func__, seq_id, snapshot.checkpoint_pool.size(),
                    checkpoint_tensor_indices_.size(),
                    checkpoint_storage_ == CheckpointStorage::kDevice
-                       ? "device" : "host");
+                       ? "device" : "host",
+                   total_mb);
 }
 
 size_t HoumoQwen35LLM::acquire_checkpoint_slot(PrefillSnapshot &snapshot) {
@@ -1075,7 +1090,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             int best_ckpt = -1;
             const int first_unsafe_pos = snap_iter->second.first_unsafe_position;
             const int first_safe_pos = snap_iter->second.first_safe_position;
-
+            PERF_START(find_and_restore_best_checkpoint);
             if (!snap_iter->second.checkpoint_index.empty()) {
                 const int min_ckpt = std::min(first_safe_pos, kv_offset);
                 auto ckpt_it = snap_iter->second.checkpoint_index.find(min_ckpt);
@@ -1085,7 +1100,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                     best_ckpt = find_and_restore_best_checkpoint(seq_id, kv_offset);
                 }
             }
-
+            PERF_STOP(find_and_restore_best_checkpoint);
             // Determine the rollback position.
             // - best_ckpt > 0  → state restored to that position
             // - best_ckpt == -1 → no checkpoint found, state must start

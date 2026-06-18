@@ -47,9 +47,16 @@ class HouMoGLMOCRModel : public HouMoLLModel::Impl {
     void set_decode_position_input(tcim::Tensor &tensor,
                                    const std::vector<int32_t> &position_vec);
     void reset_cached_inputs(int seq_id);
+    void resolve_input_names();
 
   private:
     houmo_memory_i *memory_ = nullptr;
+    std::string prefill_position_name_;
+    std::string prefill_valid_length_name_;
+    std::string prefill_current_length_name_;
+    std::string decode_position_name_;
+    std::string decode_valid_length_name_;
+    std::string decode_current_length_name_;
     std::vector<std::vector<int16_t>> input_embedding_ids_;
     std::vector<int32_t> offset_embedding_ids_;
     std::vector<int32_t> position_indexs_;

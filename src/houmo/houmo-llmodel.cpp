@@ -451,6 +451,20 @@ void HouMoLLModel::Impl::parser_gguf_parameters(struct gguf_context *ctx,
     } else {
         n_split_count_ = gguf_get_val_i32(ctx, key_n_split);
     }
+
+    key_id = gguf_find_key(ctx, "general.name");
+    if (key_id >= 0) {
+        std::string general_name = gguf_get_val_str(ctx, key_id);
+        std::transform(general_name.begin(), general_name.end(),
+                       general_name.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        asr_force_aligner_ =
+            general_name.find("forcealigner") != std::string::npos ||
+            general_name.find("forcedaligner") != std::string::npos ||
+            general_name.find("forced aligner") != std::string::npos;
+    }
+
     // 解析hmm.info
     key_id = gguf_find_key(ctx, kHmmInfo.c_str());
     if (key_id < 0) {
@@ -551,12 +565,12 @@ void HouMoLLModel::Impl::parse_deviceids() {
     if (device_num_ == 2 && device_ids_.size() == 1) {
         // 单卡模型，但是模型是双卡模型，需要将device_ids 扩展为{0,1}
         device_ids_ = {0, 1};
-        LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}");
+        LLAMA_LOG_WARN("dual card model, need to set device_ids to {0,1}\n");
     } else if (device_num_ == 1 && device_ids_.size() > 1) {
         // 模型是单卡模型，需要将device_ids 缩小为{0}
         device_ids_ = {0};
         LLAMA_LOG_WARN("single card model, set device_ids size > 1, need to "
-                       "resize device_ids to {0}");
+                       "resize device_ids to {0}\n");
     } else if (device_num_ == 4 && device_ids_.size() == 1) {
         // 模型是四卡模型，需要将device_ids 扩展为{0,1,2,3}
         device_ids_ = {0, 1, 2, 3};
@@ -628,7 +642,7 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
         ends_with = ".hmcc.format";
     }
     int kv_cache_count = n_blocks_;
-    if (arch_name.find("qwen35") != std::string::npos) {
+    if (arch_name.find("qwen35") != std::string::npos || arch_name.find("qwen3next") != std::string::npos) {
         kv_cache_count = n_blocks_ / 4;
     }
     if ((size_t)size != kv_cache_.size()) {
@@ -843,51 +857,12 @@ HouMoLLModel::~HouMoLLModel() {
 
 // Forward method calls to the implementation
 bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
-    const bool is_qwen35_arch =
-        ml.arch_name.find("qwen35") != std::string::npos ||
-        ml.arch_name.find("qwen3.5") != std::string::npos ||
-        ml.arch_name.find("qwen3_5") != std::string::npos;
 
+    LLAMA_LOG_INFO("%s: model arch name: %s\n", __func__, ml.arch_name.c_str());
     if (impl_ == nullptr) {
-        bool has_prefill_hmm = false;
-        bool has_decode_hmm = false;
-        const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
-        const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
-        const int n_tensors = gguf_get_n_tensors(ml.metadata_ptr.get());
-        for (int i = 0; i < n_tensors; ++i) {
-            const char *name = gguf_get_tensor_name(ml.metadata_ptr.get(), i);
-            if (name == nullptr) {
-                continue;
-            }
-            has_prefill_hmm = has_prefill_hmm || std::regex_match(name, kPrefillPattern);
-            has_decode_hmm = has_decode_hmm || std::regex_match(name, kDecodePattern);
-        }
-        std::string general_name;
-        const int general_name_key = gguf_find_key(ml.metadata_ptr.get(), "general.name");
-        if (general_name_key >= 0) {
-            general_name = gguf_get_val_str(ml.metadata_ptr.get(), general_name_key);
-            std::transform(general_name.begin(), general_name.end(), general_name.begin(),
-                           [](unsigned char c) { return (char) std::tolower(c); });
-        }
-        const bool is_qwen = ml.arch_name.find("qwen") != std::string::npos;
-        const auto name_has_any = [&general_name](std::initializer_list<const char *> needles) {
-            for (const char * needle : needles) {
-                if (general_name.find(needle) != std::string::npos) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        const bool is_glm_asr =
-            name_has_any({"glm-asr", "glmasr", "glm asr"});
-        const bool is_glm_ocr =
-            name_has_any({"glm-ocr", "glmocr", "glm ocr"});
-        const bool is_qwen_asr_force_aligner =
-            is_qwen && has_prefill_hmm && !has_decode_hmm &&
-            name_has_any({"forcealigner", "forcedaligner", "forced aligner"});
         if (ml.arch_name.find("gemma4") != std::string::npos) {
             impl_ = new HouMoGemma4();
-        } else if (is_glm_ocr) {
+        } else if (ml.arch_name.find("glm4") != std::string::npos) {
             impl_ = new HouMoGLMOCRModel();
         } else if (ml.arch_name.find("vl") != std::string::npos) {
             impl_ = new HouMoVLLModel();
@@ -895,7 +870,8 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
             impl_ = new HouMoGPTOSS();
         } else if (ml.arch_name.find("bert") != std::string::npos) {
             impl_ = new HouMoEmbed();
-        } else if (is_qwen35_arch) {
+        } else if (ml.arch_name.find("qwen35") != std::string::npos ||
+                   ml.arch_name.find("qwen3next") != std::string::npos) {
             if (qwen35_has_mtp_tensors(ml)) {
                 impl_ = new HoumoQwen35LLM();
                 impl_mtp_ = new HoumoQwen35MTP();
@@ -914,24 +890,20 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
                     LLAMA_LOG_ERROR("%s: failed to load qwen3.5 MTP impl\n", __func__);
                     return false;
                 }
-                if (impl_ == nullptr) impl_ = impl_mtp_; // MTP impl 包含 target impl 的功能, 直接使用MTP impl
+                if (impl_ == nullptr) impl_ = impl_mtp_;
                 return true;
             } else {
                 impl_ = new HoumoQwen35LLM();
                 LLAMA_LOG_INFO("%s: qwen3.5 gguf has no MTP tensors, using HoumoQwen35LLM\n",
                                __func__);
             }
-        } else if (is_glm_asr || is_qwen) {
+        } else if (ml.arch_name.find("qwen") != std::string::npos) {
             impl_ = new HoumoQwenLLM();
         } else {
             LLAMA_LOG_ERROR("%s: unknown architecture %s\n", __func__,
                             ml.arch_name.c_str());
             exit(1);
             return false;
-        }
-        impl_->set_asr_force_aligner(is_qwen_asr_force_aligner);
-        if (is_qwen_asr_force_aligner) {
-            LLAMA_LOG_INFO("%s: detected Qwen ASR ForceAligner prefill-only model\n", __func__);
         }
     }
 

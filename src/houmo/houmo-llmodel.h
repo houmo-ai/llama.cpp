@@ -205,7 +205,6 @@ public:
   virtual bool is_asr_force_aligner() {
     return asr_force_aligner_;
   }
-  void set_asr_force_aligner(bool value) { asr_force_aligner_ = value; }
   bool has_decode_model() const { return decode_model_ != nullptr; }
 
   // ---------------- MTP hooks (default: no-op / not supported) ----------------

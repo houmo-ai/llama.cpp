@@ -28,6 +28,7 @@ void HouMoGLMOCRModel::houmo_init(houmo_memory_i *memory, int seq_max,
     prefill_output_init();
     decode_input_init();
     decode_output_init();
+    resolve_input_names();
 
     int kv_cache_count = 0;
     for (size_t i = 0; i < decode_model_->GetInputNum(); i++) {
@@ -56,6 +57,37 @@ void HouMoGLMOCRModel::houmo_init(houmo_memory_i *memory, int seq_max,
     for (int i = 0; i < actual_seq_max; i++) {
         input_embedding_ids_[i].resize(context_length_ * n_embd_, 0);
     }
+}
+
+void HouMoGLMOCRModel::resolve_input_names() {
+    prefill_position_name_ = prefill_input_map_.count("position_ids")
+                                 ? "position_ids"
+                                 : "";
+    prefill_valid_length_name_ = prefill_input_map_.count("valid_length")
+                                     ? "valid_length"
+                                     : "";
+    prefill_current_length_name_ = prefill_input_map_.count("current_length")
+                                       ? "current_length"
+                                       : "";
+
+    decode_position_name_ = decode_input_map_.count("position_ids")
+                                ? "position_ids"
+                                : "";
+    decode_valid_length_name_ = decode_input_map_.count("valid_length")
+                                    ? "valid_length"
+                                    : "";
+    decode_current_length_name_ = decode_input_map_.count("current_length")
+                                      ? "current_length"
+                                      : "";
+
+    LLAMA_LOG_INFO(
+        "%s: prefill embeds='%s' position='%s' valid='%s' current='%s'\n",
+        __func__, prefill_model_->GetInputName(0).c_str(), prefill_position_name_.c_str(),
+        prefill_valid_length_name_.c_str(), prefill_current_length_name_.c_str());
+    LLAMA_LOG_INFO(
+        "%s: decode embeds='%s' position='%s' valid='%s' current='%s'\n",
+        __func__, decode_model_->GetInputName(0).c_str(), decode_position_name_.c_str(),
+        decode_valid_length_name_.c_str(), decode_current_length_name_.c_str());
 }
 
 int HouMoGLMOCRModel::houmo_prefill(std::vector<llama_token> &tokens,
@@ -105,14 +137,16 @@ int HouMoGLMOCRModel::houmo_prefill(std::vector<llama_token> &tokens,
     std::vector<int32_t> time_position_ids;
     std::vector<int32_t> height_position_ids;
     std::vector<int32_t> width_position_ids;
-    compute_position_ids(seq_id, time_position_ids, height_position_ids,
-                         width_position_ids);
-    time_position_ids.resize(prefill_loop_round * prefill_length_,
-                             time_position_ids.empty() ? 0 : time_position_ids.back());
-    height_position_ids.resize(prefill_loop_round * prefill_length_,
-                               height_position_ids.empty() ? 0 : height_position_ids.back());
-    width_position_ids.resize(prefill_loop_round * prefill_length_,
-                              width_position_ids.empty() ? 0 : width_position_ids.back());
+    if (!prefill_position_name_.empty()) {
+        compute_position_ids(seq_id, time_position_ids, height_position_ids,
+                             width_position_ids);
+        time_position_ids.resize(prefill_loop_round * prefill_length_,
+                                 time_position_ids.empty() ? 0 : time_position_ids.back());
+        height_position_ids.resize(prefill_loop_round * prefill_length_,
+                                   height_position_ids.empty() ? 0 : height_position_ids.back());
+        width_position_ids.resize(prefill_loop_round * prefill_length_,
+                                  width_position_ids.empty() ? 0 : width_position_ids.back());
+    }
 
     int valid_length = kv_offset;
     int current_length = 0;
@@ -127,24 +161,24 @@ int HouMoGLMOCRModel::houmo_prefill(std::vector<llama_token> &tokens,
             input_embedding_ids_[seq_id].data() + round * prefill_length_ * n_embd_,
             input_data.MemSize());
 
-        auto position_ids = prefill_input_map_.at(prefill_model_->GetInputName(1));
-        set_position_input(position_ids, time_position_ids, height_position_ids,
-                           width_position_ids, round * prefill_length_);
+        if (!prefill_position_name_.empty()) {
+            auto position_ids = prefill_input_map_.at(prefill_position_name_);
+            set_position_input(position_ids, time_position_ids, height_position_ids,
+                               width_position_ids, round * prefill_length_);
+            prefill_model_->SetInput(prefill_position_name_, position_ids);
+        }
 
         auto prefill_valid_length =
-            prefill_input_map_.at(prefill_model_->GetInputName(2));
+            prefill_input_map_.at(prefill_valid_length_name_);
         auto prefill_current_length =
-            prefill_input_map_.at(prefill_model_->GetInputName(3));
+            prefill_input_map_.at(prefill_current_length_name_);
 
         set_input_data(prefill_valid_length, n_prefill_batch_, valid_length);
         set_input_data(prefill_current_length, n_prefill_batch_, current_length);
 
         prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
-        prefill_model_->SetInput(prefill_model_->GetInputName(1), position_ids);
-        prefill_model_->SetInput(prefill_model_->GetInputName(2),
-                                 prefill_valid_length);
-        prefill_model_->SetInput(prefill_model_->GetInputName(3),
-                                 prefill_current_length);
+        prefill_model_->SetInput(prefill_valid_length_name_, prefill_valid_length);
+        prefill_model_->SetInput(prefill_current_length_name_, prefill_current_length);
 
         if (round == 0) {
             set_kv_cache_for_prefill(seq_id);
@@ -215,6 +249,8 @@ int HouMoGLMOCRModel::houmo_prefill(const float *embeddings, int n_tokens,
         chunk.ny = header.ny;
         chunk.image = chunk.nx > 0 && chunk.ny > 0;
         embedding_offset = sizeof(GLMOCRCompactHeader);
+    } else {
+        embedding_offset = 0;
     }
 
     const int8_t *embeddings_ptr = reinterpret_cast<const int8_t *>(embeddings);
@@ -249,7 +285,11 @@ int HouMoGLMOCRModel::houmo_decode(std::vector<llama_token> &batches,
         const int target_tokens = memory_->seq_pos_min(seq_id);
         if (target_tokens < decode_valid_length_[seq_id]) {
             decode_valid_length_[seq_id] = target_tokens;
-            position_indexs_[seq_id] = replay_position_until(seq_id, target_tokens);
+            if (!decode_position_name_.empty()) {
+                position_indexs_[seq_id] = replay_position_until(seq_id, target_tokens);
+            } else {
+                position_indexs_[seq_id] = target_tokens;
+            }
             LLAMA_LOG_INFO(
                 "%s: seq_id = %d, rolled back to valid_length = %d, position_index = %d\n",
                 __func__, seq_id, target_tokens, position_indexs_[seq_id]);
@@ -323,34 +363,35 @@ int HouMoGLMOCRModel::houmo_decode(std::vector<llama_token> &batches,
         }
     }
 
-    std::vector<int32_t> position_vec(n_decode_batch_, 1);
-    for (size_t k = 0; k < seq_ids.size(); k++) {
-        int batch_id = seq_ids[k];
-        if (n_decode_batch_ == 1) {
-            batch_id = 0;
-        }
-        position_vec[batch_id] = position_indexs_[seq_ids[k]];
-    }
-
-    const std::string position_name = decode_model_->GetInputName(1);
-    const bool split_position_inputs =
-        n_decode_batch_ > 1 &&
-        decode_input_map_.count(position_name + "_batch1") > 0;
-    if (split_position_inputs) {
-        for (int batch_id = 0; batch_id < n_decode_batch_; batch_id++) {
-            std::string name = position_name;
-            if (batch_id > 0) {
-                name += "_batch" + std::to_string(batch_id);
+    if (!decode_position_name_.empty()) {
+        std::vector<int32_t> position_vec(n_decode_batch_, 1);
+        for (size_t k = 0; k < seq_ids.size(); k++) {
+            int batch_id = seq_ids[k];
+            if (n_decode_batch_ == 1) {
+                batch_id = 0;
             }
-            auto position_ids = decode_input_map_.at(name);
-            std::vector<int32_t> position = { position_vec[batch_id] };
-            set_decode_position_input(position_ids, position);
-            decode_model_->SetInput(name, position_ids);
+            position_vec[batch_id] = position_indexs_[seq_ids[k]];
         }
-    } else {
-        auto position_ids = decode_input_map_.at(position_name);
-        set_decode_position_input(position_ids, position_vec);
-        decode_model_->SetInput(position_name, position_ids);
+
+        const bool split_position_inputs =
+            n_decode_batch_ > 1 &&
+            decode_input_map_.count(decode_position_name_ + "_batch1") > 0;
+        if (split_position_inputs) {
+            for (int batch_id = 0; batch_id < n_decode_batch_; batch_id++) {
+                std::string name = decode_position_name_;
+                if (batch_id > 0) {
+                    name += "_batch" + std::to_string(batch_id);
+                }
+                auto position_ids = decode_input_map_.at(name);
+                std::vector<int32_t> position = { position_vec[batch_id] };
+                set_decode_position_input(position_ids, position);
+                decode_model_->SetInput(name, position_ids);
+            }
+        } else {
+            auto position_ids = decode_input_map_.at(decode_position_name_);
+            set_decode_position_input(position_ids, position_vec);
+            decode_model_->SetInput(decode_position_name_, position_ids);
+        }
     }
 
     set_kv_cache_for_decode(seq_ids);
