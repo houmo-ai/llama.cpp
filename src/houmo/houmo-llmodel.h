@@ -236,6 +236,12 @@ public:
   void lora_init(std::string file_name, void *adapter);
   void lora_set_scale(void *adapter, float scale);
   void lora_clear();
+  std::shared_ptr<HoumoEmbeddingLayer> embedding_layer() {
+      return embedding_layer_;
+  }
+  void set_embedding_layer(std::shared_ptr<HoumoEmbeddingLayer> layer) {
+      embedding_layer_ = layer;
+  }
 protected:
   /**
    * @brief Initialize the model input and output.
@@ -339,9 +345,9 @@ protected:
   int n_decode_batch_ = 1;
   int n_split_count_ = 1;
 
-  std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_;
-  std::shared_ptr<tcim::Module> prefill_model_;
-  std::shared_ptr<tcim::Module> decode_model_;
+  std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_ = nullptr;
+  std::shared_ptr<tcim::Module> prefill_model_ = nullptr;
+  std::shared_ptr<tcim::Module> decode_model_ = nullptr;
   // MTP 相关：
   //   - MTP 角色由 wants_mtp_modules() / 具体 Impl 类型决定。
   //   - pre_norm_hidden_dst_/_rows_: 调用方在 prefill/decode 前通过

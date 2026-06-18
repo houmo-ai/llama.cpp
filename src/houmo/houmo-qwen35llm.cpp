@@ -170,7 +170,6 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
             checkpoint_storage_ = CheckpointStorage::kHost;
             LLAMA_LOG_INFO("%s: set checkpoint_storage_ to kHost from env LLAMA_CHECKPOINT_STORAGE=%s\n",
                            __func__, env);
-            checkpoint_max_count_ = 80;
         }
     }
 
@@ -1337,12 +1336,24 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                     LLAMA_LOG_WARN("%s: unexpected prefill hidden dtype=%d for MTP export, expected FLOAT16\n",
                                    __func__, static_cast<int>(h_info.DataType()));
                 }
-                for (int r = 0; r < current_length; ++r) {
+                const int copy_begin = std::max(0, kv_offset - valid_length);
+                const int dst_begin = valid_length + copy_begin - kv_offset;
+                const int n_copy = std::min(current_length - copy_begin,
+                                            pre_norm_hidden_dst_rows_ - dst_begin);
+                LLAMA_LOG_INFO("%s: exporting pre-norm hidden for seq_id=%d round=%zu "
+                               "copy_begin=%d dst_begin=%d n_copy=%d\n",
+                               __func__, seq_id, round, copy_begin, dst_begin, n_copy);
+                if (dst_begin < 0 || dst_begin >= pre_norm_hidden_dst_rows_ || n_copy <= 0) {
+                    break;
+                }
+                for (int r = 0; r < n_copy; ++r) {
                     std::memcpy(
                         reinterpret_cast<uint8_t *>(pre_norm_hidden_dst_ +
-                            static_cast<size_t>(valid_length - effective_kv_offset + r) * n_embd_),
-                        src + static_cast<size_t>(r) * row_bytes,
+                            static_cast<size_t>(dst_begin + r) * n_embd_),
+                        src + static_cast<size_t>(copy_begin + r) * row_bytes,
                         row_bytes);
+                    LLAMA_LOG_DEBUG("%s: copied pre-norm hidden row %d to dst row %d for seq_id=%d\n",
+                                   __func__, copy_begin + r, dst_begin + r, seq_id);
                 }
                 break;
             }

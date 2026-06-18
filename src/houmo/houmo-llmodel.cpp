@@ -172,8 +172,9 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         if (strncmp(name, "quant_embedding.bin",
                     strlen("quant_embedding.bin")) == 0) {
-            embedding_layer_ =
-                std::make_shared<HoumoEmbeddingLayer>(file_name, offset, size);
+            if (embedding_layer_ == nullptr)
+                embedding_layer_ =
+                    std::make_shared<HoumoEmbeddingLayer>(file_name, offset, size);
         } else if (std::regex_match(name, kPrefillMtpPattern)) {
             if (!load_mtp_modules) {
                 LLAMA_LOG_INFO("%s: skip prefill_mtp.hmm for target impl\n", __func__);
@@ -905,6 +906,9 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
                     LLAMA_LOG_WARN("%s: failed to load qwen3.5 target impl\n", __func__);
                     delete impl_;
                     impl_ = nullptr;
+                }
+                if (impl_ != nullptr) {
+                    impl_mtp_->set_embedding_layer(impl_->embedding_layer());
                 }
                 if (!impl_mtp_->houmo_load(ml, device_ids)) {
                     LLAMA_LOG_ERROR("%s: failed to load qwen3.5 MTP impl\n", __func__);
