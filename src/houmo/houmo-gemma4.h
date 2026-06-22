@@ -1,5 +1,6 @@
 #pragma once
 
+#include "houmo-gemma4-kv-cache.h"
 #include "houmo-llmodel.h"
 
 #include <cstdint>
@@ -9,8 +10,9 @@
 /**
  * @brief HouMoGemma4 is the derived class for Gemma4 HouMo VLM models.
  * @details The runtime input layout follows src/houmo/demo.py:
- *          input_embeds, valid_length, current_length, local_attention_mask,
- *          global_attention_mask, plus KV cache inputs.
+ *          input_embeds, valid_length, current_length, full_attention_mask,
+ *          sliding_attention_mask, plus KV cache inputs.
+ *          Decode stage only feeds sliding/local attention mask.
  */
 class HouMoGemma4 : public HouMoLLModel::Impl {
   public:
@@ -47,6 +49,9 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     void clear_cached_inputs(int seq_id);
     bool has_cached_inputs(int seq_id) const;
     size_t cached_token_count(int seq_id) const;
+    bool device_kv_covers_history(int seq_id, int64_t valid_length) const;
+    void update_device_kv_range(int seq_id, int64_t abs_end);
+    void clear_device_kv_range(int seq_id);
 
   private:
     int32_t sliding_window_ = 1024;
@@ -57,4 +62,8 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     // the Gemma4 vision tower output from demo.py is passed into the LLM graph.
     std::map<int, std::vector<uint16_t>> embedding_cache_;
     std::map<int, std::vector<ChunkInfo>> pending_chunks_;
+    std::map<int, std::vector<llama_token>> token_history_;
+    std::map<int, int64_t> device_kv_abs_start_;
+    std::map<int, int64_t> device_kv_abs_end_;
+    HoumoGemma4KVCache kv_reuse_cache_;
 };

@@ -48,6 +48,7 @@ add_library(llama
             houmo/houmo-embed.cpp
             houmo/houmo-embedding_layer.cpp
             houmo/houmo-gemma4.cpp
+            houmo/houmo-gemma4-kv-cache.cpp
             ${LLAMA_MODELS_SOURCES}
             )
 
