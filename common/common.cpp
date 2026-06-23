@@ -1466,7 +1466,7 @@ common_context_seq_rm_type common_context_can_seq_rm(llama_context * ctx) {
 done:
     llama_memory_clear(mem, true);
     llama_synchronize(ctx);
-
+    PERF_RESET();
     return res;
 }
 

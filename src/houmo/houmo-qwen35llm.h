@@ -71,9 +71,6 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
                           const int32_t *width_pos_slice,
                           bool is_first_round);
 
-    // State checkpoint helpers for prefix cache reuse
-    int find_common_prefix_length(const std::vector<llama_token> &saved,
-                                  const std::vector<llama_token> &incoming) const;
     void save_state_checkpoint(int seq_id, int position);
     int find_and_restore_best_checkpoint(int seq_id, int max_position);
     void restore_zero_state(int seq_id);

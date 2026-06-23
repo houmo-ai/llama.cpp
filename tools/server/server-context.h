@@ -133,6 +133,8 @@ struct server_routes {
     // to be used in router mode
     json get_model_info() const;
 
+    bool warmup_system_prompt(const std::string & system_prompt);
+
 private:
     std::unique_ptr<server_res_generator> handle_completions_impl(
             const server_http_req & req,

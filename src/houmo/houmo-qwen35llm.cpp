@@ -151,7 +151,7 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
         errno = 0;
         char *end = nullptr;
         long v = std::strtol(env, &end, 10);
-        if (errno == 0 && end != env && *end == '\0' && v > 0 && v <= 40960) {
+        if (errno == 0 && end != env && *end == '\0' && v > 0 && v <= 0xffffff) {
             checkpoint_min_interval_ = static_cast<int>(v);
             LLAMA_LOG_INFO("%s: set checkpoint_min_interval_ from env LLAMA_CHECKPOINT_INTERVAL=%d\n",
                            __func__, checkpoint_min_interval_);
@@ -177,7 +177,7 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
         errno = 0;
         char *end = nullptr;
         long v = std::strtol(env, &end, 10);
-        if (errno == 0 && end != env && *end == '\0' && v > 0 && v <= 80) {
+        if (errno == 0 && end != env && *end == '\0' && v >= 0 && v <= 80) {
             checkpoint_max_count_ = static_cast<size_t>(v);
             LLAMA_LOG_INFO("%s: set checkpoint_max_count_ from env LLAMA_CHECKPOINT_MAX_COUNT=%zu\n",
                            __func__, checkpoint_max_count_);
@@ -397,6 +397,14 @@ void HoumoQwen35LLM::init_state_cache_snapshots() {
 }
 
 void HoumoQwen35LLM::init_checkpoint_pool(int seq_id) {
+    if (checkpoint_max_count_ == 0) {
+        auto &snapshot = prefill_snapshots_[seq_id];
+        snapshot.checkpoint_pool.clear();
+        snapshot.checkpoint_index.clear();
+        LLAMA_LOG_INFO("%s: skip checkpoint pool init for seq_id=%d because checkpoint_max_count_=0\n",
+                       __func__, seq_id);
+        return;
+    }
     if (decode_model_ == nullptr || checkpoint_tensor_indices_.empty() ||
         checkpoint_max_count_ == 0) {
         return;
@@ -659,21 +667,10 @@ int HoumoQwen35LLM::commit_verify_accept(int seq_id, int accepted_steps) {
     return 0;
 }
 
-int HoumoQwen35LLM::find_common_prefix_length(
-    const std::vector<llama_token> &saved,
-    const std::vector<llama_token> &incoming) const {
-    size_t min_len = std::min(saved.size(), incoming.size());
-    for (size_t i = 0; i < min_len; ++i) {
-        if (saved[i] != incoming[i]) {
-            LLAMA_LOG_INFO("%s: common prefix length=%zu (saved[%zu]=%d vs incoming[%zu]=%d)\n",
-                       __func__, i, i, saved[i], i, incoming[i]);
-            return static_cast<int>(i);
-        }
-    }
-    return static_cast<int>(min_len);
-}
-
 void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
+    if (checkpoint_max_count_ == 0) {
+        return;
+    }
     if (prefill_model_ == nullptr) {
         return;
     }
@@ -714,12 +711,13 @@ void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
     auto &slot = snapshot.checkpoint_pool[slot_idx];
     slot.position = position;
     slot.used = true;
-
+    PERF_START(SAVE_CHECKPOINT_COPY);
     // Pre-allocated buffers — only memcpy, no alloc/free.
     for (size_t ci = 0; ci < checkpoint_tensor_indices_.size(); ++ci) {
         size_t ti = checkpoint_tensor_indices_[ci];
         tensors[ti].CopyTo(slot.state_tensors[ci]);
     }
+    PERF_STOP(SAVE_CHECKPOINT_COPY);
 
     LLAMA_LOG_INFO("%s: saved checkpoint seq_id=%d pos=%d slot=%zu "
                    "state_tensors=%zu storage=%s in_use=%zu/%zu\n",
@@ -733,6 +731,9 @@ void HoumoQwen35LLM::save_state_checkpoint(int seq_id, int position) {
 
 int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
                                                       int max_position) {
+    if (checkpoint_max_count_ == 0) {
+        return -1;
+    }
     auto snap_iter = prefill_snapshots_.find(seq_id);
     if (snap_iter == prefill_snapshots_.end() || !snap_iter->second.valid) {
         return -1;
@@ -772,7 +773,9 @@ int HoumoQwen35LLM::find_and_restore_best_checkpoint(int seq_id,
                            __func__, ci, seq_id);
             return -1;
         }
+        PERF_START(RESTORE_CHECKPOINT_COPY);
         ckpt_tensors[ci].CopyTo(tensors[ti]);
+        PERF_STOP(RESTORE_CHECKPOINT_COPY);
     }
     int restored_pos = slot.position;
 
@@ -1090,7 +1093,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             int best_ckpt = -1;
             const int first_unsafe_pos = snap_iter->second.first_unsafe_position;
             const int first_safe_pos = snap_iter->second.first_safe_position;
-            PERF_START(find_and_restore_best_checkpoint);
+
             if (!snap_iter->second.checkpoint_index.empty()) {
                 const int min_ckpt = std::min(first_safe_pos, kv_offset);
                 auto ckpt_it = snap_iter->second.checkpoint_index.find(min_ckpt);
@@ -1100,7 +1103,7 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                     best_ckpt = find_and_restore_best_checkpoint(seq_id, kv_offset);
                 }
             }
-            PERF_STOP(find_and_restore_best_checkpoint);
+
             // Determine the rollback position.
             // - best_ckpt > 0  → state restored to that position
             // - best_ckpt == -1 → no checkpoint found, state must start

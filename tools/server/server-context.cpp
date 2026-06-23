@@ -959,8 +959,10 @@ private:
                 SRV_ERR("failed to create draft context for '%s'\n", params_dft.model.path.c_str());
                 return false;
             }
-
-            ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
+            if (is_hmm)
+                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+            else
+                ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
 
             params_base.speculative.draft.ctx_tgt = ctx_tgt;
             params_base.speculative.draft.ctx_dft = ctx_dft.get();
@@ -978,8 +980,10 @@ private:
                 SRV_ERR("%s", "failed to create MTP context\n");
                 return false;
             }
-
-            ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
+            if (is_hmm)
+                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+            else
+                ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
 
             params_base.speculative.draft.ctx_tgt = ctx_tgt;
             params_base.speculative.draft.ctx_dft = ctx_dft.get();
@@ -1058,8 +1062,10 @@ private:
         }
 
         slots.clear();
-
-        ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
+        if (is_hmm)
+            ctx_tgt_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+        else
+            ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
         if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             SRV_WRN("%s", "speculative decoding not supported by this context\n");
         }
@@ -3974,6 +3980,83 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
 
 std::unique_ptr<server_res_generator> server_routes::create_response(bool bypass_sleep) {
     return std::make_unique<server_res_generator>(queue_tasks, queue_results, params.sleep_idle_seconds, bypass_sleep);
+}
+
+bool server_routes::warmup_system_prompt(const std::string & system_prompt) {
+    if (system_prompt.empty()) {
+        return true;
+    }
+
+    SRV_INF("warming up server prompt cache with --server-warmup-system-prompt, n_chars = %zu\n",
+            system_prompt.size());
+
+    bool should_stop = false;
+    auto should_stop_cb = [&should_stop]() {
+        return should_stop;
+    };
+
+    json body = {
+        {"messages", json::array({
+            {
+                {"role", "system"},
+                {"content", system_prompt},
+            },
+            {
+                {"role", "user"},
+                {"content", ""},
+            },
+        })},
+        {"max_tokens", 1},
+        {"temperature", 0.0},
+        {"stream", false},
+    };
+
+    server_http_req req {
+        {},
+        {},
+        "/v1/chat/completions",
+        "",
+        "",
+        {},
+        should_stop_cb,
+    };
+
+    try {
+        std::vector<raw_buffer> files;
+        std::vector<size_t> file_group_sizes;
+        json body_parsed = oaicompat_chat_params_parse(
+            body,
+            meta->chat_params,
+            files,
+            &file_group_sizes);
+        auto res = handle_completions_impl(
+            req,
+            SERVER_TASK_TYPE_COMPLETION,
+            body_parsed,
+            files,
+            file_group_sizes,
+            TASK_RESPONSE_TYPE_OAI_CHAT);
+
+        if (!res) {
+            SRV_ERR("%s", "server prompt cache warmup failed: empty response\n");
+            return false;
+        }
+        if (res->is_stream()) {
+            std::string chunk;
+            while (res->next(chunk)) {
+            }
+        }
+        if (res->status >= 400) {
+            SRV_ERR("server prompt cache warmup failed: status = %d, response = %s\n", res->status, res->data.c_str());
+            return false;
+        }
+    } catch (const std::exception & e) {
+        SRV_ERR("server prompt cache warmup failed: %s\n", e.what());
+        return false;
+    }
+
+    SRV_INF("%s", "server prompt cache warmup finished\n");
+    return true;
 }
 
 server_routes::server_routes(const common_params & params, server_context & ctx_server)

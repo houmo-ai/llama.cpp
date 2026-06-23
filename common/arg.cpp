@@ -1600,6 +1600,23 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD, LLAMA_EXAMPLE_EMBEDDING, LLAMA_EXAMPLE_RETRIEVAL, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_DEBUG}));
     add_opt(common_arg(
+        {"--server-warmup-system-prompt"}, "PROMPT",
+        "system prompt used to warm up the server prompt cache after model loading (server only, empty = disabled)",
+        [](common_params & params, const std::string & value) {
+            params.server_warmup_system_prompt = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SERVER_WARMUP_SYSTEM_PROMPT"));
+    add_opt(common_arg(
+        {"--server-warmup-system-prompt-file"}, "FNAME",
+        "file containing the system prompt used to warm up the server prompt cache after model loading (server only)",
+        [](common_params & params, const std::string & value) {
+            params.server_warmup_system_prompt = read_file(value);
+            if (!params.server_warmup_system_prompt.empty() && params.server_warmup_system_prompt.back() == '\n') {
+                params.server_warmup_system_prompt.pop_back();
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SERVER_WARMUP_SYSTEM_PROMPT_FILE"));
+    add_opt(common_arg(
         {"--spm-infill"},
         string_format(
             "use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this. (default: %s)",

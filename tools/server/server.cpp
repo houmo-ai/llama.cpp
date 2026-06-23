@@ -298,7 +298,6 @@ int main(int argc, char ** argv) {
         }
 
         routes.update_meta(ctx_server);
-        ctx_http.is_ready.store(true);
 
         SRV_INF("%s", "model loaded\n");
 
@@ -336,6 +335,18 @@ int main(int argc, char ** argv) {
     } else {
         SRV_INF("server is listening on %s\n", ctx_http.listening_address.c_str());
 
+        std::atomic_bool warmup_ok { true };
+        std::thread warmup_thread([&]() {
+            if (!routes.warmup_system_prompt(params.server_warmup_system_prompt)) {
+                warmup_ok.store(false);
+                ctx_http.stop();
+                ctx_server.terminate();
+                return;
+            }
+
+            ctx_http.is_ready.store(true);
+        });
+
         // optionally, notify router server that this instance is ready
         std::thread monitor_thread;
         if (server_models::is_child_server()) {
@@ -345,6 +356,22 @@ int main(int argc, char ** argv) {
 
         // this call blocks the main thread until queue_tasks.terminate() is called
         ctx_server.start_loop();
+
+        if (warmup_thread.joinable()) {
+            warmup_thread.join();
+        }
+
+        if (!warmup_ok.load()) {
+            clean_up();
+            if (ctx_http.thread.joinable()) {
+                ctx_http.thread.join();
+            }
+            if (monitor_thread.joinable()) {
+                monitor_thread.join();
+            }
+            SRV_ERR("%s", "exiting due to server prompt cache warmup error\n");
+            return 1;
+        }
 
         clean_up();
         if (ctx_http.thread.joinable()) {
