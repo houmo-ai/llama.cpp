@@ -246,6 +246,14 @@ common_chat_msg task_result_state::update_chat_msg(
         std::vector<common_chat_msg_diff> & diffs,
         bool filter_tool_calls) {
     generated_text += text_added;
+    const size_t generated_text_size_before_sanitize = generated_text.size();
+    if (!utf8_sanitize_safe(generated_text)) {
+        SRV_WRN(
+            "sanitized invalid UTF-8 before chat parser: size_before=%zu size_after=%zu removed=%zu\n",
+            generated_text_size_before_sanitize,
+            generated_text.size(),
+            generated_text_size_before_sanitize - generated_text.size());
+    }
     auto msg_prv_copy = chat_msg;
     //SRV_DBG("Parsing chat message: %s\n", generated_text.c_str());
     auto new_msg = common_chat_parse(
@@ -1521,7 +1529,17 @@ json server_task_result_cmpl_final::to_json_anthropic_stream() {
 //
 void server_task_result_cmpl_partial::update(task_result_state & state) {
     is_updated = true;
-    state.update_chat_msg(content, true, oaicompat_msg_diffs);
+    try {
+        state.update_chat_msg(content, true, oaicompat_msg_diffs);
+    } catch (const std::exception & e) {
+        SRV_ERR(
+            "chat parser failed for chunk: n_decoded=%d token=%d content='%s' error='%s'\n",
+            n_decoded,
+            tokens.empty() ? -1 : tokens[0],
+            content.c_str(),
+            e.what());
+        throw;
+    }
 
     // Copy current state for use in to_json_*() (reflects state BEFORE this chunk)
     thinking_block_started = state.thinking_block_started;

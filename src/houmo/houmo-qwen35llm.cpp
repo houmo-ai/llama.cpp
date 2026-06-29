@@ -206,9 +206,9 @@ void HoumoQwen35LLM::resolve_input_names() {
     prefill_width_pos_name_ =
         find_input_name_any(prefill_input_map_, {"width_position"});
     prefill_valid_length_name_ =
-        find_input_name_any(prefill_input_map_, {"valid_length"});
+        find_input_name_any(prefill_input_map_, {"valid_length", "past_seq_length"});
     prefill_current_length_name_ =
-        find_input_name_any(prefill_input_map_, {"current_length"});
+        find_input_name_any(prefill_input_map_, {"current_length", "current_input_length"});
     prefill_linear_mask_name_ =
         find_input_name_any(prefill_input_map_, {"linear_attn_mask"});
 
@@ -226,9 +226,9 @@ void HoumoQwen35LLM::resolve_input_names() {
     decode_width_pos_names_ = collect_input_names_any(
         decode_input_map_, {"width_position"});
     decode_valid_length_names_ = collect_input_names_any(
-        decode_input_map_, {"valid_length"});
+        decode_input_map_, {"valid_length", "past_seq_length"});
     decode_current_length_names_ = collect_input_names_any(
-        decode_input_map_, {"current_length"});
+        decode_input_map_, {"current_length", "current_input_length"});
     decode_linear_mask_names_ = collect_input_names_any(
         decode_input_map_, {"linear_attn_mask"});
 }
