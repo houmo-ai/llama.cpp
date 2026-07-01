@@ -29,7 +29,18 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
   private:
     using prefill_round_callback = std::function<void(size_t, int32_t, const float *, size_t)>;
     int houmo_prefill_impl(std::vector<llama_token> &tokens, int seq_id, float *logits,
-                           const prefill_round_callback &on_round_output);
+                 const prefill_round_callback &on_round_output);
 
-    std::map<int32_t, std::vector<uint16_t>> input_embedding_ids_;
+    struct PrefillChunk {
+      bool is_embedding = false;
+      size_t n_tokens = 0;
+      std::vector<llama_token> tokens;
+      std::vector<uint16_t> embeddings;
+
+      size_t size() const {
+        return n_tokens;
+      }
+    };
+
+    std::map<int32_t, std::vector<PrefillChunk>> chunk_history_;
 };

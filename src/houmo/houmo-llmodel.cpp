@@ -738,17 +738,16 @@ int HouMoLLModel::Impl::set_input_for_decode(std::vector<llama_token> &batches,
 }
 
 int HouMoLLModel::Impl::set_xlenght_for_decode(std::vector<int> &seq_ids) {
+    (void)seq_ids;  // 避免未使用的参数警告
     std::vector<int32_t> valid_length_vec(n_decode_batch_, 1);
-    for (size_t k = 0; k < seq_ids.size(); k++) {
-        int batch_id = seq_ids[k];
-        // 单batch模式下所有序列共用batch 0
-        if (n_decode_batch_ == 1)
-            batch_id = 0;
-        valid_length_vec[batch_id] = decode_valid_length_[seq_ids[k]];
-        if (valid_length_vec[batch_id] >= context_length_) {
-            LLAMA_LOG_WARN("%s: valid_length_vec[%d] = %d >= context_length_ , "
+    // seq 绑定slot
+    for (size_t i = 0; i < valid_length_vec.size(); i++) {
+        valid_length_vec[i] =
+            decode_valid_length_[i] > 0 ? decode_valid_length_[i] : 1;
+        if (valid_length_vec[i] >= context_length_) {
+            LLAMA_LOG_WARN("%s: valid_length_vec[%zu] = %d >= context_length_ , "
                            "end of decoding\n",
-                           __func__, batch_id, valid_length_vec[batch_id]);
+                           __func__, i, valid_length_vec[i]);
             return 1;
         }
     }
@@ -792,7 +791,18 @@ int HouMoLLModel::Impl::set_xlenght_for_decode(std::vector<int> &seq_ids) {
             // current_length
             name = decode_current_length_names_[i];
             auto current_valid_length = decode_input_map_.at(name);
-            set_input_data(current_valid_length, 1, 1);
+            bool found = false;
+            for (size_t j = 0; j < seq_ids.size(); j++) {
+                if (seq_ids[j] == (int)i) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                set_input_data(current_valid_length, 1, 1);
+            } else {
+                set_input_data(current_valid_length, 1, 0);
+            }
             // LLAMA_LOG_DEBUG("name = %s, current_valid_length: %d\n",
             //                 name.c_str(), 1);
             status = decode_model_->SetInput(name, current_valid_length);
@@ -800,23 +810,6 @@ int HouMoLLModel::Impl::set_xlenght_for_decode(std::vector<int> &seq_ids) {
                 LLAMA_LOG_ERROR("%s: failed to set input %s\n", __func__,
                                 name.c_str());
                 return -1;
-            }
-
-            // FIXME: @guoxing.xu 文本模型(for moe 测试模型,模型修改后可以移除)
-            if (decode_input_map_.count(decode_model_->GetInputName(3)) > 0) {
-                auto position_ids =
-                    decode_input_map_.at(decode_model_->GetInputName(3));
-                std::string name = decode_model_->GetInputName(3);
-                if (i > 0 && n_decode_batch_ > 1) {
-                    name += "_batch" + std::to_string(i);
-                }
-                set_input_data(position_ids, 1, valid_length_vec[i]);
-                auto status = decode_model_->SetInput(name, position_ids);
-                if (status != tcim::Status::OK) {
-                    LLAMA_LOG_ERROR("%s: failed to set input %s\n", __func__,
-                                    name.c_str());
-                    return -1;
-                }
             }
         }
     }
