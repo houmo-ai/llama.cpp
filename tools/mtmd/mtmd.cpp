@@ -26,25 +26,6 @@
 #include <utility>
 #include <vector>
 
-static int32_t qwen3_asr_feat_extract_output_lengths(int32_t input_lengths) {
-    input_lengths = std::max<int32_t>(input_lengths, 1);
-    const int32_t input_lengths_leave = input_lengths % 100;
-    const int32_t feat_lengths = (input_lengths_leave - 1) / 2 + 1;
-    return std::max<int32_t>(1, ((feat_lengths - 1) / 2 + 1 - 1) / 2 + 1 + (input_lengths / 100) * 13);
-}
-
-static int32_t glm_asr_feat_extract_output_lengths(int32_t input_lengths) {
-    input_lengths = std::max<int32_t>(input_lengths, 1);
-    for (const auto & conv : { std::pair<int32_t, int32_t>{3, 1}, std::pair<int32_t, int32_t>{3, 2} }) {
-        const int32_t kernel_size = conv.first;
-        const int32_t stride      = conv.second;
-        const int32_t padding     = 1;
-        input_lengths = (input_lengths + 2 * padding - (kernel_size - 1) - 1) / stride + 1;
-    }
-    const int32_t merge_factor = 4;
-    return std::max<int32_t>(1, (input_lengths - merge_factor) / merge_factor + 1);
-}
-
 // represents raw image data, layout is RGBRGBRGB...
 // length of data must be nx * ny * 3
 struct mtmd_bitmap {
@@ -287,6 +268,8 @@ struct mtmd_context {
             if (ctx_a) {
                 if (clip_get_projector_type(ctx_a) == PROJECTOR_TYPE_GLMA) {
                     hm_audio = new HoumoGLMAsrAudio();
+                } else if (clip_get_projector_type(ctx_a) == PROJECTOR_TYPE_GEMMA4A) {
+                    hm_audio = new HoumoGemmaAudio();
                 } else {
                     hm_audio = new HoumoQwen3Audio();
                 }
@@ -1028,6 +1011,7 @@ struct mtmd_tokenizer {
             std::vector<mtmd_audio_mel> mel_spec_chunks;
             const float * samples = (const float *)bitmap->data.data();
             size_t n_samples = bitmap->data.size() / sizeof(float);
+            LOG_INF("%s: audio data has %zu samples\n", __func__, n_samples);
             bool ok = ctx->audio_preproc->preprocess(samples, n_samples, mel_spec_chunks);
             if (!ok) {
                 LOG_ERR("Unable to preprocess audio\n");
@@ -1043,18 +1027,7 @@ struct mtmd_tokenizer {
                 mel_f32->ny  = mel_spec.n_mel;
                 LOG_INF("%s: mel spectrogram chunk has dimensions %d x %d\n", __func__, mel_f32->nx, mel_f32->ny);
                 mel_f32->buf = std::move(mel_spec.data);
-                size_t n_tokens = 0;
-                if (clip_is_hmm(ctx->ctx_a) && ctx->hm_audio != nullptr) {
-                    if (ctx->hm_audio->is_glm_asr() || ctx->proj_type_a() == PROJECTOR_TYPE_GLMA) {
-                        n_tokens = (size_t) glm_asr_feat_extract_output_lengths(mel_f32->nx);
-                    } else {
-                        n_tokens = (size_t) qwen3_asr_feat_extract_output_lengths(mel_f32->nx);
-                    }
-                    LOG_INF("%s: HMM audio dynamic n_tokens = %d from feature_lens = %d\n",
-                            __func__, (int) n_tokens, mel_f32->nx);
-                } else {
-                    n_tokens = clip_n_output_tokens(ctx->ctx_a, mel_f32.get());
-                }
+                size_t n_tokens = clip_n_output_tokens(ctx->ctx_a, mel_f32.get());
                 LOG_DBG("mel_spec.n_len = %d, mel_spec.n_mel = %d, n_tokens = %d\n", mel_spec.n_len, mel_spec.n_mel, (int)n_tokens);
                 LOG_INF("%s: mel spectrogram chunk has %d tokens\n", __func__, (int)n_tokens);
 

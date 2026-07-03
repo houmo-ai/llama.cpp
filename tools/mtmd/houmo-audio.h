@@ -71,3 +71,29 @@ class HoumoGLMAsrAudio : public HoumoAudio {
                           int out_offset = 0,
                           int32_t feature_lens = -1) override;
 };
+
+class HoumoGemmaAudio : public HoumoAudio {
+  public:
+    HoumoGemmaAudio() : HoumoAudio() {}
+    ~HoumoGemmaAudio() override = default;
+    virtual bool init(const std::string &model_path, std::vector<int> device_ids) override;
+    virtual bool encoding(const std::vector<float> &input_data,
+                          std::vector<float> &output_data,
+                          int out_offset = 0,
+                          int32_t feature_lens = -1) override;
+
+  private:
+    int32_t output_tokens_from_frames(int32_t input_frames) const;
+    size_t shape_num_elements(const std::vector<int64_t> & shape) const;
+    void copy_mask_to_tensor(tcim::Tensor & dst_tensor, const std::vector<float> & src) const;
+    std::vector<float> build_feature_mask(int32_t total_frames, int32_t valid_frames) const;
+    std::vector<float> build_attention_mask(int32_t total_frames, int32_t valid_frames,
+                                            const std::vector<int64_t> & shape) const;
+    size_t count_valid_mask_entries(const tcim::Tensor & output_tensor) const;
+
+  private:
+    std::string audio_input_mask_name_;
+    std::string audio_attention_mask_name_;
+    std::string audio_output_embeds_name_;
+    std::string audio_output_mask_name_;
+};

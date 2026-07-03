@@ -22,7 +22,66 @@ int tensor_dim_or(const tcim::Tensor &tensor, size_t dim, int fallback) {
     return fallback;
 }
 
+bool is_per_layer_input(const std::string &name) {
+    return name.find("per_layer_inputs") != std::string::npos;
+}
+
+bool is_local_mask(const std::string &name) {
+    return name.find("local_attention_mask") != std::string::npos ||
+           name.find("sliding_attention_mask") != std::string::npos;
+}
+
+bool is_global_mask(const std::string &name) {
+    return name.find("global_attention_mask") != std::string::npos ||
+           name.find("full_attention_mask") != std::string::npos;
+}
+
 } // namespace
+
+bool HouMoGemma4::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
+    HouMoLLModel::Impl::houmo_load(ml, device_ids);
+    std::string file_name = ml.fname_;
+
+    // 加载 per_layer_embedding.bin
+    gguf_context *ctx = ml.metadata_ptr.get();
+    const int n_tensors = gguf_get_n_tensors(ctx);
+    for (int i = 0; i < n_tensors; ++i) {
+        const char *name = gguf_get_tensor_name(ctx, i);
+        if (name == nullptr) {
+            continue;
+        }
+        if (strcmp(name, "per_layer_embedding.bin") == 0) {
+            if (per_layer_embedding_layer_ == nullptr) {
+                per_layer_embedding_layer_ =
+                    std::make_shared<HoumoEmbeddingLayer>(
+                        file_name,
+                        gguf_get_tensor_offset(ctx, i) +
+                            gguf_get_meta_size(ctx),
+                        gguf_get_tensor_size(ctx, i));
+                break;
+            }
+        }
+    }
+    // 解析gemma4.attention.shared_kv_layers
+    auto key_id = gguf_find_key(ctx, "gemma4.attention.shared_kv_layers");
+    if (key_id < 0) {
+        LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
+                       "gemma4.attention.shared_kv_layers");
+    } else {
+        auto shared_layers = gguf_get_val_u32(ctx, key_id);
+        n_blocks_ -= shared_layers;
+        LLAMA_LOG_INFO("%s: gemma4.attention.shared_kv_layers = %u, n_blocks_ = %d\n", __func__, shared_layers, n_blocks_);
+    }
+    key_id = gguf_find_key(ctx, "gemma4.attention.sliding_window");
+    if (key_id < 0) {
+        LLAMA_LOG_INFO("%s: not found key %s in gguf file\n", __func__,
+                       "gemma4.attention.sliding_window");
+    } else {
+        sliding_window_ = gguf_get_val_u32(ctx, key_id);
+        LLAMA_LOG_INFO("%s: gemma4.attention.sliding_window = %u\n", __func__, sliding_window_);
+    }
+    return true;
+}
 
 void HouMoGemma4::houmo_init(houmo_memory_i *memory, int seq_max,
                              ggml_abort_callback abort_callback,
@@ -42,26 +101,146 @@ void HouMoGemma4::houmo_init(houmo_memory_i *memory, int seq_max,
 }
 
 void HouMoGemma4::resolve_attention_names() {
+    prefill_local_attention_names_.clear();
+    prefill_global_attention_names_.clear();
     local_attention_names_.clear();
     global_attention_names_.clear();
+    prefill_per_layer_input_name_.clear();
+    decode_per_layer_input_name_.clear();
+
+    if (prefill_model_ != nullptr) {
+        for (size_t i = 0; i < prefill_model_->GetInputNum(); ++i) {
+            std::string name = prefill_model_->GetInputName(i);
+            if (is_per_layer_input(name)) {
+                prefill_per_layer_input_name_ = name;
+            } else if (is_local_mask(name)) {
+                prefill_local_attention_names_.push_back(name);
+            } else if (is_global_mask(name)) {
+                prefill_global_attention_names_.push_back(name);
+            }
+        }
+        if (prefill_global_attention_names_.empty() && prefill_local_attention_names_.empty()) {
+            if (prefill_model_->GetInputNum() > 3) {
+                std::string name = prefill_model_->GetInputName(3);
+                if (!is_per_layer_input(name)) {
+                    prefill_global_attention_names_.push_back(name);
+                }
+            }
+            if (prefill_model_->GetInputNum() > 4) {
+                std::string name = prefill_model_->GetInputName(4);
+                if (!is_per_layer_input(name)) {
+                    prefill_local_attention_names_.push_back(name);
+                }
+            }
+        }
+    }
     if (decode_model_ == nullptr) {
+        visual_bidirectional_attention_ = prefill_per_layer_input_name_.empty();
         return;
     }
     for (size_t i = 0; i < decode_model_->GetInputNum(); ++i) {
         std::string name = decode_model_->GetInputName(i);
-        if (name.find("local_attention_mask") != std::string::npos ||
-            name.find("sliding_attention_mask") != std::string::npos) {
+        if (is_local_mask(name)) {
             local_attention_names_.push_back(name);
-        } else if (name.find("global_attention_mask") != std::string::npos) {
+        } else if (is_global_mask(name)) {
             global_attention_names_.push_back(name);
+        } else if (is_per_layer_input(name)) {
+            decode_per_layer_input_name_ = name;
         }
     }
     if (local_attention_names_.empty() && decode_input_map_.count(decode_model_->GetInputName(3)) > 0) {
-        local_attention_names_.push_back(decode_model_->GetInputName(3));
+        std::string name = decode_model_->GetInputName(3);
+        if (!is_per_layer_input(name)) {
+            local_attention_names_.push_back(name);
+        }
     }
     if (global_attention_names_.empty() && decode_input_map_.count(decode_model_->GetInputName(4)) > 0) {
-        global_attention_names_.push_back(decode_model_->GetInputName(4));
+        std::string name = decode_model_->GetInputName(4);
+        if (!is_per_layer_input(name)) {
+            global_attention_names_.push_back(name);
+        }
     }
+    // gemma4-26B dense text path uses visual bidirectional attention, while
+    // gemma4_e E2B/E4B path has per_layer_inputs and keeps Base default
+    // visual_bidirectional_attention=False. Detect E-series by PLIB input.
+    visual_bidirectional_attention_ = prefill_per_layer_input_name_.empty() &&
+                                      decode_per_layer_input_name_.empty();
+}
+
+int HouMoGemma4::set_per_layer_inputs_for_prefill(const llama_token *tokens,
+                                                  int current_length) {
+    if (prefill_per_layer_input_name_.empty()) {
+        return 0;
+    }
+    if (per_layer_embedding_layer_ == nullptr) {
+        LLAMA_LOG_ERROR("%s: prefill requires per_layer_inputs but per_layer_embedding.bin is not loaded\n", __func__);
+        return -1;
+    }
+    auto &input = prefill_input_map_.at(prefill_per_layer_input_name_);
+    const auto shape = input.Info().Shape();
+    if (shape.size() != 4) {
+        LLAMA_LOG_ERROR("%s: unsupported prefill per_layer_inputs rank=%zu\n", __func__, shape.size());
+        return -1;
+    }
+    const int seq_len = static_cast<int>(shape[1]);
+    const size_t per_token_elems = static_cast<size_t>(shape[2]) * static_cast<size_t>(shape[3]);
+    if (per_token_elems != per_layer_embedding_layer_->get_n_embd()) {
+        LLAMA_LOG_ERROR("%s: per_layer embedding dim mismatch, input=%zu, embedding=%u\n",
+                        __func__, per_token_elems, per_layer_embedding_layer_->get_n_embd());
+        return -1;
+    }
+    if (current_length > seq_len) {
+        LLAMA_LOG_ERROR("%s: current_length=%d > seq_len=%d\n", __func__, current_length, seq_len);
+        return -1;
+    }
+    std::memset(input.Data(), 0, input.MemSize());
+    if (current_length > 0) {
+        per_layer_embedding_layer_->get_embedding_batch(tokens, current_length, input.Data());
+    }
+    prefill_model_->SetInput(prefill_per_layer_input_name_, input);
+    return 0;
+}
+
+int HouMoGemma4::set_per_layer_inputs_for_decode(std::vector<llama_token> &batches,
+                                                 std::vector<int> &seq_ids) {
+    if (decode_per_layer_input_name_.empty()) {
+        return 0;
+    }
+    if (per_layer_embedding_layer_ == nullptr) {
+        LLAMA_LOG_ERROR("%s: decode requires per_layer_inputs but per_layer_embedding.bin is not loaded\n", __func__);
+        return -1;
+    }
+    auto &input = decode_input_map_.at(decode_per_layer_input_name_);
+    const auto shape = input.Info().Shape();
+    if (shape.size() != 4) {
+        LLAMA_LOG_ERROR("%s: unsupported decode per_layer_inputs rank=%zu\n", __func__, shape.size());
+        return -1;
+    }
+    const size_t batch = static_cast<size_t>(shape[0]);
+    const size_t seq_len = static_cast<size_t>(shape[1]);
+    const size_t per_token_elems = static_cast<size_t>(shape[2]) * static_cast<size_t>(shape[3]);
+    if (seq_len < 1) {
+        LLAMA_LOG_ERROR("%s: invalid decode per_layer_inputs seq_len=%zu\n", __func__, seq_len);
+        return -1;
+    }
+    if (per_token_elems != per_layer_embedding_layer_->get_n_embd()) {
+        LLAMA_LOG_ERROR("%s: per_layer embedding dim mismatch, input=%zu, embedding=%u\n",
+                        __func__, per_token_elems, per_layer_embedding_layer_->get_n_embd());
+        return -1;
+    }
+    std::memset(input.Data(), 0, input.MemSize());
+    for (size_t i = 0; i < seq_ids.size(); ++i) {
+        int batch_id = n_decode_batch_ == 1 ? 0 : seq_ids[i];
+        if (batch_id < 0 || static_cast<size_t>(batch_id) >= batch) {
+            LLAMA_LOG_ERROR("%s: batch_id=%d out of range, batch=%zu\n", __func__, batch_id, batch);
+            return -1;
+        }
+        const size_t offset = static_cast<size_t>(batch_id) * seq_len * per_token_elems;
+        per_layer_embedding_layer_->get_embedding_batch(&batches[i], 1,
+            static_cast<uint16_t *>(input.Data()) + offset);
+    }
+    decode_model_->SetInput(decode_per_layer_input_name_, input);
+    return 0;
 }
 
 bool HouMoGemma4::has_cached_inputs(int seq_id) const {
@@ -106,12 +285,12 @@ void HouMoGemma4::clear_device_kv_range(int seq_id) {
 
 void HouMoGemma4::clear_cached_inputs(int seq_id) {
     embedding_cache_[seq_id].clear();
-    pending_chunks_[seq_id].clear();
+    chunk_history_[seq_id].clear();
 }
 
 std::vector<uint16_t> HouMoGemma4::generate_mask_f16(
     int batch_size, int fill_length, int current_length, int past_seq_length,
-    int width, bool is_local, const std::vector<ChunkInfo> *chunks,
+    int width, bool is_local, const std::vector<PrefillChunk> *chunks,
     int round_start) const {
     const int mask_size = batch_size * fill_length * width;
     std::vector<uint16_t> mask_tensor(static_cast<size_t>(mask_size), F16_NEG_MIN_UINT);
@@ -125,6 +304,11 @@ std::vector<uint16_t> HouMoGemma4::generate_mask_f16(
         const int batch_offset = b * fill_length * width;
         for (int q = 0; q < fill_length; ++q) {
             if (q >= current_length) {
+                // Python _build_masks() keeps padded query rows valid at key 0.
+                // Leaving a full -inf row can make softmax produce bad values.
+                if (width > 0) {
+                    mask_tensor[static_cast<size_t>(batch_offset + q * width)] = 0;
+                }
                 continue;
             }
             if (is_local) {
@@ -143,15 +327,13 @@ std::vector<uint16_t> HouMoGemma4::generate_mask_f16(
     }
 
     // Gemma4Processor marks image soft tokens with mm_token_type_ids 1/2.
-    // The Python demo makes a contiguous vision group fully visible to itself;
-    // mirror that behavior for externally supplied vision embedding chunks.
     if (chunks != nullptr && current_length > 0) {
         int local_pos = 0;
         for (const auto &chunk : *chunks) {
             const int chunk_start = local_pos;
-            const int chunk_end = local_pos + chunk.size;
+            const int chunk_end = local_pos + static_cast<int>(chunk.size());
             local_pos = chunk_end;
-            if (!chunk.is_vision) {
+            if (!chunk.is_embedding || !chunk.bidirectional_attention) {
                 continue;
             }
 
@@ -187,23 +369,25 @@ std::vector<uint16_t> HouMoGemma4::generate_mask_f16(
 
 int HouMoGemma4::set_attentions_for_prefill(int current_length, int valid_length,
                                             int round_start, int seq_id) {
-    std::string name = prefill_model_->GetInputName(3);
-    auto &global_mask = prefill_input_map_.at(name);
-    const int global_fill = tensor_dim_or(global_mask, 2, prefill_length_);
-    const int global_width = tensor_dim_or(global_mask, 3, context_length_);
-    auto global_host = generate_mask_f16(1, global_fill, current_length, valid_length,
-                                         global_width, false, &pending_chunks_[seq_id], round_start);
-    global_mask.Buffer().CopyFromHost(global_host.data(), global_mask.MemSize());
-    prefill_model_->SetInput(name, global_mask);
+    for (const auto &name : prefill_global_attention_names_) {
+        auto &global_mask = prefill_input_map_.at(name);
+        const int global_fill = tensor_dim_or(global_mask, 2, prefill_length_);
+        const int global_width = tensor_dim_or(global_mask, 3, context_length_);
+        auto global_host = generate_mask_f16(1, global_fill, current_length, valid_length,
+                                             global_width, false, &chunk_history_[seq_id], round_start);
+        global_mask.Buffer().CopyFromHost(global_host.data(), global_mask.MemSize());
+        prefill_model_->SetInput(name, global_mask);
+    }
 
-    name = prefill_model_->GetInputName(4);
-    auto &local_mask = prefill_input_map_.at(name);
-    const int local_fill = tensor_dim_or(local_mask, 2, prefill_length_);
-    const int local_width = tensor_dim_or(local_mask, 3, aligned(sliding_window_ + local_fill - 1, 16));
-    auto local_host = generate_mask_f16(1, local_fill, current_length, valid_length,
-                                        local_width, true, &pending_chunks_[seq_id], round_start);
-    local_mask.Buffer().CopyFromHost(local_host.data(), local_mask.MemSize());
-    prefill_model_->SetInput(name, local_mask);
+    for (const auto &name : prefill_local_attention_names_) {
+        auto &local_mask = prefill_input_map_.at(name);
+        const int local_fill = tensor_dim_or(local_mask, 2, prefill_length_);
+        const int local_width = tensor_dim_or(local_mask, 3, aligned(sliding_window_ + local_fill - 1, 16));
+        auto local_host = generate_mask_f16(1, local_fill, current_length, valid_length,
+                                            local_width, true, &chunk_history_[seq_id], round_start);
+        local_mask.Buffer().CopyFromHost(local_host.data(), local_mask.MemSize());
+        prefill_model_->SetInput(name, local_mask);
+    }
     return 0;
 }
 
@@ -244,7 +428,9 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             cache.resize(offset + tokens.size() * static_cast<size_t>(n_embd_));
             embedding_layer_->get_embedding_batch(tokens.data(), tokens.size(),
                                                  cache.data() + offset);
-            pending_chunks_[seq_id].push_back({static_cast<int>(tokens.size()), false});
+            PrefillChunk chunk;
+            chunk.n_tokens = tokens.size();
+            chunk_history_[seq_id].push_back(std::move(chunk));
         }
         return 0;
     }
@@ -338,9 +524,13 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
 
     if (!effective_tokens.empty() && cached_tokens == 0) {
-        pending_chunks_[seq_id].push_back({static_cast<int>(effective_tokens.size()), false});
+        PrefillChunk chunk;
+        chunk.n_tokens = effective_tokens.size();
+        chunk_history_[seq_id].push_back(std::move(chunk));
     } else if (!tokens.empty()) {
-        pending_chunks_[seq_id].push_back({static_cast<int>(tokens.size()), false});
+        PrefillChunk chunk;
+        chunk.n_tokens = tokens.size();
+        chunk_history_[seq_id].push_back(std::move(chunk));
     }
 
     size_t rounds = (total_tokens + prefill_length_ - 1) / prefill_length_;
@@ -388,6 +578,27 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
         prefill_model_->SetInput(prefill_model_->GetInputName(1), valid_tensor);
         prefill_model_->SetInput(prefill_model_->GetInputName(2), current_tensor);
+        const llama_token *pli_tokens = nullptr;
+        std::vector<llama_token> zero_tokens;
+        if (round_start >= cached_tokens) {
+            const size_t token_offset = round_start - cached_tokens;
+            pli_tokens = effective_tokens.data() + token_offset;
+        } else if (round_start + static_cast<size_t>(current_length) <= cached_tokens) {
+            zero_tokens.assign(static_cast<size_t>(current_length), 0);
+            pli_tokens = zero_tokens.data();
+        } else {
+            const size_t emb_part = cached_tokens - round_start;
+            const size_t token_part = static_cast<size_t>(current_length) - emb_part;
+            zero_tokens.assign(static_cast<size_t>(current_length), 0);
+            std::copy(effective_tokens.begin(), effective_tokens.begin() + token_part,
+                      zero_tokens.begin() + static_cast<std::ptrdiff_t>(emb_part));
+            pli_tokens = zero_tokens.data();
+        }
+        if (set_per_layer_inputs_for_prefill(pli_tokens, current_length) != 0) {
+            PERF_STOP(PREFILL_SETINPUT_ONCE);
+            clear_cached_inputs(seq_id);
+            return -1;
+        }
         set_attentions_for_prefill(current_length, valid_length, static_cast<int>(round_start), seq_id);
         if (kv_cache_.find(seq_id) != kv_cache_.end()) {
             auto &kv_item = kv_cache_[seq_id];
@@ -470,7 +681,8 @@ int HouMoGemma4::houmo_prefill(const float *embeddings, int n_tokens,
     size_t embedding_offset = 0;
     CompactHeader header{};
     std::memcpy(&header, ptr, sizeof(CompactHeader));
-    if (header.magic == 0x1234) {
+    const bool has_compact_header = header.magic == 0x1234;
+    if (has_compact_header) {
         embedding_offset = sizeof(CompactHeader);
     }
 
@@ -478,11 +690,18 @@ int HouMoGemma4::houmo_prefill(const float *embeddings, int n_tokens,
     const size_t old_size = cache.size();
     const size_t data_elems = static_cast<size_t>(n_tokens) * static_cast<size_t>(n_embd_);
     cache.resize(old_size + data_elems);
+    // HMM multimodal encoders provide fp16 embeddings. Vision may prepend a
+    // CompactHeader, while audio does not; both payloads are copied as fp16.
     std::memcpy(cache.data() + old_size, ptr + embedding_offset,
                 data_elems * sizeof(uint16_t));
-    pending_chunks_[seq_id].push_back({n_tokens, true});
-    LLAMA_LOG_INFO("%s: cached vision embeddings seq_id=%d n_tokens=%d header_magic=0x%04x\n",
-                   __func__, seq_id, n_tokens, header.magic);
+    PrefillChunk chunk;
+    chunk.is_embedding = true;
+    chunk.bidirectional_attention = has_compact_header && visual_bidirectional_attention_;
+    chunk.n_tokens = static_cast<size_t>(n_tokens);
+    chunk_history_[seq_id].push_back(std::move(chunk));
+    LLAMA_LOG_INFO("%s: cached external embeddings seq_id=%d n_tokens=%d header_magic=0x%04x bidir=%d\n",
+                   __func__, seq_id, n_tokens, header.magic,
+                   chunk_history_[seq_id].back().bidirectional_attention ? 1 : 0);
     return 0;
 }
 
@@ -512,6 +731,10 @@ int HouMoGemma4::houmo_decode(std::vector<llama_token> &batches,
         return ret;
     }
     ret = set_attentions_for_decode(seq_ids);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = set_per_layer_inputs_for_decode(batches, seq_ids);
     if (ret != 0) {
         return ret;
     }

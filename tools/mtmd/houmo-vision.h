@@ -141,6 +141,19 @@ class HoumoGemmaVision : public HoumoVision {
     virtual bool encoding(const std::vector<float> &input_data,
                           std::vector<float> &output_data, int out_offset = 0) override;
   private:
+    void choose_patch_grid(int src_w, int src_h, int &grid_w, int &grid_h) const;
     bool patchify_inplace(std::vector<float> &input_data, std::string &err);
+    bool set_padded_visual_inputs(const std::vector<float> &patches,
+                                  int valid_patches);
     int patch_size_ = 16;
+    int patch_vec_len_ = 768;
+    int max_patches_ = 0;
+    int image_soft_tokens_ = 0;
+    int pooling_kernel_size_ = 3;
+    int patch_grid_w_ = 0;
+    int patch_grid_h_ = 0;
+    std::string pixel_values_name_;
+    std::string pixel_position_ids_name_;
+    std::string pooling_matrix_name_;
+    std::string attention_mask_name_;
 };

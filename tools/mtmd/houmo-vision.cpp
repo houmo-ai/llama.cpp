@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <numeric>
 #include <array>
 #include "nlohmann/json.hpp"
@@ -1015,6 +1016,7 @@ bool HoumoGemmaVision::init(const std::string &model_path, std::vector<int> devi
                 model_path.c_str());
         return false;
     }
+    HoumoVision::patch_size_ = patch_size_;
     int input_size = module_->GetInputNum();
     for (auto i = 0; i < input_size; ++i) {
         auto input_name = module_->GetInputName(i);
@@ -1023,6 +1025,16 @@ bool HoumoGemmaVision::init(const std::string &model_path, std::vector<int> devi
         auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
         input_tensors_.insert(
             std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
+
+        if (input_name.find("pixel_values") != std::string::npos) {
+            pixel_values_name_ = input_name;
+        } else if (input_name.find("pixel_position_ids") != std::string::npos) {
+            pixel_position_ids_name_ = input_name;
+        } else if (input_name.find("pooling_matrix") != std::string::npos) {
+            pooling_matrix_name_ = input_name;
+        } else if (input_name.find("attention_mask") != std::string::npos) {
+            attention_mask_name_ = input_name;
+        }
     }
     int out_size = module_->GetOutputNum();
     for (auto i = 0; i < out_size; ++i) {
@@ -1030,16 +1042,77 @@ bool HoumoGemmaVision::init(const std::string &model_path, std::vector<int> devi
         LOG_INF("%s: output_name: %s\n", __func__, output_name.c_str());
         output_names_.push_back(output_name);
     }
-    int32_t shape1 = input_tensors_[module_->GetInputName(0)].Info().Shape()[1];
-    image_width_ = (int)sqrt(shape1) * patch_size_;
-    image_height_ = image_width_;
+    if (pixel_values_name_.empty() || pixel_position_ids_name_.empty() ||
+        pooling_matrix_name_.empty() || attention_mask_name_.empty()) {
+        LOG_ERR("%s: Gemma4 visual model must have inputs: pixel_values, pixel_position_ids, pooling_matrix, attention_mask\n",
+                __func__);
+        return false;
+    }
+
+    const auto pixel_shape = input_tensors_[pixel_values_name_].Info().Shape();
+    const auto pooling_shape = input_tensors_[pooling_matrix_name_].Info().Shape();
+    if (pixel_shape.size() != 3 || pooling_shape.size() != 3) {
+        LOG_ERR("%s: invalid Gemma4 visual input ranks: pixel_values rank=%zu pooling_matrix rank=%zu\n",
+                __func__, pixel_shape.size(), pooling_shape.size());
+        return false;
+    }
+    max_patches_ = static_cast<int>(pixel_shape[1]);
+    patch_vec_len_ = static_cast<int>(pixel_shape[2]);
+    image_soft_tokens_ = static_cast<int>(pooling_shape[1]);
+
+    if (image_soft_tokens_ > 0 && max_patches_ % image_soft_tokens_ == 0) {
+        const int kernel_area = max_patches_ / image_soft_tokens_;
+        const int kernel = static_cast<int>(std::sqrt(static_cast<float>(kernel_area)) + 0.5f);
+        if (kernel > 0 && kernel * kernel == kernel_area) {
+            pooling_kernel_size_ = kernel;
+        }
+    }
+
+    choose_patch_grid(1, 1, patch_grid_w_, patch_grid_h_);
+    image_width_ = static_cast<uint16_t>(patch_grid_w_ * patch_size_);
+    image_height_ = static_cast<uint16_t>(patch_grid_h_ * patch_size_);
     image_frames_ = 1;
+    LOG_INF("%s: Gemma4 vision max_patches=%d soft_tokens=%d pooling=%d default_grid=%dx%d image=%dx%d\n",
+            __func__, max_patches_, image_soft_tokens_, pooling_kernel_size_,
+            patch_grid_w_, patch_grid_h_, image_width_, image_height_);
     return true;
+}
+
+void HoumoGemmaVision::choose_patch_grid(int src_w, int src_h,
+                                         int &grid_w, int &grid_h) const {
+    const int max_patches = max_patches_ > 0 ? max_patches_ : 2520;
+    const int kernel = pooling_kernel_size_ > 0 ? pooling_kernel_size_ : 3;
+    const float target_aspect = src_h > 0 ? static_cast<float>(src_w) / src_h : 1.0f;
+    float best_score = std::numeric_limits<float>::max();
+    grid_w = kernel;
+    grid_h = max_patches / kernel;
+
+    for (int h = kernel; h <= max_patches; h += kernel) {
+        if (max_patches % h != 0) {
+            continue;
+        }
+        const int w = max_patches / h;
+        if (w % kernel != 0) {
+            continue;
+        }
+        const float aspect = static_cast<float>(w) / h;
+        const float score = std::fabs(std::log(std::max(aspect, 1e-6f) /
+                                               std::max(target_aspect, 1e-6f)));
+        if (score < best_score) {
+            best_score = score;
+            grid_w = w;
+            grid_h = h;
+        }
+    }
 }
 
 bool HoumoGemmaVision::image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output) {
     // Gemma4Processor uses PIL BICUBIC resize and then rescales pixels from
     // [0, 255] to [0, 1] before patchify. Keep this path aligned with it.
+    choose_patch_grid(input->nx, input->ny, patch_grid_w_, patch_grid_h_);
+    image_width_ = static_cast<uint16_t>(patch_grid_w_ * patch_size_);
+    image_height_ = static_cast<uint16_t>(patch_grid_h_ * patch_size_);
+
     clip_image_u8 resized_img;
     bicubic_resize(*input, resized_img, image_width_, image_height_);
     output->nx = image_width_;
@@ -1055,19 +1128,23 @@ bool HoumoGemmaVision::patchify_inplace(std::vector<float> &input_data,
                                         std::string &err) {
     err.clear();
 
-     int C = 3;
-     int H = image_height_;
-     int W = image_width_;
-     int patch_size = patch_size_;
+    int C = image_channels_;
+    int H = image_height_;
+    int W = image_width_;
+    int patch_size = patch_size_;
 
-     int num_patches_h = H / patch_size;   // 16
-     int num_patches_w = W / patch_size;   // 16
-     int num_patches   = num_patches_h * num_patches_w; // 256
-     int patch_vec_len = patch_size * patch_size * C;   // 768
+    int num_patches_h = H / patch_size;
+    int num_patches_w = W / patch_size;
+    int num_patches   = num_patches_h * num_patches_w;
+    int patch_vec_len = patch_vec_len_;
 
-    const size_t expect_in = static_cast<size_t>(C) * H * W;     // 196608
+    const size_t expect_in = static_cast<size_t>(C) * H * W;
     if (input_data.size() != expect_in) {
-        err = "input_data.size mismatch, expect 3*256*256=196608";
+        err = "input_data.size mismatch for Gemma4 image";
+        return false;
+    }
+    if (max_patches_ > 0 && num_patches > max_patches_) {
+        err = "Gemma4 image patch count exceeds visual graph max_patches";
         return false;
     }
 
@@ -1101,6 +1178,70 @@ bool HoumoGemmaVision::patchify_inplace(std::vector<float> &input_data,
     return true;
 }
 
+bool HoumoGemmaVision::set_padded_visual_inputs(const std::vector<float> &patches,
+                                                int valid_patches) {
+    const int kernel = pooling_kernel_size_ > 0 ? pooling_kernel_size_ : 3;
+    const int max_patches = max_patches_ > 0 ? max_patches_ : valid_patches;
+    const int soft_tokens = image_soft_tokens_ > 0 ? image_soft_tokens_ : max_patches / (kernel * kernel);
+
+    for (auto &item : input_tensors_) {
+        auto &tensor = item.second;
+        std::memset(tensor.Data(), 0, tensor.MemSize());
+    }
+
+    auto pixel_tensor = input_tensors_[pixel_values_name_];
+    const auto pixel_shape = pixel_tensor.Info().Shape();
+    const int patch_dim = pixel_shape.size() > 2 ? static_cast<int>(pixel_shape[2]) : patch_vec_len_;
+    const size_t copy_elems = std::min(patches.size(), static_cast<size_t>(valid_patches) * patch_dim);
+    tcim::Tensor pixel_fp32 = tcim::Tensor::CreateHostTensor(
+        pixel_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    std::memset(pixel_fp32.Data(), 0, pixel_fp32.MemSize());
+    std::memcpy(pixel_fp32.Data(), patches.data(), copy_elems * sizeof(float));
+    pixel_fp32.CastTo(pixel_tensor);
+    module_->SetInput(pixel_values_name_, pixel_tensor);
+
+    auto position_tensor = input_tensors_[pixel_position_ids_name_];
+    std::vector<int32_t> pos(static_cast<size_t>(max_patches) * 2, 0);
+    for (int p = 0; p < valid_patches; ++p) {
+        pos[static_cast<size_t>(p) * 2 + 0] = p % patch_grid_w_;
+        pos[static_cast<size_t>(p) * 2 + 1] = p / patch_grid_w_;
+    }
+    tcim::Tensor position_i32 = tcim::Tensor::CreateHostTensor(
+        position_tensor.Info().AsContiguous().AsType(tcim::DataType::INT32));
+    position_i32.Buffer().CopyFromHost(pos.data(), position_i32.MemSize());
+    position_i32.CastTo(position_tensor);
+    module_->SetInput(pixel_position_ids_name_, position_tensor);
+
+    auto pooling_tensor = input_tensors_[pooling_matrix_name_];
+    std::vector<float> pooling(static_cast<size_t>(soft_tokens) * max_patches, 0.0f);
+    const int pooled_w = patch_grid_w_ / kernel;
+    for (int p = 0; p < valid_patches; ++p) {
+        const int x = p % patch_grid_w_;
+        const int y = p / patch_grid_w_;
+        const int out = (y / kernel) * pooled_w + (x / kernel);
+        if (out >= 0 && out < soft_tokens) {
+            pooling[static_cast<size_t>(out) * max_patches + p] = 1.0f / (kernel * kernel);
+        }
+    }
+    tcim::Tensor pooling_fp32 = tcim::Tensor::CreateHostTensor(
+        pooling_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    pooling_fp32.Buffer().CopyFromHost(pooling.data(), pooling_fp32.MemSize());
+    pooling_fp32.CastTo(pooling_tensor);
+    module_->SetInput(pooling_matrix_name_, pooling_tensor);
+
+    auto mask_tensor = input_tensors_[attention_mask_name_];
+    std::vector<float> mask(static_cast<size_t>(max_patches), 0.0f);
+    for (int p = valid_patches; p < max_patches; ++p) {
+        mask[p] = -65504.0f;
+    }
+    tcim::Tensor mask_fp32 = tcim::Tensor::CreateHostTensor(
+        mask_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    mask_fp32.Buffer().CopyFromHost(mask.data(), mask_fp32.MemSize());
+    mask_fp32.CastTo(mask_tensor);
+    module_->SetInput(attention_mask_name_, mask_tensor);
+    return true;
+}
+
 bool HoumoGemmaVision::encoding(const std::vector<float> &input_data, std::vector<float> &output_data,
                              int out_offset) {
     LOG_INF("houmo_gemma_vision: encoding image slice... %d,%d\n", out_offset,
@@ -1112,14 +1253,10 @@ bool HoumoGemmaVision::encoding(const std::vector<float> &input_data, std::vecto
         LOG_ERR("patchify failed: %s\n", err_.c_str());
         return false;
     }
-    // set image input.
-    auto input_tensor = input_tensors_[module_->GetInputName(0)];
-    tcim::Tensor input_fp32_tensor = tcim::Tensor::CreateHostTensor(
-        input_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
-    input_fp32_tensor.Buffer().CopyFromHost(nchw_data_.data(),
-                                            input_fp32_tensor.MemSize());
-    input_fp32_tensor.CastTo(input_tensor);
-    module_->SetInput(module_->GetInputName(0), input_tensor);
+    const int valid_patches = patch_grid_w_ * patch_grid_h_;
+    if (!set_padded_visual_inputs(nchw_data_, valid_patches)) {
+        return false;
+    }
     module_->Run();
     module_->Sync();
     fill_header(output_data);

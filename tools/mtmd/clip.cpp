@@ -3182,16 +3182,8 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             } break;
         case PROJECTOR_TYPE_GEMMA4V:
             {
-                if (clip_is_hmm(ctx)) {
-                    // for HMM models, the input image is already pre-processed and resized to square
-                    n_patches = (img->nx / patch_size) * (img->ny / patch_size);
-                    LOG_ERR("img-nx = %d, img-ny = %d, patch_size = %d, n_patches = %d\n", img->nx, img->ny, patch_size, n_patches);
-
-                } else {
-                    // for non-HMM models, the input image is downscaled by the scale factor before patchification
-                    int scale_factor = ctx->model.hparams.n_merge;
-                    n_patches /= (scale_factor * scale_factor);
-                }
+                int scale_factor = ctx->model.hparams.n_merge > 0 ? ctx->model.hparams.n_merge : 1;
+                n_patches /= (scale_factor * scale_factor);
             } break;
         case PROJECTOR_TYPE_GEMMA3:
         case PROJECTOR_TYPE_IDEFICS3:
@@ -3272,13 +3264,25 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
             } break;
         case PROJECTOR_TYPE_GLMA:
             {
-                n_patches = img->nx;
-                // whisper downscales input token by half after conv1d
-                n_patches /= 2;
-                // reshape by merge_factor
-                n_patches /= ctx->model.hparams.proj_stack_factor;
-                // for BOI and EOI token embeddings
-                n_patches += 2;
+                if (clip_is_hmm(ctx)) {
+                    int n = std::max(img->nx, 1);
+                    for (const auto & conv : { std::pair<int, int>{3, 1}, std::pair<int, int>{3, 2} }) {
+                        const int kernel_size = conv.first;
+                        const int stride      = conv.second;
+                        const int padding     = 1;
+                        n = (n + 2 * padding - (kernel_size - 1) - 1) / stride + 1;
+                    }
+                    const int merge_factor = 4;
+                    n_patches = std::max(1, (n - merge_factor) / merge_factor + 1);
+                } else {
+                    n_patches = img->nx;
+                    // whisper downscales input token by half after conv1d
+                    n_patches /= 2;
+                    // reshape by merge_factor
+                    n_patches /= ctx->model.hparams.proj_stack_factor;
+                    // for BOI and EOI token embeddings
+                    n_patches += 2;
+                }
             } break;
         case PROJECTOR_TYPE_COGVLM:
             {

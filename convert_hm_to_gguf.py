@@ -232,39 +232,7 @@ def read_hmm_info(hmm_file: str) -> HmmInfo:
     else:
         # readhmm not found, fallback to embedding.pt
         logger.info("readhmm command not found, falling back to embedding.pt detection")
-
-        # Find embedding.pt files in current directory
-        embedding_files = list(Path('.').glob('*embedding.pt'))
-        if embedding_files:
-            # Use the first embedding.pt file
-            embedding_file = embedding_files[0]
-            logger.info(f"Found embedding file: {embedding_file}")
-
-            # Load embedding file and check dtype
-            try:
-                embedding = torch.load(embedding_file, map_location='cpu', weights_only=False)
-                if isinstance(embedding, dict):
-                    # If it's a dict, check the first tensor
-                    first_key = next(iter(embedding.keys()))
-                    dtype = embedding[first_key].dtype
-                else:
-                    # If it's a tensor directly
-                    dtype = embedding.dtype
-
-                # Set target based on dtype
-                if dtype == torch.int16:
-                    hmm_info.target = 'xh1'
-                elif dtype == torch.float16:
-                    hmm_info.target = 'xh2'
-                else:
-                    logger.warning(f"Unknown dtype {dtype} in embedding.pt, defaulting to xh2")
-                    hmm_info.target = 'xh2'
-            except Exception as e:
-                logger.error(f"Failed to load embedding.pt: {e}")
-                # Default to xh2 if we can't determine
-                hmm_info.target = 'xh2'
-        else:
-            hmm_info.target = 'xh2'
+        hmm_info.target = 'xh2'
         # Set default values
         hmm_info.core_num = 2
         hmm_info.batch = 1
@@ -1279,16 +1247,25 @@ class TextModel(ModelBase):
 
         return super().filter_tensors(item)
 
-    def conver_embedding(self, embedding_path: Path):
+    def conver_embedding(self, embedding_path: Path, out_name: str = "cpp_quant_embedding.bin"):
         # ===================== 1. 保留原权重加载+类型转换逻辑 =====================
         embedding_weight = torch.load(
             embedding_path, map_location="cpu", weights_only=False
         )
         # 提取核心权重张量
-        if isinstance(embedding_weight, dict) and "weight" in embedding_weight:
-            embedding_weight = embedding_weight["weight"]
+        if isinstance(embedding_weight, dict):
+            if "weight" in embedding_weight:
+                embedding_weight = embedding_weight["weight"]
+            elif "state_dict" in embedding_weight and "embed_tokens_per_layer.weight" in embedding_weight["state_dict"]:
+                embedding_weight = embedding_weight["state_dict"]["embed_tokens_per_layer.weight"]
+            elif "embed_tokens_per_layer.weight" in embedding_weight:
+                embedding_weight = embedding_weight["embed_tokens_per_layer.weight"]
+            else:
+                raise ValueError(f"Unsupported embedding pt structure in {embedding_path}: keys={list(embedding_weight.keys())}")
         if isinstance(embedding_weight, torch.nn.Embedding):
             embedding_weight = embedding_weight.weight
+        if not isinstance(embedding_weight, torch.Tensor):
+            raise TypeError(f"Unsupported embedding weight type in {embedding_path}: {type(embedding_weight)}")
         print(f"embedding_weight.dtype: {embedding_weight.dtype}")
         # 数据类型转换（保留int16，仅调整日志注释）
         dtype_mapping = {torch.int16: 0, torch.float16: 1}  # 类型标识与C++端对齐
@@ -1311,7 +1288,7 @@ class TextModel(ModelBase):
             print(f"both M30 & M50 not suuport ")
             sys.exit(1)
         # ===================== 2. 导出为通用二进制格式（保留原类型） =====================
-        out_path = self.dir_model / "cpp_quant_embedding.bin"
+        out_path = self.dir_model / out_name
         embedding_weight = embedding_weight.contiguous()  # 确保内存连续
         with open(out_path, "wb") as f:
             # 写入维度数
@@ -1337,7 +1314,7 @@ class TextModel(ModelBase):
         # 定义需要匹配的键名与模式映射
         # 分为"必须存在"和"可选存在"两组
         required_keys = {
-            "quant_embedding.bin": re.compile(r".*embedding\.pt$"),
+            "quant_embedding.bin": re.compile(r"^(?!per_layer_input_embedding\.pt$).*embedding\.pt$"),
             #"decoder.hmm": re.compile(r".*decode(r)?\.hmm(s)?$"),
         }
         optional_keys = {
@@ -1349,6 +1326,7 @@ class TextModel(ModelBase):
             "prefill_1.hmm": re.compile(r".*prefill_1\.hmm(s)?$"),
             "decoder_0.hmm": re.compile(r".*decoder_0\.hmm(s)?$"),
             "decoder_1.hmm": re.compile(r".*decoder_1\.hmm(s)?$"),
+            "per_layer_embedding.bin": re.compile(r".*per_layer_input_embedding\.pt$"),
         }
 
         # 检查模型目录是否存在
@@ -1366,7 +1344,6 @@ class TextModel(ModelBase):
         for f in self.dir_model.rglob("*embedding.pt"):  # 递归查找所有 embedding.pt
             if f.is_file():
                 all_files.append(f)
-                break
         print(f"all_files: {all_files}")
 
         # 处理必须存在的文件（不存在则报错）
@@ -1404,8 +1381,8 @@ class TextModel(ModelBase):
                 raise FileNotFoundError(f"File {file_path} missing")
 
             # 处理量化嵌入文件的特殊逻辑
-            if key == "quant_embedding.bin":
-                file_path = self.conver_embedding(file_path)
+            if key == "quant_embedding.bin" or key == "per_layer_embedding.bin":
+                file_path = self.conver_embedding(file_path, f"cpp_{key}")
             else:
                 print(file_path)
                 hmm_info = read_hmm_info(file_path)
@@ -1418,7 +1395,7 @@ class TextModel(ModelBase):
                 data = torch.from_numpy(binary_data.copy())
 
             # 移除转换后的临时文件
-            if key == "quant_embedding.bin":
+            if key == "quant_embedding.bin" or key == "per_layer_embedding.bin":
                 os.remove(file_path)
 
             # 以固定键名返回
@@ -2711,7 +2688,7 @@ class MmprojModel(ModelBase):
     def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
         # TODO: @guoxing.xu check & test this block
         logger.info(".....Getting tensors")
-        patterns = ("*visual.hmm", "*encode.hmm")
+        patterns = ("*visual.hmm", "*encode.hmm", "*audio.hmm")
         # 遍历目录下匹配的所有文件（仅文件，不包含子目录）
         for pattern in patterns:
             for file_path in self.dir_model.glob(pattern):
@@ -2727,7 +2704,7 @@ class MmprojModel(ModelBase):
                         binary_data = np.frombuffer(file.read(), dtype=np.uint8)
                         logger.info(f".....Tensor size: {binary_data.shape}")
                         data = torch.from_numpy(binary_data.copy())
-                        tensor_name = "encode.hmm" if file_path.name.endswith("encode.hmm") else "visual.hmm"
+                        tensor_name = "encode.hmm" if file_path.name.endswith("encode.hmm") or file_path.name.endswith("audio.hmm") else "visual.hmm"
                         yield tensor_name, data
                 except Exception as e:
                     logger.error(

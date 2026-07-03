@@ -134,6 +134,15 @@ struct lora_item {
     void * adapter; //记录上层lora contex指针
     float scale;  // scale 0.0 表示disable， 1.0 表示enable
 };
+struct PrefillChunk {
+    bool is_embedding = false;
+    bool bidirectional_attention = false;
+    size_t n_tokens = 0;
+    std::vector<llama_token> tokens;
+    std::vector<uint16_t> embeddings;
+
+    size_t size() const { return n_tokens; }
+};
 /**
 * @brief HouMoLLModel is the base class for HouMo model.
 * @details It contains the common interface and data members for HouMo model

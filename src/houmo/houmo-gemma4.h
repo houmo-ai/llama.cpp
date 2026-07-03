@@ -18,7 +18,7 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
   public:
     HouMoGemma4() = default;
     ~HouMoGemma4() override = default;
-
+    bool houmo_load(llama_model_loader &ml, std::vector<int> device_ids) override;
     void houmo_init(houmo_memory_i *memory, int seq_max = 4,
                     ggml_abort_callback abort_callback = nullptr,
                     void *abort_callback_data = nullptr) override;
@@ -31,12 +31,11 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
                      std::vector<float *> logits) override;
 
   private:
-    struct ChunkInfo {
-        int size = 0;
-        bool is_vision = false;
-    };
-
     void resolve_attention_names();
+    int set_per_layer_inputs_for_prefill(const llama_token *tokens,
+                                         int current_length);
+    int set_per_layer_inputs_for_decode(std::vector<llama_token> &batches,
+                                        std::vector<int> &seq_ids);
     int set_attentions_for_prefill(int current_length, int valid_length,
                                    int round_start, int seq_id);
     int set_attentions_for_decode(std::vector<int> &seq_ids);
@@ -44,7 +43,7 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
                                             int current_length,
                                             int past_seq_length, int width,
                                             bool is_local,
-                                            const std::vector<ChunkInfo> *chunks,
+                                            const std::vector<PrefillChunk> *chunks,
                                             int round_start) const;
     void clear_cached_inputs(int seq_id);
     bool has_cached_inputs(int seq_id) const;
@@ -55,13 +54,19 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
 
   private:
     int32_t sliding_window_ = 1024;
+    std::shared_ptr<HoumoEmbeddingLayer> per_layer_embedding_layer_ = nullptr;
+    std::string prefill_per_layer_input_name_;
+    std::string decode_per_layer_input_name_;
+    std::vector<std::string> prefill_local_attention_names_;
+    std::vector<std::string> prefill_global_attention_names_;
     std::vector<std::string> local_attention_names_;
     std::vector<std::string> global_attention_names_;
+    bool visual_bidirectional_attention_ = true;
 
     // External fp16 embeddings supplied via llama_batch.embd.  This is how
     // the Gemma4 vision tower output from demo.py is passed into the LLM graph.
     std::map<int, std::vector<uint16_t>> embedding_cache_;
-    std::map<int, std::vector<ChunkInfo>> pending_chunks_;
+    std::map<int32_t, std::vector<PrefillChunk>> chunk_history_;
     std::map<int, std::vector<llama_token>> token_history_;
     std::map<int, int64_t> device_kv_abs_start_;
     std::map<int, int64_t> device_kv_abs_end_;
