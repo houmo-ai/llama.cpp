@@ -146,12 +146,14 @@ bool HoumoGemma4KVCache::is_host_tensor(const tcim::Tensor &tensor) {
 }
 
 void HoumoGemma4KVCache::init(const std::map<int, kv_cache_item> &kv_cache,
-                              int sliding_window) {
+                              int sliding_window, int prefill_length) {
     sliding_window_ = sliding_window > 0 ? sliding_window : 1024;
-    snapshot_size_ = sliding_window_ + 256;
-    checkpoint_interval_ = env_int("LLAMA_CHECKPOINT_INTERVAL", 4096, 1,
-                                   INT_MAX / 2);
-    checkpoint_max_count_ = env_int("LLAMA_CHECKPOINT_MAX_COUNT", 10, 0, 256);
+    const int chunk_length = prefill_length > 0 ? prefill_length : 256;
+    snapshot_size_ = sliding_window_ + chunk_length;
+    checkpoint_interval_ = env_int("LLAMA_CHECKPOINT_INTERVAL",
+                                   checkpoint_interval_, chunk_length, INT_MAX / 2);
+    checkpoint_max_count_ =
+        env_int("LLAMA_CHECKPOINT_MAX_COUNT", checkpoint_max_count_, 0, 20);
     checkpoint_storage_ = env_int("LLAMA_CHECKPOINT_STORAGE", 1, 0, 1) == 0
                               ? CheckpointStorage::kHost
                               : CheckpointStorage::kDevice;

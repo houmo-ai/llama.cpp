@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace {
 static constexpr uint16_t F16_NEG_MIN_UINT = 0xFBFF; // torch.finfo(torch.float16).min == -65504
@@ -34,6 +35,25 @@ bool is_local_mask(const std::string &name) {
 bool is_global_mask(const std::string &name) {
     return name.find("global_attention_mask") != std::string::npos ||
            name.find("full_attention_mask") != std::string::npos;
+}
+
+bool is_accepted_count_input(const std::string &name) {
+    return name == "accepted_count" || name.find("accepted_count.") == 0;
+}
+
+int top_token_id(const float *logits, size_t n) {
+    if (logits == nullptr || n == 0) {
+        return -1;
+    }
+    int id = 0;
+    float best = -std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < n; ++i) {
+        if (logits[i] > best) {
+            best = logits[i];
+            id = static_cast<int>(i);
+        }
+    }
+    return id;
 }
 
 } // namespace
@@ -91,7 +111,7 @@ void HouMoGemma4::houmo_init(houmo_memory_i *memory, int seq_max,
     model_inout_init(seq_max);
     memory_ = memory;
     resolve_attention_names();
-    kv_reuse_cache_.init(kv_cache_, sliding_window_);
+    kv_reuse_cache_.init(kv_cache_, sliding_window_, prefill_length_);
 
     if (decode_model_ != nullptr && decode_input_map_.count(decode_model_->GetInputName(2)) > 0) {
         auto current_length = decode_input_map_.at(decode_model_->GetInputName(2));
@@ -107,6 +127,7 @@ void HouMoGemma4::resolve_attention_names() {
     global_attention_names_.clear();
     prefill_per_layer_input_name_.clear();
     decode_per_layer_input_name_.clear();
+    accepted_count_input_name_.clear();
 
     if (prefill_model_ != nullptr) {
         for (size_t i = 0; i < prefill_model_->GetInputNum(); ++i) {
@@ -146,7 +167,13 @@ void HouMoGemma4::resolve_attention_names() {
             global_attention_names_.push_back(name);
         } else if (is_per_layer_input(name)) {
             decode_per_layer_input_name_ = name;
+        } else if (is_accepted_count_input(name)) {
+            accepted_count_input_name_ = name;
         }
+    }
+    if (!accepted_count_input_name_.empty()) {
+        LLAMA_LOG_INFO("%s: Decode accepted_count input enabled: %s\n",
+                       __func__, accepted_count_input_name_.c_str());
     }
     if (local_attention_names_.empty() && decode_input_map_.count(decode_model_->GetInputName(3)) > 0) {
         std::string name = decode_model_->GetInputName(3);
@@ -156,7 +183,7 @@ void HouMoGemma4::resolve_attention_names() {
     }
     if (global_attention_names_.empty() && decode_input_map_.count(decode_model_->GetInputName(4)) > 0) {
         std::string name = decode_model_->GetInputName(4);
-        if (!is_per_layer_input(name)) {
+        if (!is_per_layer_input(name) && !is_accepted_count_input(name)) {
             global_attention_names_.push_back(name);
         }
     }
@@ -619,6 +646,30 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         }
         prefill_model_->Sync();
         PERF_STOP(PREFILL_RUN_ONCE);
+
+        if (pre_norm_hidden_dst_ != nullptr && pre_norm_hidden_dst_rows_ > 0) {
+            for (const auto &name : prefill_output_names_) {
+                if (name.find("hidden") == std::string::npos) {
+                    continue;
+                }
+                auto hidden = prefill_model_->GetOutput(name);
+                const size_t row_bytes = static_cast<size_t>(n_embd_) * sizeof(ggml_fp16_t);
+                const size_t hidden_rows = hidden.MemSize() / row_bytes;
+                const int dst_row = static_cast<int>(round_start) + current_length - 1;
+                if (hidden_rows == 0 || dst_row < 0 || dst_row >= pre_norm_hidden_dst_rows_) {
+                    break;
+                }
+                const auto *src = static_cast<const uint8_t *>(hidden.Buffer().Data()) +
+                                  (hidden_rows - 1) * row_bytes;
+                auto *dst = reinterpret_cast<uint8_t *>(pre_norm_hidden_dst_) +
+                            static_cast<size_t>(dst_row) * n_embd_ * sizeof(float);
+                std::memcpy(dst, src, row_bytes);
+                LLAMA_LOG_INFO("%s: exported prefill hidden name='%s' rows=%zu dst_row=%d row_bytes=%zu\n",
+                               __func__, name.c_str(), hidden_rows, dst_row, row_bytes);
+                break;
+            }
+        }
+
         valid_length += current_length;
 
         if (kv_cache_.find(seq_id) != kv_cache_.end()) {
@@ -644,13 +695,31 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
 
     decode_valid_length_[seq_id] = effective_kv_offset + static_cast<int32_t>(total_tokens);
-    PERF_START(PREFILL_GETOUTPUT);
-    tcim::Tensor prefill_output_data = prefill_model_->GetOutput(prefill_output_names_[0]);
-    auto &prefill_output_float = prefill_output_map_[prefill_output_names_[0]];
-    prefill_output_data.CastTo(prefill_output_float);
-    PERF_STOP(PREFILL_GETOUTPUT);
     if (logits != nullptr) {
-        std::memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
+        PERF_START(PREFILL_GETOUTPUT);
+        tcim::Tensor prefill_output_data = prefill_model_->GetOutput(prefill_output_names_[0]);
+        const auto out_info = prefill_output_data.Info();
+        PERF_STOP(PREFILL_GETOUTPUT);
+        if (out_info.DataType() != tcim::DataType::FLOAT16) {
+            LLAMA_LOG_ERROR("%s: unsupported prefill output dtype=%d\n", __func__,
+                            static_cast<int>(out_info.DataType()));
+            clear_cached_inputs(seq_id);
+            return -1;
+        }
+        const size_t row_elems = static_cast<size_t>(n_vocab_);
+        const size_t n_rows = prefill_output_data.MemSize() /
+                              sizeof(ggml_fp16_t) / row_elems;
+        if (n_rows == 0) {
+            LLAMA_LOG_ERROR("%s: empty prefill logits output\n", __func__);
+            clear_cached_inputs(seq_id);
+            return -1;
+        }
+        const size_t row_idx = std::min<size_t>(
+            n_rows - 1,
+            current_length > 0 ? static_cast<size_t>(current_length - 1) : 0);
+        auto *src = static_cast<const ggml_fp16_t *>(prefill_output_data.Buffer().Data()) +
+                    row_idx * row_elems;
+        ggml_fp16_to_fp32_row(src, logits, static_cast<int64_t>(row_elems));
     }
 
     if (memory_) {
@@ -776,5 +845,213 @@ int HouMoGemma4::houmo_decode(std::vector<llama_token> &batches,
         }
         update_device_kv_range(seq_id, decode_valid_length_[seq_id]);
     }
+    return 0;
+}
+
+int HouMoGemma4::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+                              std::vector<float *> &logits_out) {
+    if (tokens.size() != logits_out.size()) {
+        LLAMA_LOG_ERROR("%s: tokens.size()=%zu != logits_out.size()=%zu\n",
+                        __func__, tokens.size(), logits_out.size());
+        return -1;
+    }
+    if (tokens.empty()) {
+        return 0;
+    }
+    if (decode_model_ == nullptr) {
+        return HouMoLLModel::Impl::houmo_verify(tokens, seq_id, logits_out);
+    }
+
+    auto &input_data = decode_input_map_.at(decode_model_->GetInputName(0));
+    const int verify_slots = tensor_dim_or(input_data, 1, 1);
+    const int n_verify = static_cast<int>(tokens.size());
+    if (verify_slots <= 1 || n_verify > verify_slots) {
+        LLAMA_LOG_WARN("%s: verify_slots=%d n_verify=%d, fallback to prefill loop\n",
+                       __func__, verify_slots, n_verify);
+        return HouMoLLModel::Impl::houmo_verify(tokens, seq_id, logits_out);
+    }
+
+    const int32_t start_pos = memory_ ? memory_->seq_pos_min(seq_id)
+                                      : decode_valid_length_[seq_id];
+
+    // {
+    //     std::ostringstream oss;
+    //     for (size_t i = 0; i < tokens.size(); ++i) {
+    //         if (i > 0) {
+    //             oss << ',';
+    //         }
+    //         oss << static_cast<int>(tokens[i]);
+    //     }
+    //     LLAMA_LOG_INFO("%s: verify input seq_id=%d start_pos=%d n_verify=%d tokens=[%s]\n",
+    //                    __func__, seq_id, start_pos, n_verify, oss.str().c_str());
+    // }
+
+    PERF_START(VERIFY_SETINPUT);
+    std::memset(input_data.Data(), 0, input_data.MemSize());
+    embedding_layer_->get_embedding_batch(tokens.data(), n_verify, input_data.Data());
+    decode_model_->SetInput(decode_model_->GetInputName(0), input_data);
+
+    auto valid_tensor = decode_input_map_.at(decode_model_->GetInputName(1));
+    auto current_tensor = decode_input_map_.at(decode_model_->GetInputName(2));
+    set_input_data(valid_tensor, n_decode_batch_, start_pos);
+    set_input_data(current_tensor, n_decode_batch_, n_verify);
+    decode_model_->SetInput(decode_model_->GetInputName(1), valid_tensor);
+    decode_model_->SetInput(decode_model_->GetInputName(2), current_tensor);
+
+    auto set_verify_masks = [&](const std::vector<std::string> &names,
+                                bool local) -> int {
+        for (const auto &name : names) {
+            if (is_accepted_count_input(name)) {
+                continue;
+            }
+            auto it = decode_input_map_.find(name);
+            if (it == decode_input_map_.end()) {
+                continue;
+            }
+            auto &mask = it->second;
+            const int fill = tensor_dim_or(mask, 2, verify_slots);
+            const int width = tensor_dim_or(mask, 3,
+                local ? aligned(sliding_window_ + fill - 1, 16) : context_length_);
+            auto host = generate_mask_f16(1, fill, n_verify, start_pos,
+                                          width, local, nullptr, 0);
+            mask.Buffer().CopyFromHost(host.data(), mask.MemSize());
+            decode_model_->SetInput(name, mask);
+        }
+        return 0;
+    };
+    set_verify_masks(local_attention_names_, true);
+    set_verify_masks(global_attention_names_, false);
+
+    if (!decode_per_layer_input_name_.empty()) {
+        if (per_layer_embedding_layer_ == nullptr) {
+            LLAMA_LOG_ERROR("%s: verify requires per_layer_inputs but embedding is not loaded\n",
+                            __func__);
+            return -1;
+        }
+        auto &pli = decode_input_map_.at(decode_per_layer_input_name_);
+        const auto shape = pli.Info().Shape();
+        if (shape.size() != 4) {
+            LLAMA_LOG_ERROR("%s: unsupported verify per_layer_inputs rank=%zu\n",
+                            __func__, shape.size());
+            return -1;
+        }
+        const size_t per_token_elems = static_cast<size_t>(shape[2]) * static_cast<size_t>(shape[3]);
+        if (per_token_elems != per_layer_embedding_layer_->get_n_embd()) {
+            LLAMA_LOG_ERROR("%s: per_layer embedding dim mismatch, input=%zu, embedding=%u\n",
+                            __func__, per_token_elems,
+                            per_layer_embedding_layer_->get_n_embd());
+            return -1;
+        }
+        std::memset(pli.Data(), 0, pli.MemSize());
+        per_layer_embedding_layer_->get_embedding_batch(tokens.data(), n_verify,
+                                                        pli.Data());
+        decode_model_->SetInput(decode_per_layer_input_name_, pli);
+    }
+    if (!accepted_count_input_name_.empty()) {
+        auto accepted_tensor = decode_input_map_.at(accepted_count_input_name_);
+        const int32_t accepted_count = last_committed_tokens_[seq_id];
+        set_input_data(accepted_tensor, n_decode_batch_, accepted_count);
+        decode_model_->SetInput(accepted_count_input_name_, accepted_tensor);
+        LLAMA_LOG_INFO("%s: verify accepted_count seq_id=%d value=%d\n",
+                       __func__, seq_id, accepted_count);
+    }
+    std::vector<int> seq_ids = {seq_id};
+    set_kv_cache_for_decode(seq_ids);
+    PERF_STOP(VERIFY_SETINPUT);
+
+    PERF_START(VERIFY_RUN);
+    auto status = decode_model_->Run();
+    if (status != tcim::Status::OK) {
+        PERF_STOP(VERIFY_RUN);
+        LLAMA_LOG_ERROR("%s: decode verify Run() failed, result=%d\n",
+                        __func__, static_cast<int>(status));
+        return -1;
+    }
+    decode_model_->Sync();
+    PERF_STOP(VERIFY_RUN);
+
+    PERF_START(VERIFY_GETOUTPUT);
+    tcim::Tensor decode_data = decode_model_->GetOutput(decode_output_names_[0]);
+    if (decode_data.Info().DataType() != tcim::DataType::FLOAT16) {
+        PERF_STOP(VERIFY_GETOUTPUT);
+        LLAMA_LOG_ERROR("%s: unsupported verify output dtype=%d\n", __func__,
+                        static_cast<int>(decode_data.Info().DataType()));
+        return -1;
+    }
+    auto *decode_ptr = static_cast<ggml_fp16_t *>(decode_data.Buffer().Data());
+    const size_t vocab_row = static_cast<size_t>(tensor_dim_or(decode_data, decode_data.Info().Shape().size() - 1, n_vocab_));
+    const size_t vocab_rows = std::max<size_t>(1, decode_data.MemSize() / (vocab_row * sizeof(ggml_fp16_t)));
+    const size_t vocab_base_row = vocab_rows > static_cast<size_t>(n_verify)
+                                      ? vocab_rows - static_cast<size_t>(n_verify)
+                                      : 0;
+    for (int i = 0; i < n_verify; ++i) {
+        if (logits_out[static_cast<size_t>(i)] != nullptr) {
+            const size_t row_idx = std::min(vocab_base_row + static_cast<size_t>(i),
+                                            vocab_rows - 1);
+            ggml_fp16_to_fp32_row(decode_ptr + row_idx * vocab_row,
+                                  logits_out[static_cast<size_t>(i)],
+                                  static_cast<int>(vocab_row));
+            LLAMA_LOG_INFO("%s: verify output seq_id=%d row=%d pos=%d input_token=%d top1=%d row_idx=%zu vocab=%zu\n",
+                           __func__, seq_id, i, start_pos + i,
+                           static_cast<int>(tokens[static_cast<size_t>(i)]),
+                           top_token_id(logits_out[static_cast<size_t>(i)], vocab_row),
+                           row_idx, vocab_row);
+        }
+    }
+
+    if (pre_norm_hidden_dst_ != nullptr && pre_norm_hidden_dst_rows_ > 0) {
+        for (const auto &name : decode_output_names_) {
+            if (name.find("hidden") == std::string::npos) {
+                continue;
+            }
+            auto hidden = decode_model_->GetOutput(name);
+            if (hidden.Info().DataType() != tcim::DataType::FLOAT16) {
+                continue;
+            }
+            const auto h_shape = hidden.Info().Shape();
+            const int h_seq = h_shape.size() >= 2
+                                  ? static_cast<int>(h_shape[h_shape.size() - 2])
+                                  : 1;
+            const int h_embd = h_shape.empty()
+                                   ? static_cast<int>(n_embd_)
+                                   : static_cast<int>(h_shape.back());
+            const int rows = std::min({n_verify, h_seq, pre_norm_hidden_dst_rows_});
+            const int src_begin = h_seq > rows ? h_seq - rows : 0;
+            const auto *src = static_cast<const uint8_t *>(hidden.Buffer().Data());
+            for (int r = 0; r < rows; ++r) {
+                std::memcpy(reinterpret_cast<uint8_t *>(pre_norm_hidden_dst_ +
+                            static_cast<size_t>(r) * h_embd),
+                            src + static_cast<size_t>(src_begin + r) * h_embd * sizeof(ggml_fp16_t),
+                            static_cast<size_t>(h_embd) * sizeof(ggml_fp16_t));
+            }
+            break;
+        }
+    }
+    PERF_STOP(VERIFY_GETOUTPUT);
+
+    pending_verify_[seq_id] = {true, start_pos, n_verify};
+    return 0;
+}
+
+int HouMoGemma4::houmo_verify_accept(int seq_id, uint16_t n_accepted) {
+    auto it = pending_verify_.find(seq_id);
+    if (it == pending_verify_.end() || !it->second.valid) {
+        return 0;
+    }
+    const int accepted = std::min<int>(static_cast<int>(n_accepted) + 1,
+                                       it->second.n_verify);
+    last_committed_tokens_[seq_id] = accepted;
+    const int32_t keep_pos = it->second.start_pos + accepted;
+    decode_valid_length_[seq_id] = keep_pos;
+    update_device_kv_range(seq_id, keep_pos);
+    if (memory_) {
+        const int32_t cur = memory_->seq_pos_min(seq_id);
+        if (cur < keep_pos) {
+            memory_->seq_add(seq_id, 0, 0, keep_pos - cur);
+        } else if (cur > keep_pos) {
+            memory_->seq_rm(seq_id, keep_pos, cur);
+        }
+    }
+    it->second.valid = false;
     return 0;
 }

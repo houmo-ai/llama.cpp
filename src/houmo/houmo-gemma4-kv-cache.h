@@ -18,7 +18,7 @@
 class HoumoGemma4KVCache {
   public:
     void init(const std::map<int, kv_cache_item> &kv_cache,
-              int sliding_window = 1024);
+          int sliding_window = 1024, int prefill_length = 256);
 
     bool enabled() const { return checkpoint_max_count_ > 0 && !pool_.empty(); }
     int checkpoint_interval() const { return checkpoint_interval_; }
@@ -95,6 +95,7 @@ class HoumoGemma4KVCache {
     int snapshot_size_ = 1280;
     int checkpoint_interval_ = 4096;
     int checkpoint_max_count_ = 5;
+    int prefill_length_ = 256;
     CheckpointStorage checkpoint_storage_ = CheckpointStorage::kDevice;
 
     std::vector<TensorBinding> bindings_;

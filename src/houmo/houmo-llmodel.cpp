@@ -9,6 +9,7 @@
 #include "houmo-vllmodel.h"
 #include "houmo-glmocrmodel.h"
 #include "houmo-gemma4.h"
+#include "houmo-gemma4mtp.h"
 #include "llama-arch.h"
 #include "llama-batch.h"
 #include "llama-impl.h"
@@ -34,7 +35,7 @@ static bool string_replace_once(std::string &str, const std::string &from,
     return true;
 }
 
-static bool qwen35_has_mtp_tensors(const llama_model_loader &loader) {
+static bool gguf_has_mtp_tensors(const llama_model_loader &loader) {
     if (!loader.metadata_ptr) {
         return false;
     }
@@ -58,6 +59,8 @@ static bool qwen35_has_mtp_tensors(const llama_model_loader &loader) {
 static bool is_kv_cache_io_name(const std::string &name) {
     return name.find("past_key_cache") != std::string::npos ||
            name.find("past_value_cache") != std::string::npos ||
+           name.find("shared_key_cache") != std::string::npos ||
+           name.find("shared_value_cache") != std::string::npos ||
            name.find("_self_attn_vcache") != std::string::npos ||
            name.find("_self_attn_kcache") != std::string::npos ||
            name.find("conv_cache_out") != std::string::npos ||
@@ -180,10 +183,19 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
                 LLAMA_LOG_INFO("%s: skip prefill_mtp.hmm for target impl\n", __func__);
                 continue;
             }
+            std::vector<std::string> mtp_dummy_tensor_names = dummy_tensor_names;
+            if (arch_name.find("gemma4") != std::string::npos) {
+                mtp_dummy_tensor_names = {
+                    "shared_key_cache_sliding",
+                    "shared_value_cache_sliding",
+                    "shared_key_cache_full",
+                    "shared_value_cache_full",
+                };
+            }
             // MTP 草稿 prefill：与普通 prefill 共用 prefill_model_ 槽位
             // （同一个 HouMoLLModel 实例只承载一个 gguf，要么是 target 要么是 MTP）。
             prefill_model_ = create_infer_engine(file_name, offset, size,
-                                                 dummy_tensor_names);
+                                                 mtp_dummy_tensor_names);
             if (prefill_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load prefill_mtp.hmm\n", __func__);
                 return false;
@@ -208,7 +220,17 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
                 LLAMA_LOG_INFO("%s: skip decode_mtp.hmm for target impl\n", __func__);
                 continue;
             }
-            decode_model_ = create_infer_engine(file_name, offset, size);
+            std::vector<std::string> mtp_dummy_tensor_names;
+            if (arch_name.find("gemma4") != std::string::npos) {
+                mtp_dummy_tensor_names = {
+                    "shared_key_cache_sliding",
+                    "shared_value_cache_sliding",
+                    "shared_key_cache_full",
+                    "shared_value_cache_full",
+                };
+            }
+            decode_model_ = create_infer_engine(file_name, offset, size,
+                                                mtp_dummy_tensor_names);
             if (decode_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load decode_mtp.hmm\n", __func__);
                 return false;
@@ -240,6 +262,16 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         decode_model_ =
             create_infer_engine(false, const_cast<char *>(file_name.c_str()),
                                 file_name.length(), true);
+    }
+    if (load_mtp_modules && arch_name.find("gemma4") != std::string::npos) {
+        if (decode_model_ == nullptr || embedding_layer_ == nullptr) {
+            LLAMA_LOG_ERROR("%s: failed to load gemma4 MTP model. load "
+                            "decode_mtp=%d, load embedding=%d\n",
+                            __func__, (decode_model_ == nullptr),
+                            (embedding_layer_ == nullptr));
+            return false;
+        }
+        return true;
     }
     if (prefill_model_ == nullptr || embedding_layer_ == nullptr) {
         LLAMA_LOG_ERROR("%s: failed to load model. load "
@@ -854,7 +886,24 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
     LLAMA_LOG_INFO("%s: model arch name: %s\n", __func__, ml.arch_name.c_str());
     if (impl_ == nullptr) {
         if (ml.arch_name.find("gemma4") != std::string::npos) {
-            impl_ = new HouMoGemma4();
+            if (gguf_has_mtp_tensors(ml)) {
+                impl_ = new HouMoGemma4();
+                impl_mtp_ = new HouMoGemma4MTP(static_cast<HouMoGemma4 *>(impl_));
+                LLAMA_LOG_INFO("%s: gemma4 gguf has MTP tensors, loading target + MTP impl\n",
+                               __func__);
+                if (!impl_->houmo_load(ml, device_ids)) {
+                    LLAMA_LOG_ERROR("%s: failed to load gemma4 target impl\n", __func__);
+                    return false;
+                }
+                impl_mtp_->set_embedding_layer(impl_->embedding_layer());
+                if (!impl_mtp_->houmo_load(ml, device_ids)) {
+                    LLAMA_LOG_ERROR("%s: failed to load gemma4 MTP impl\n", __func__);
+                    return false;
+                }
+                return true;
+            } else {
+                impl_ = new HouMoGemma4();
+            }
         } else if (ml.arch_name.find("glm4") != std::string::npos) {
             impl_ = new HouMoGLMOCRModel();
         } else if (ml.arch_name.find("vl") != std::string::npos) {
@@ -865,7 +914,7 @@ bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_id
             impl_ = new HouMoEmbed();
         } else if (ml.arch_name.find("qwen35") != std::string::npos ||
                    ml.arch_name.find("qwen3next") != std::string::npos) {
-            if (qwen35_has_mtp_tensors(ml)) {
+            if (gguf_has_mtp_tensors(ml)) {
                 impl_ = new HoumoQwen35LLM();
                 impl_mtp_ = new HoumoQwen35MTP();
                 LLAMA_LOG_INFO("%s: qwen3.5 gguf has MTP tensors, loading target + MTP impl\n",

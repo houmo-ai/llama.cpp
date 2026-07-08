@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+class HouMoGemma4MTP;
+
 /**
  * @brief HouMoGemma4 is the derived class for Gemma4 HouMo VLM models.
  * @details The runtime input layout follows src/houmo/demo.py:
@@ -15,6 +17,8 @@
  *          Decode stage only feeds sliding/local attention mask.
  */
 class HouMoGemma4 : public HouMoLLModel::Impl {
+    friend class HouMoGemma4MTP;
+
   public:
     HouMoGemma4() = default;
     ~HouMoGemma4() override = default;
@@ -29,8 +33,16 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     int houmo_decode(std::vector<llama_token> &batches,
                      std::vector<int> &seq_ids,
                      std::vector<float *> logits) override;
+    int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+             std::vector<float *> &logits_out) override;
+    int houmo_verify_accept(int seq_id, uint16_t n_accepted) override;
 
   private:
+    int32_t committed_pos(int seq_id) const {
+        return memory_ ? memory_->seq_pos_min(seq_id) : -1;
+    }
+
+  protected:
     void resolve_attention_names();
     int set_per_layer_inputs_for_prefill(const llama_token *tokens,
                                          int current_length);
@@ -52,7 +64,6 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     void update_device_kv_range(int seq_id, int64_t abs_end);
     void clear_device_kv_range(int seq_id);
 
-  private:
     int32_t sliding_window_ = 1024;
     std::shared_ptr<HoumoEmbeddingLayer> per_layer_embedding_layer_ = nullptr;
     std::string prefill_per_layer_input_name_;
@@ -70,5 +81,13 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     std::map<int, std::vector<llama_token>> token_history_;
     std::map<int, int64_t> device_kv_abs_start_;
     std::map<int, int64_t> device_kv_abs_end_;
+    std::string accepted_count_input_name_;
+    std::map<int, int32_t> last_committed_tokens_;
+    struct VerifyPending {
+      bool valid = false;
+      int32_t start_pos = 0;
+      int32_t n_verify = 0;
+    };
+    std::map<int, VerifyPending> pending_verify_;
     HoumoGemma4KVCache kv_reuse_cache_;
 };
