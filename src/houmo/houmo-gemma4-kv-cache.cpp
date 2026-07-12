@@ -141,10 +141,6 @@ bool HoumoGemma4KVCache::copy_history_window_to_device(
     return true;
 }
 
-bool HoumoGemma4KVCache::is_host_tensor(const tcim::Tensor &tensor) {
-    return tensor.Device() == tcim::Device::CPU;
-}
-
 void HoumoGemma4KVCache::init(const std::map<int, kv_cache_item> &kv_cache,
                               int sliding_window, int prefill_length) {
     sliding_window_ = sliding_window > 0 ? sliding_window : 1024;
@@ -217,6 +213,9 @@ void HoumoGemma4KVCache::allocate_pool(const kv_cache_item &item) {
         for (const auto &binding : bindings_) {
             const auto &src = item.tensors[binding.kv_index];
             tcim::Tensor checkpoint;
+            if (src.Device() == tcim::Device::COMPND) {
+                checkpoint_storage_ = CheckpointStorage::kHost;
+            }
             if (checkpoint_storage_ == CheckpointStorage::kDevice) {
                 auto src_copy = src;
                 checkpoint = src_copy.Clone(false);
@@ -337,6 +336,8 @@ bool HoumoGemma4KVCache::restore_from_slot(Slot &slot, int64_t valid_length,
     LLAMA_LOG_INFO("%s: restore offsets seq_id=%d snapshot=[%ld,%ld) src_offset=%ld dst_offset=%ld length=%ld\n",
                    __func__, slot.seq_id, slot.abs_start, slot.abs_end,
                    src_offset, dst_offset, copy_len);
+    const bool full_snapshot_restore =
+        src_offset == 0 && dst_offset == 0 && copy_len == snapshot_size_;
     for (size_t bi = 0; bi < bindings_.size(); ++bi) {
         const size_t idx = bindings_[bi].kv_index;
         if (idx >= item.tensors.size()) {
@@ -345,10 +346,14 @@ bool HoumoGemma4KVCache::restore_from_slot(Slot &slot, int64_t valid_length,
                            bindings_[bi].name.c_str());
             return false;
         }
-        if (!is_host_tensor(slot.tensors[bi])) {
+        if (full_snapshot_restore) {
             slot.tensors[bi].CopyTo(item.tensors[idx]);
             continue;
         }
+        // 目前不适用偏移拷贝，预留后续拓展
+        LLAMA_LOG_WARN("%s, not implemented: restore partial snapshot binding=%zu layer=%d kv_index=%zu name=%s\n",
+                       __func__, bi, bindings_[bi].layer_id, idx,
+                       bindings_[bi].name.c_str());
         if (!copy_history_window_to_device(slot.tensors[bi], item.tensors[idx],
                                            src_offset, dst_offset, copy_len)) {
             LLAMA_LOG_WARN("%s: restore failed binding=%zu layer=%d kv_index=%zu name=%s\n",

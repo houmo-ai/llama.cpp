@@ -43,13 +43,15 @@ static bool gguf_has_mtp_tensors(const llama_model_loader &loader) {
     const int n_tensors = gguf_get_n_tensors(ctx);
     const std::regex kPrefillMtpPattern("^prefill_mtp(_\\d+)?\\.hmm$");
     const std::regex kDecodeMtpPattern("^decode(r)?_mtp(_\\d+)?\\.hmm$");
+    const std::regex kAssistantPattern("^assistant\\.hmm(s)?$");
     for (int i = 0; i < n_tensors; ++i) {
         const char *name = gguf_get_tensor_name(ctx, i);
         if (name == nullptr) {
             continue;
         }
         if (std::regex_match(name, kPrefillMtpPattern) ||
-            std::regex_match(name, kDecodeMtpPattern)) {
+            std::regex_match(name, kDecodeMtpPattern) ||
+            std::regex_match(name, kAssistantPattern)) {
             return true;
         }
     }
@@ -147,6 +149,7 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
     const std::regex kPrefillPattern("^prefill(_\\d+)?\\.hmm$");
     const std::regex kPrefillMtpPattern("^prefill_mtp(_\\d+)?\\.hmm$");
     const std::regex kDecodePattern("^decode(r)?(_\\d+)?\\.hmm$");
+    const std::regex kAssistantPattern("^assistant\\.hmm(s)?$");
     const std::regex kDecodeMtpPattern("^decode(r)?_mtp(_\\d+)?\\.hmm$");
     // 环境变量中是否开启了LLAMA_ENABLE_LAZY_MODE
     enable_lazy_mode_ = !ml.use_mmap;
@@ -184,14 +187,6 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
                 continue;
             }
             std::vector<std::string> mtp_dummy_tensor_names = dummy_tensor_names;
-            if (arch_name.find("gemma4") != std::string::npos) {
-                mtp_dummy_tensor_names = {
-                    "shared_key_cache_sliding",
-                    "shared_value_cache_sliding",
-                    "shared_key_cache_full",
-                    "shared_value_cache_full",
-                };
-            }
             // MTP 草稿 prefill：与普通 prefill 共用 prefill_model_ 槽位
             // （同一个 HouMoLLModel 实例只承载一个 gguf，要么是 target 要么是 MTP）。
             prefill_model_ = create_infer_engine(file_name, offset, size,
@@ -215,7 +210,8 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
                 return false;
             }
             LLAMA_LOG_INFO("%s: succeed to load prefill.hmm\n", __func__);
-        } else if (std::regex_match(name, kDecodeMtpPattern)) {
+        } else if (std::regex_match(name, kDecodeMtpPattern) ||
+                   std::regex_match(name, kAssistantPattern)) {
             if (!load_mtp_modules) {
                 LLAMA_LOG_INFO("%s: skip decode_mtp.hmm for target impl\n", __func__);
                 continue;

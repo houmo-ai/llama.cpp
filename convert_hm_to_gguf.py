@@ -1321,6 +1321,7 @@ class TextModel(ModelBase):
             "prefill.hmm": re.compile(r".*prefill\.hmm(s)?$"),
             "prefill_mtp.hmm": re.compile(r".*prefill_mtp\.hmm(s)?$"),
             "decoder_mtp.hmm": re.compile(r".*decode(r)?_mtp\.hmm(s)?$"),
+            "assistant.hmm": re.compile(r".*assistant\.hmm(s)?$"),
             "decoder.hmm": re.compile(r".*decode(r)?\.hmm(s)?$"),
             "prefill_0.hmm": re.compile(r".*prefill_0\.hmm(s)?$"),
             "prefill_1.hmm": re.compile(r".*prefill_1\.hmm(s)?$"),

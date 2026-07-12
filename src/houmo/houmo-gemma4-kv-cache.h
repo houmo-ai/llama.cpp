@@ -77,8 +77,6 @@ class HoumoGemma4KVCache {
                           int64_t src_offset,
                           int64_t dst_offset,
                           int64_t length);
-    static bool is_host_tensor(const tcim::Tensor &tensor);
-
     void discover_bindings(const kv_cache_item &item);
     void allocate_pool(const kv_cache_item &item);
     Slot *find_covering_slot(int seq_id, int64_t history_start,
