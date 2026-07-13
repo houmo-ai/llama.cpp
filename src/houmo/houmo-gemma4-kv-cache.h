@@ -1,9 +1,9 @@
 #pragma once
 
+#include "houmo-checkpoint-pool.h"
 #include "houmo-llmodel.h"
 
 #include <cstdint>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -18,22 +18,27 @@
 class HoumoGemma4KVCache {
   public:
     void init(const std::map<int, kv_cache_item> &kv_cache,
-          int sliding_window = 1024, int prefill_length = 256);
+          int sliding_window = 1024, int prefill_length = 320);
 
-    bool enabled() const { return checkpoint_max_count_ > 0 && !pool_.empty(); }
-    int checkpoint_interval() const { return checkpoint_interval_; }
-    int checkpoint_max_count() const { return checkpoint_max_count_; }
+    bool enabled() const { return checkpoint_pool_.enabled(); }
+    int checkpoint_interval() const {
+      return checkpoint_pool_.checkpoint_interval();
+    }
+    int checkpoint_max_count() const {
+      return checkpoint_pool_.checkpoint_max_count();
+    }
 
     // Rebuild the sliding KV tensors in @p item for target @p valid_length.
     // Returns true when a snapshot covered [valid_length-1024, valid_length).
     bool prepare_for_prefill(int seq_id, int64_t valid_length,
                              kv_cache_item &item);
 
-    // Restore the closest checkpoint before @p valid_length and return the
-    // position that the restored device KV represents. Returns -1 when no
-    // usable checkpoint is available.
-    int64_t restore_nearest_before(int seq_id, int64_t valid_length,
-                     kv_cache_item &item);
+    // Return the closest usable checkpoint position before @p valid_length
+    // without modifying the live device KV. Returns -1 when unavailable.
+    int64_t find_nearest_before(int seq_id, int64_t valid_length);
+
+    // Restore the checkpoint whose end position is @p position.
+    bool restore_at(int seq_id, int64_t position, kv_cache_item &item);
 
     // Save a post-run complete 1280-window snapshot.  Non-force saves are
     // throttled by LLAMA_CHECKPOINT_INTERVAL; force saves always refresh the
@@ -51,23 +56,6 @@ class HoumoGemma4KVCache {
         std::string name;
     };
 
-    struct Slot {
-        bool used = false;
-        int seq_id = -1;
-        int64_t abs_start = 0;
-        int64_t abs_end = 0;
-        int64_t last_access = 0;
-        int64_t hit_count = 0;
-        std::vector<tcim::Tensor> tensors; // checkpoint tensors, one per binding
-    };
-
-    enum class CheckpointStorage {
-      kHost,
-      kDevice,
-    };
-
-    static int env_int(const char *name, int default_value, int min_value,
-                       int max_value);
     static bool parse_layer_id(const std::string &name, int &layer_id);
     static bool is_full_attention_layer(int layer_id);
     static bool is_sliding_kv_name(const std::string &name);
@@ -79,25 +67,15 @@ class HoumoGemma4KVCache {
                           int64_t length);
     void discover_bindings(const kv_cache_item &item);
     void allocate_pool(const kv_cache_item &item);
-    Slot *find_covering_slot(int seq_id, int64_t history_start,
-                             int64_t history_end);
-    Slot *find_nearest_slot_before(int seq_id, int64_t history_start,
-                     int64_t history_end);
-    bool restore_from_slot(Slot &slot, int64_t valid_length,
+    bool restore_from_slot(HoumoCheckpointPool::Slot &slot, int64_t valid_length,
                  kv_cache_item &item);
-    Slot &acquire_slot(int seq_id, int64_t abs_end);
     bool should_save(int seq_id, int64_t abs_end, bool force) const;
 
   private:
     int sliding_window_ = 1024;
-    int snapshot_size_ = 1280;
-    int checkpoint_interval_ = 4096;
-    int checkpoint_max_count_ = 5;
-    int prefill_length_ = 256;
-    CheckpointStorage checkpoint_storage_ = CheckpointStorage::kDevice;
+    int snapshot_size_ = 1344;
+    int prefill_length_ = 320;
 
     std::vector<TensorBinding> bindings_;
-    std::vector<Slot> pool_;
-    std::map<int, int64_t> last_saved_pos_;
-    int64_t access_clock_ = 0;
+    HoumoCheckpointPool checkpoint_pool_;
 };

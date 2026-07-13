@@ -115,7 +115,9 @@ void HoumoQwen35MTP::houmo_init(houmo_memory_i *memory, int seq_max,
     } else {
         memory_ = memory;
     }
-    init_state_cache(seq_max);
+    state_cache_.configure_state_cache(prefill_model_, decode_model_, prefill_length_);
+    state_cache_.initialize_state_cache(seq_max, n_prefill_batch_, n_decode_batch_,
+                                        n_context_length(), device_ids_.size() > 1);
 
     if (!is_mtp_model()) {
         return;

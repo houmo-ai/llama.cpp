@@ -63,6 +63,12 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     bool device_kv_covers_history(int seq_id, int64_t valid_length) const;
     void update_device_kv_range(int seq_id, int64_t abs_end);
     void clear_device_kv_range(int seq_id);
+    size_t history_token_count(int seq_id) const;
+    bool slice_history(int seq_id, size_t begin, size_t end,
+               std::vector<PrefillChunk> &out) const;
+    void truncate_history(int seq_id, size_t keep_tokens);
+    void append_history(int seq_id, const std::vector<PrefillChunk> &chunks);
+    void append_history_token(int seq_id, size_t position, llama_token token);
 
     int32_t sliding_window_ = 1024;
     std::shared_ptr<HoumoEmbeddingLayer> per_layer_embedding_layer_ = nullptr;
@@ -74,11 +80,12 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     std::vector<std::string> global_attention_names_;
     bool visual_bidirectional_attention_ = true;
 
-    // External fp16 embeddings supplied via llama_batch.embd.  This is how
-    // the Gemma4 vision tower output from demo.py is passed into the LLM graph.
-    std::map<int, std::vector<uint16_t>> embedding_cache_;
+    // Inputs waiting for the next graph prefill. Chunks retain their token IDs
+    // or fp16 embeddings so mixed text/VIT input can be replayed in order.
     std::map<int32_t, std::vector<PrefillChunk>> chunk_history_;
-    std::map<int, std::vector<llama_token>> token_history_;
+    // Successfully committed input history, including VIT embeddings and
+    // visual attention metadata required by rollback/replay.
+    std::map<int32_t, std::vector<PrefillChunk>> input_history_;
     std::map<int, int64_t> device_kv_abs_start_;
     std::map<int, int64_t> device_kv_abs_end_;
     std::string accepted_count_input_name_;
@@ -87,6 +94,7 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
       bool valid = false;
       int32_t start_pos = 0;
       int32_t n_verify = 0;
+      std::vector<llama_token> tokens;
     };
     std::map<int, VerifyPending> pending_verify_;
     HoumoGemma4KVCache kv_reuse_cache_;

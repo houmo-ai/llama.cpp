@@ -42,6 +42,8 @@ add_library(llama
             houmo/houmo-gptoss.cpp
             houmo/houmo-qwenllm.cpp
             houmo/houmo-qwen35llm.cpp
+            houmo/houmo-checkpoint-pool.cpp
+            houmo/houmo-qwen35-state-cache.cpp
             houmo/houmo-qwen35mtp.cpp
             houmo/houmo-vllmodel.cpp
             houmo/houmo-glmocrmodel.cpp

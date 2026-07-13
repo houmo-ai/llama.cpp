@@ -271,16 +271,123 @@ int HouMoGemma4::set_per_layer_inputs_for_decode(std::vector<llama_token> &batch
 }
 
 bool HouMoGemma4::has_cached_inputs(int seq_id) const {
-    auto it = embedding_cache_.find(seq_id);
-    return it != embedding_cache_.end() && !it->second.empty();
+    auto it = chunk_history_.find(seq_id);
+    return it != chunk_history_.end() && !it->second.empty();
 }
 
 size_t HouMoGemma4::cached_token_count(int seq_id) const {
-    auto it = embedding_cache_.find(seq_id);
-    if (it == embedding_cache_.end()) {
+    auto it = chunk_history_.find(seq_id);
+    if (it == chunk_history_.end()) {
         return 0;
     }
-    return it->second.size() / static_cast<size_t>(n_embd_);
+    size_t count = 0;
+    for (const auto &chunk : it->second) {
+        count += chunk.size();
+    }
+    return count;
+}
+
+size_t HouMoGemma4::history_token_count(int seq_id) const {
+    auto it = input_history_.find(seq_id);
+    if (it == input_history_.end()) {
+        return 0;
+    }
+    size_t count = 0;
+    for (const auto &chunk : it->second) {
+        count += chunk.size();
+    }
+    return count;
+}
+
+bool HouMoGemma4::slice_history(int seq_id, size_t begin, size_t end,
+                                std::vector<PrefillChunk> &out) const {
+    out.clear();
+    if (begin > end || end > history_token_count(seq_id)) {
+        return false;
+    }
+    if (begin == end) {
+        return true;
+    }
+    const auto it = input_history_.find(seq_id);
+    if (it == input_history_.end()) {
+        return false;
+    }
+    size_t position = 0;
+    for (const auto &chunk : it->second) {
+        const size_t chunk_begin = position;
+        const size_t chunk_end = position + chunk.size();
+        position = chunk_end;
+        const size_t copy_begin = std::max(begin, chunk_begin);
+        const size_t copy_end = std::min(end, chunk_end);
+        if (copy_begin >= copy_end) {
+            continue;
+        }
+        const size_t offset = copy_begin - chunk_begin;
+        const size_t count = copy_end - copy_begin;
+        PrefillChunk part;
+        part.is_embedding = chunk.is_embedding;
+        part.bidirectional_attention = chunk.bidirectional_attention;
+        part.n_tokens = count;
+        part.nx = chunk.nx;
+        part.ny = chunk.ny;
+        if (chunk.is_embedding) {
+            const size_t elem_begin = offset * static_cast<size_t>(n_embd_);
+            const size_t elem_end = (offset + count) * static_cast<size_t>(n_embd_);
+            if (elem_end > chunk.embeddings.size()) {
+                return false;
+            }
+            part.embeddings.assign(chunk.embeddings.begin() + elem_begin,
+                                   chunk.embeddings.begin() + elem_end);
+        } else {
+            if (offset + count > chunk.tokens.size()) {
+                return false;
+            }
+            part.tokens.assign(chunk.tokens.begin() + offset,
+                               chunk.tokens.begin() + offset + count);
+        }
+        out.push_back(std::move(part));
+    }
+    return position >= end;
+}
+
+void HouMoGemma4::truncate_history(int seq_id, size_t keep_tokens) {
+    auto &history = input_history_[seq_id];
+    size_t position = 0;
+    size_t keep_chunks = 0;
+    for (; keep_chunks < history.size(); ++keep_chunks) {
+        auto &chunk = history[keep_chunks];
+        if (position + chunk.size() <= keep_tokens) {
+            position += chunk.size();
+            continue;
+        }
+        const size_t keep = keep_tokens > position ? keep_tokens - position : 0;
+        chunk.n_tokens = keep;
+        if (chunk.is_embedding) {
+            chunk.embeddings.resize(keep * static_cast<size_t>(n_embd_));
+        } else {
+            chunk.tokens.resize(keep);
+        }
+        if (keep > 0) {
+            ++keep_chunks;
+        }
+        break;
+    }
+    history.resize(keep_chunks);
+}
+
+void HouMoGemma4::append_history(int seq_id,
+                                 const std::vector<PrefillChunk> &chunks) {
+    auto &history = input_history_[seq_id];
+    history.insert(history.end(), chunks.begin(), chunks.end());
+}
+
+void HouMoGemma4::append_history_token(int seq_id, size_t position,
+                                       llama_token token) {
+    truncate_history(seq_id, position);
+    PrefillChunk chunk;
+    chunk.n_tokens = 1;
+    chunk.tokens.push_back(token);
+    input_history_[seq_id].push_back(std::move(chunk));
 }
 
 bool HouMoGemma4::device_kv_covers_history(int seq_id,
@@ -311,7 +418,6 @@ void HouMoGemma4::clear_device_kv_range(int seq_id) {
 }
 
 void HouMoGemma4::clear_cached_inputs(int seq_id) {
-    embedding_cache_[seq_id].clear();
     chunk_history_[seq_id].clear();
 }
 
@@ -450,13 +556,9 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
     if (logits == nullptr && has_cached_inputs(seq_id)) {
         if (!tokens.empty()) {
-            auto &cache = embedding_cache_[seq_id];
-            const size_t offset = cache.size();
-            cache.resize(offset + tokens.size() * static_cast<size_t>(n_embd_));
-            embedding_layer_->get_embedding_batch(tokens.data(), tokens.size(),
-                                                 cache.data() + offset);
             PrefillChunk chunk;
             chunk.n_tokens = tokens.size();
+            chunk.tokens = tokens;
             chunk_history_[seq_id].push_back(std::move(chunk));
         }
         return 0;
@@ -468,6 +570,8 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t effective_kv_offset = kv_offset;
     if (kv_offset == 0) {
         clear_device_kv_range(seq_id);
+        input_history_[seq_id].clear();
+        kv_reuse_cache_.clear_seq(seq_id);
     }
 
     if (kv_offset > 0 && kv_cache_.find(seq_id) != kv_cache_.end() &&
@@ -480,66 +584,66 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                            __func__, seq_id, kv_offset);
         } else {
             const int64_t rollback_pos =
-                kv_reuse_cache_.restore_nearest_before(seq_id, kv_offset, kv_item);
+                kv_reuse_cache_.find_nearest_before(seq_id, kv_offset);
+            bool rollback_committed = false;
             if (rollback_pos >= 0 && rollback_pos < kv_offset) {
-                const auto hist_it = token_history_.find(seq_id);
-                const bool can_replay_text =
-                    cached_tokens == 0 && hist_it != token_history_.end() &&
-                    static_cast<size_t>(kv_offset) <= hist_it->second.size();
-                if (can_replay_text) {
-                    std::vector<llama_token> replay_tokens;
-                    replay_tokens.reserve(static_cast<size_t>(kv_offset - rollback_pos) + tokens.size());
-                    replay_tokens.insert(replay_tokens.end(),
-                                         hist_it->second.begin() + rollback_pos,
-                                         hist_it->second.begin() + kv_offset);
-                    replay_tokens.insert(replay_tokens.end(), tokens.begin(), tokens.end());
+                std::vector<PrefillChunk> replay_chunks;
+                if (slice_history(seq_id, static_cast<size_t>(rollback_pos),
+                                  static_cast<size_t>(kv_offset), replay_chunks) &&
+                    kv_reuse_cache_.restore_at(seq_id, rollback_pos, kv_item)) {
+                    auto &pending = chunk_history_[seq_id];
+                    replay_chunks.insert(replay_chunks.end(), pending.begin(), pending.end());
+                    pending.swap(replay_chunks);
                     if (memory_) {
                         memory_->seq_rm(seq_id, static_cast<int32_t>(rollback_pos), kv_offset);
                     }
                     const int32_t gap = kv_offset - static_cast<int32_t>(rollback_pos);
-                    effective_tokens.swap(replay_tokens);
                     effective_kv_offset = static_cast<int32_t>(rollback_pos);
                     update_device_kv_range(seq_id, rollback_pos);
-                    LLAMA_LOG_INFO("%s: rollback seq_id=%d kv_offset=%d rollback_pos=%ld gap=%d effective_tokens=%zu\n",
+                    kv_reuse_cache_.release_after(seq_id, rollback_pos);
+                    rollback_committed = true;
+                    LLAMA_LOG_INFO("%s: multimodal rollback seq_id=%d kv_offset=%d rollback_pos=%ld gap=%d replay_tokens=%zu\n",
                                    __func__, seq_id, kv_offset, rollback_pos,
-                                   gap, effective_tokens.size());
+                                   gap, cached_token_count(seq_id));
                 } else {
-                    LLAMA_LOG_WARN("%s: nearest Gemma4 checkpoint found but cannot replay gap seq_id=%d kv_offset=%d rollback_pos=%ld cached_tokens=%zu history=%zu\n",
+                    LLAMA_LOG_WARN("%s: nearest Gemma4 checkpoint rollback unavailable; try replay from zero seq_id=%d kv_offset=%d rollback_pos=%ld pending=%zu history=%zu\n",
                                    __func__, seq_id, kv_offset, rollback_pos,
                                    cached_tokens,
-                                   hist_it == token_history_.end() ? 0 : hist_it->second.size());
+                                   history_token_count(seq_id));
                 }
-            } else {
-                const auto hist_it = token_history_.find(seq_id);
-                const bool can_replay_from_zero =
-                    cached_tokens == 0 && hist_it != token_history_.end() &&
-                    static_cast<size_t>(kv_offset) <= hist_it->second.size();
-                if (can_replay_from_zero) {
-                    std::vector<llama_token> replay_tokens;
-                    replay_tokens.reserve(static_cast<size_t>(kv_offset) + tokens.size());
-                    replay_tokens.insert(replay_tokens.end(),
-                                         hist_it->second.begin(),
-                                         hist_it->second.begin() + kv_offset);
-                    replay_tokens.insert(replay_tokens.end(), tokens.begin(), tokens.end());
+            }
+            if (!rollback_committed) {
+                std::vector<PrefillChunk> replay_chunks;
+                if (slice_history(seq_id, 0, static_cast<size_t>(kv_offset),
+                                  replay_chunks)) {
+                    auto &pending = chunk_history_[seq_id];
+                    replay_chunks.insert(replay_chunks.end(), pending.begin(), pending.end());
+                    pending.swap(replay_chunks);
                     if (memory_) {
                         memory_->seq_rm(seq_id, 0, kv_offset);
                     }
-                    effective_tokens.swap(replay_tokens);
                     effective_kv_offset = 0;
                     clear_device_kv_range(seq_id);
-                    LLAMA_LOG_INFO("%s: no checkpoint, rollback seq_id=%d kv_offset=%d rollback_pos=0 gap=%d effective_tokens=%zu\n",
+                    kv_reuse_cache_.release_after(seq_id, 0);
+                    LLAMA_LOG_INFO("%s: no checkpoint, multimodal rollback seq_id=%d kv_offset=%d rollback_pos=0 gap=%d replay_tokens=%zu\n",
                                    __func__, seq_id, kv_offset, kv_offset,
-                                   effective_tokens.size());
+                                   cached_token_count(seq_id));
                 } else {
-                    LLAMA_LOG_WARN("%s: no Gemma4 sliding KV checkpoint covers seq_id=%d kv_offset=%d and cannot replay from zero cached_tokens=%zu history=%zu; continue without rollback\n",
+                    LLAMA_LOG_WARN("%s: no Gemma4 sliding KV checkpoint covers seq_id=%d kv_offset=%d and multimodal history cannot replay from zero pending=%zu history=%zu; continue without rollback\n",
                                    __func__, seq_id, kv_offset, cached_tokens,
-                                   hist_it == token_history_.end() ? 0 : hist_it->second.size());
+                                   history_token_count(seq_id));
                 }
             }
         }
     }
 
-    const size_t total_tokens = cached_tokens + effective_tokens.size();
+    if (!effective_tokens.empty()) {
+        PrefillChunk chunk;
+        chunk.n_tokens = effective_tokens.size();
+        chunk.tokens = effective_tokens;
+        chunk_history_[seq_id].push_back(std::move(chunk));
+    }
+    const size_t total_tokens = cached_token_count(seq_id);
     if ((total_tokens + effective_kv_offset) >= static_cast<size_t>(context_length_)) {
         LLAMA_LOG_ERROR("%s: input size %zu + kv_offset %d >= context_length_%d\n",
                         __func__, total_tokens, effective_kv_offset, context_length_);
@@ -548,16 +652,6 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
     if (total_tokens == 0) {
         return 0;
-    }
-
-    if (!effective_tokens.empty() && cached_tokens == 0) {
-        PrefillChunk chunk;
-        chunk.n_tokens = effective_tokens.size();
-        chunk_history_[seq_id].push_back(std::move(chunk));
-    } else if (!tokens.empty()) {
-        PrefillChunk chunk;
-        chunk.n_tokens = tokens.size();
-        chunk_history_[seq_id].push_back(std::move(chunk));
     }
 
     size_t rounds = (total_tokens + prefill_length_ - 1) / prefill_length_;
@@ -577,23 +671,56 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                    cached_tokens, effective_kv_offset);
 
         std::memset(input_data.Data(), 0, input_data.MemSize());
-        if (round_start + static_cast<size_t>(current_length) <= cached_tokens) {
-            const size_t emb_start = round_start * static_cast<size_t>(n_embd_);
-            std::memcpy(input_data.Data(), embedding_cache_[seq_id].data() + emb_start,
-                        current_length * static_cast<size_t>(n_embd_) * sizeof(uint16_t));
-        } else if (round_start >= cached_tokens) {
-            const size_t token_offset = round_start - cached_tokens;
-            embedding_layer_->get_embedding_batch(effective_tokens.data() + token_offset,
-                                                 current_length, input_data.Data());
-        } else {
-            const size_t emb_part = cached_tokens - round_start;
-            const size_t token_part = static_cast<size_t>(current_length) - emb_part;
-            const size_t emb_start = round_start * static_cast<size_t>(n_embd_);
-            std::memcpy(input_data.Data(), embedding_cache_[seq_id].data() + emb_start,
-                        emb_part * static_cast<size_t>(n_embd_) * sizeof(uint16_t));
-            embedding_layer_->get_embedding_batch(effective_tokens.data(), token_part,
-                                                 static_cast<uint16_t *>(input_data.Data()) +
-                                                     emb_part * static_cast<size_t>(n_embd_));
+        std::vector<llama_token> pli_round(static_cast<size_t>(current_length), 0);
+        size_t stream_pos = 0;
+        size_t copied = 0;
+        for (const auto &chunk : chunk_history_[seq_id]) {
+            const size_t chunk_start = stream_pos;
+            const size_t chunk_end = stream_pos + chunk.size();
+            stream_pos = chunk_end;
+            const size_t copy_start = std::max(round_start, chunk_start);
+            const size_t copy_end = std::min(round_start + static_cast<size_t>(current_length), chunk_end);
+            if (copy_start >= copy_end) {
+                continue;
+            }
+            const size_t chunk_offset = copy_start - chunk_start;
+            const size_t round_offset = copy_start - round_start;
+            const size_t count = copy_end - copy_start;
+            auto *dst = static_cast<uint16_t *>(input_data.Data()) +
+                        round_offset * static_cast<size_t>(n_embd_);
+            if (chunk.is_embedding) {
+                const size_t elem_offset = chunk_offset * static_cast<size_t>(n_embd_);
+                const size_t elem_count = count * static_cast<size_t>(n_embd_);
+                if (elem_offset + elem_count > chunk.embeddings.size()) {
+                    LLAMA_LOG_ERROR("%s: embedding history is incomplete seq_id=%d offset=%zu count=%zu size=%zu\n",
+                                    __func__, seq_id, elem_offset, elem_count,
+                                    chunk.embeddings.size());
+                    clear_cached_inputs(seq_id);
+                    return -1;
+                }
+                std::memcpy(dst, chunk.embeddings.data() + elem_offset,
+                            elem_count * sizeof(uint16_t));
+            } else {
+                if (chunk_offset + count > chunk.tokens.size()) {
+                    LLAMA_LOG_ERROR("%s: token history is incomplete seq_id=%d offset=%zu count=%zu size=%zu\n",
+                                    __func__, seq_id, chunk_offset, count,
+                                    chunk.tokens.size());
+                    clear_cached_inputs(seq_id);
+                    return -1;
+                }
+                embedding_layer_->get_embedding_batch(chunk.tokens.data() + chunk_offset,
+                                                      count, dst);
+                std::copy(chunk.tokens.begin() + chunk_offset,
+                          chunk.tokens.begin() + chunk_offset + count,
+                          pli_round.begin() + static_cast<std::ptrdiff_t>(round_offset));
+            }
+            copied += count;
+        }
+        if (copied != static_cast<size_t>(current_length)) {
+            LLAMA_LOG_ERROR("%s: input history copied=%zu expected=%d seq_id=%d\n",
+                            __func__, copied, current_length, seq_id);
+            clear_cached_inputs(seq_id);
+            return -1;
         }
 
         auto valid_tensor = prefill_input_map_.at(prefill_model_->GetInputName(1));
@@ -605,23 +732,7 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         prefill_model_->SetInput(prefill_model_->GetInputName(0), input_data);
         prefill_model_->SetInput(prefill_model_->GetInputName(1), valid_tensor);
         prefill_model_->SetInput(prefill_model_->GetInputName(2), current_tensor);
-        const llama_token *pli_tokens = nullptr;
-        std::vector<llama_token> zero_tokens;
-        if (round_start >= cached_tokens) {
-            const size_t token_offset = round_start - cached_tokens;
-            pli_tokens = effective_tokens.data() + token_offset;
-        } else if (round_start + static_cast<size_t>(current_length) <= cached_tokens) {
-            zero_tokens.assign(static_cast<size_t>(current_length), 0);
-            pli_tokens = zero_tokens.data();
-        } else {
-            const size_t emb_part = cached_tokens - round_start;
-            const size_t token_part = static_cast<size_t>(current_length) - emb_part;
-            zero_tokens.assign(static_cast<size_t>(current_length), 0);
-            std::copy(effective_tokens.begin(), effective_tokens.begin() + token_part,
-                      zero_tokens.begin() + static_cast<std::ptrdiff_t>(emb_part));
-            pli_tokens = zero_tokens.data();
-        }
-        if (set_per_layer_inputs_for_prefill(pli_tokens, current_length) != 0) {
+        if (set_per_layer_inputs_for_prefill(pli_round.data(), current_length) != 0) {
             PERF_STOP(PREFILL_SETINPUT_ONCE);
             clear_cached_inputs(seq_id);
             return -1;
@@ -725,13 +836,8 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     if (memory_) {
         memory_->seq_add(seq_id, 0, 0, static_cast<int32_t>(total_tokens));
     }
-    if (cached_tokens == 0) {
-        auto &history = token_history_[seq_id];
-        if (history.size() > static_cast<size_t>(effective_kv_offset)) {
-            history.resize(static_cast<size_t>(effective_kv_offset));
-        }
-        history.insert(history.end(), effective_tokens.begin(), effective_tokens.end());
-    }
+    truncate_history(seq_id, static_cast<size_t>(effective_kv_offset));
+    append_history(seq_id, chunk_history_[seq_id]);
     clear_cached_inputs(seq_id);
     return 0;
 }
@@ -755,18 +861,18 @@ int HouMoGemma4::houmo_prefill(const float *embeddings, int n_tokens,
         embedding_offset = sizeof(CompactHeader);
     }
 
-    auto &cache = embedding_cache_[seq_id];
-    const size_t old_size = cache.size();
     const size_t data_elems = static_cast<size_t>(n_tokens) * static_cast<size_t>(n_embd_);
-    cache.resize(old_size + data_elems);
-    // HMM multimodal encoders provide fp16 embeddings. Vision may prepend a
-    // CompactHeader, while audio does not; both payloads are copied as fp16.
-    std::memcpy(cache.data() + old_size, ptr + embedding_offset,
-                data_elems * sizeof(uint16_t));
     PrefillChunk chunk;
     chunk.is_embedding = true;
     chunk.bidirectional_attention = has_compact_header && visual_bidirectional_attention_;
     chunk.n_tokens = static_cast<size_t>(n_tokens);
+    chunk.nx = header.nx;
+    chunk.ny = header.ny;
+    chunk.embeddings.resize(data_elems);
+    // HMM multimodal encoders provide fp16 embeddings. Vision may prepend a
+    // CompactHeader, while audio does not; both payloads are copied as fp16.
+    std::memcpy(chunk.embeddings.data(), ptr + embedding_offset,
+                data_elems * sizeof(uint16_t));
     chunk_history_[seq_id].push_back(std::move(chunk));
     LLAMA_LOG_INFO("%s: cached external embeddings seq_id=%d n_tokens=%d header_magic=0x%04x bidir=%d\n",
                    __func__, seq_id, n_tokens, header.magic,
@@ -823,6 +929,7 @@ int HouMoGemma4::houmo_decode(std::vector<llama_token> &batches,
 
     for (size_t i = 0; i < seq_ids.size(); ++i) {
         const int seq_id = seq_ids[i];
+        const int32_t token_pos = decode_valid_length_[seq_id];
         decode_valid_length_[seq_id]++;
         int batch_id = seq_id;
         if (n_decode_batch_ == 1) {
@@ -843,6 +950,7 @@ int HouMoGemma4::houmo_decode(std::vector<llama_token> &batches,
         if (memory_) {
             memory_->seq_add(seq_id, 0, 0, 1);
         }
+        append_history_token(seq_id, static_cast<size_t>(token_pos), batches[i]);
         update_device_kv_range(seq_id, decode_valid_length_[seq_id]);
     }
     return 0;
@@ -1029,7 +1137,7 @@ int HouMoGemma4::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     }
     PERF_STOP(VERIFY_GETOUTPUT);
 
-    pending_verify_[seq_id] = {true, start_pos, n_verify};
+    pending_verify_[seq_id] = {true, start_pos, n_verify, tokens};
     return 0;
 }
 
@@ -1044,6 +1152,7 @@ int HouMoGemma4::houmo_verify_accept(int seq_id, uint16_t n_accepted) {
     const int32_t keep_pos = it->second.start_pos + accepted;
     decode_valid_length_[seq_id] = keep_pos;
     update_device_kv_range(seq_id, keep_pos);
+    kv_reuse_cache_.release_after(seq_id, keep_pos);
     if (memory_) {
         const int32_t cur = memory_->seq_pos_min(seq_id);
         if (cur < keep_pos) {
@@ -1052,6 +1161,12 @@ int HouMoGemma4::houmo_verify_accept(int seq_id, uint16_t n_accepted) {
             memory_->seq_rm(seq_id, keep_pos, cur);
         }
     }
+    truncate_history(seq_id, static_cast<size_t>(it->second.start_pos));
+    PrefillChunk accepted_chunk;
+    accepted_chunk.n_tokens = static_cast<size_t>(accepted);
+    accepted_chunk.tokens.assign(it->second.tokens.begin(),
+                                 it->second.tokens.begin() + accepted);
+    input_history_[seq_id].push_back(std::move(accepted_chunk));
     it->second.valid = false;
     return 0;
 }

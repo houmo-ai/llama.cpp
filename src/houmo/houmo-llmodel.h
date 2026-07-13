@@ -138,6 +138,8 @@ struct PrefillChunk {
     bool is_embedding = false;
     bool bidirectional_attention = false;
     size_t n_tokens = 0;
+    int16_t nx = 0;
+    int16_t ny = 0;
     std::vector<llama_token> tokens;
     std::vector<uint16_t> embeddings;
 
