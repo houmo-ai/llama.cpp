@@ -1,21 +1,20 @@
 #include "houmo-gptoss.h"
 #include "ggml.h"
+#include <algorithm>
 #include <cstring>
 #include "llama-impl.h"
 static constexpr int ALIGN_NUM = 16; // 对齐值
-static constexpr uint16_t F16_NEG_INF_UINT = 0xFC00; // 二进制：1111110000000000
-
+static constexpr uint16_t F16_NEG_INF_UINT = 0xFBFF; // torch.finfo(torch.float16).min == -65504
 // 辅助函数：内存对齐
 inline int aligned(int size, int align) {
     return ((size + align - 1) / align) * align;
 }
 
 std::vector<uint16_t> HouMoGPTOSS::generate_mask_f16(int batch_size,
+                                                    int fill_length,
                                                     int query_length,
                                                     int past_seq_length,
                                                     bool is_local) {
-    // ========== 1. 兼容原有参数，==========
-    int fill_length = (query_length == 1) ? 1 : prefill_length_; // prefill=256, decode=1（固定值）
     int new_cache_length = query_length;
     int old_cache_length = past_seq_length;
 
@@ -73,48 +72,147 @@ void HouMoGPTOSS::houmo_init(houmo_memory_i *memory, int seq_max,
     abort_callback_data_ = abort_callback_data;
     abort_callback_ = abort_callback;
     model_inout_init(seq_max);
-    int sum = decode_model_->GetInputNum();
-    for (int i = 0; i < sum; i++) {
+    prefill_local_attention_names_.clear();
+    prefill_global_attention_names_.clear();
+    local_attention_names_.clear();
+    global_attention_names_.clear();
+    for (size_t i = 0; i < prefill_model_->GetInputNum(); ++i) {
+        std::string name = prefill_model_->GetInputName(i);
+        if (name.find("local_attention_mask") != std::string::npos ||
+            name.find("sliding_attention_mask") != std::string::npos) {
+            prefill_local_attention_names_.push_back(name);
+        } else if (name.find("global_attention_mask") != std::string::npos ||
+                   name.find("full_attention_mask") != std::string::npos) {
+            prefill_global_attention_names_.push_back(name);
+        }
+    }
+    for (size_t i = 0; i < decode_model_->GetInputNum(); ++i) {
         std::string name = decode_model_->GetInputName(i);
-        if (name.find("local_attention_mask") != std::string::npos) {
+        if (name.find("local_attention_mask") != std::string::npos ||
+            name.find("sliding_attention_mask") != std::string::npos) {
             local_attention_names_.push_back(name);
-        } else if (name.find("global_attention_mask") != std::string::npos) {
+        } else if (name.find("global_attention_mask") != std::string::npos ||
+                   name.find("full_attention_mask") != std::string::npos) {
             global_attention_names_.push_back(name);
         }
     }
     memory_ = memory;
+    // GPT-OSS alternates local/global attention. Even-numbered layers are
+    // local layers and expose [1, 8, sliding_window + prefill_length, 64]
+    // writable KV inputs (for example width 384 = 128 + 256).
+    kv_reuse_cache_.init(kv_cache_, sliding_window_, prefill_length_);
 }
+
+bool HouMoGPTOSS::device_kv_covers_history(int seq_id,
+                                           int64_t valid_length) const {
+    if (valid_length <= 0) {
+        return true;
+    }
+    const int64_t history_len = std::min<int64_t>(valid_length, sliding_window_);
+    const int64_t history_start = valid_length - history_len;
+    auto start = device_kv_abs_start_.find(seq_id);
+    auto end = device_kv_abs_end_.find(seq_id);
+    return start != device_kv_abs_start_.end() &&
+           end != device_kv_abs_end_.end() && start->second <= history_start &&
+           end->second >= valid_length;
+}
+
+void HouMoGPTOSS::update_device_kv_range(int seq_id, int64_t abs_end) {
+    device_kv_abs_end_[seq_id] = abs_end;
+    device_kv_abs_start_[seq_id] =
+        std::max<int64_t>(0, abs_end - sliding_window_);
+}
+
+void HouMoGPTOSS::clear_device_kv_range(int seq_id) {
+    device_kv_abs_start_.erase(seq_id);
+    device_kv_abs_end_.erase(seq_id);
+}
+
 int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                            float *logits) {
     LLAMA_LOG_INFO("%s seq_id = %d, tokens size is = %zu\n", "prefill stage",
                    seq_id, tokens.size());
     int kv_offset = memory_->seq_pos_min(seq_id);
+    if (kv_offset == 0) {
+        input_history_[seq_id].clear();
+        clear_device_kv_range(seq_id);
+        kv_reuse_cache_.clear_seq(seq_id);
+    }
+
+    std::vector<llama_token> effective_tokens = tokens;
+    int effective_kv_offset = kv_offset;
+    if (kv_offset > 0 && kv_cache_.find(seq_id) != kv_cache_.end() &&
+        !device_kv_covers_history(seq_id, kv_offset)) {
+        auto &kv_item = kv_cache_[seq_id];
+        if (kv_reuse_cache_.prepare_for_prefill(seq_id, kv_offset, kv_item)) {
+            update_device_kv_range(seq_id, kv_offset);
+        } else {
+            int64_t rollback_pos =
+                kv_reuse_cache_.find_nearest_before(seq_id, kv_offset);
+            if (rollback_pos < 0) {
+                rollback_pos = 0;
+            }
+            const auto &history = input_history_[seq_id];
+            if (rollback_pos <= kv_offset &&
+                static_cast<size_t>(kv_offset) <= history.size() &&
+                (rollback_pos == 0 || kv_reuse_cache_.restore_at(
+                                          seq_id, rollback_pos, kv_item))) {
+                std::vector<llama_token> replay(
+                    history.begin() + static_cast<std::ptrdiff_t>(rollback_pos),
+                    history.begin() + static_cast<std::ptrdiff_t>(kv_offset));
+                replay.insert(replay.end(), effective_tokens.begin(),
+                              effective_tokens.end());
+                effective_tokens.swap(replay);
+                memory_->seq_rm(seq_id, static_cast<int32_t>(rollback_pos),
+                                kv_offset);
+                effective_kv_offset = static_cast<int>(rollback_pos);
+                if (rollback_pos == 0) {
+                    clear_device_kv_range(seq_id);
+                } else {
+                    update_device_kv_range(seq_id, rollback_pos);
+                }
+                kv_reuse_cache_.release_after(seq_id, rollback_pos);
+                LLAMA_LOG_INFO(
+                    "%s: GPT-OSS rollback seq_id=%d kv_offset=%d "
+                    "rollback_pos=%ld replay_tokens=%zu\n",
+                    __func__, seq_id, kv_offset, rollback_pos,
+                    effective_tokens.size());
+            } else {
+                LLAMA_LOG_WARN(
+                    "%s: GPT-OSS KV restore unavailable seq_id=%d "
+                    "kv_offset=%d history=%zu; continue without rollback\n",
+                    __func__, seq_id, kv_offset, history.size());
+            }
+        }
+    }
     // Do not cache tokens anymore. Process the provided tokens immediately.
-    if ((tokens.size() + kv_offset) >= (uint32_t)context_length_) {
+    if ((effective_tokens.size() + effective_kv_offset) >=
+        static_cast<uint32_t>(context_length_)) {
         LLAMA_LOG_ERROR("%s: tokens size %zu + kv_offset %d >= context_length_%d, reset to 0\n",
-                        __func__, tokens.size(), kv_offset, context_length_);
+                        __func__, effective_tokens.size(), effective_kv_offset,
+                        context_length_);
         return 1;
     }
 
-    size_t input_echo_len = tokens.size();
+    size_t input_echo_len = effective_tokens.size();
     // compute number of rounds needed (integer ceil)
     int32_t prefill_loop_round = 0;
     prefill_loop_round = static_cast<int32_t>((input_echo_len + prefill_length_ - 1) / prefill_length_);
     int32_t current_length = 0;
 
     std::vector<llama_token> input_ids;
-    int32_t valid_length = kv_offset;
+    int32_t valid_length = effective_kv_offset;
     for (int round = 0; round < prefill_loop_round; round++) {
 
         if (round == prefill_loop_round - 1) {
             current_length = static_cast<int32_t>(input_echo_len - round * prefill_length_);
-            auto first = tokens.begin() + round * prefill_length_;
-            auto last = tokens.begin() + input_echo_len;
+            auto first = effective_tokens.begin() + round * prefill_length_;
+            auto last = effective_tokens.begin() + input_echo_len;
             input_ids.assign(first, last);
         } else {
             current_length = prefill_length_;
-            auto first = tokens.begin() + round * prefill_length_;
-            auto last = tokens.begin() + (round + 1) * prefill_length_;
+            auto first = effective_tokens.begin() + round * prefill_length_;
+            auto last = effective_tokens.begin() + (round + 1) * prefill_length_;
             input_ids.assign(first, last);
         }
         // LLAMA_LOG_DEBUG("%s: round %d/%d, valid_length = %d, current_length = %d\n", __func__, round + 1,
@@ -136,9 +234,12 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                  prefill_valid_length);
         prefill_model_->SetInput(prefill_model_->GetInputName(2),
                                  prefill_current_length);
-        set_attentions_for_prefill(current_length, valid_length);
-        if (round == 0)
-            set_kv_cache_for_prefill(seq_id);
+        if (set_attentions_for_prefill(current_length, valid_length) != 0) {
+            LLAMA_LOG_ERROR("%s: set_attentions_for_prefill failed\n",
+                            __func__);
+            return -1;
+        }
+        set_kv_cache_for_prefill(seq_id);
         auto status = prefill_model_->Run();
         if (status != tcim::Status::OK) {
             LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
@@ -147,13 +248,18 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         }
         prefill_model_->Sync();
         valid_length += current_length;
+        update_device_kv_range(seq_id, valid_length);
+        const bool final_round = round == prefill_loop_round - 1;
+        kv_reuse_cache_.save_after_prefill(
+            seq_id, valid_length, kv_cache_[seq_id],
+            final_round && valid_length > sliding_window_);
         if (abort_callback_ != nullptr && abort_callback_(abort_callback_data_)) {
             LLAMA_LOG_INFO("%s: abort_callback_ is called. seq_id = %d\n", __func__, seq_id);
             return 2;
         }
     }
     // update decode valid length and optionally copy logits
-    decode_valid_length_[seq_id] = static_cast<int32_t>(input_echo_len) + kv_offset;
+    decode_valid_length_[seq_id] = valid_length;
     tcim::Tensor prefill_output_data =
         prefill_model_->GetOutput(prefill_output_names_[0]);
     // 转浮点
@@ -163,6 +269,10 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         memcpy(logits, prefill_output_float.Data(), prefill_output_float.MemSize());
     }
     memory_->seq_add(seq_id, 0, 0, static_cast<int32_t>(input_echo_len));
+    auto &history = input_history_[seq_id];
+    history.resize(static_cast<size_t>(effective_kv_offset));
+    history.insert(history.end(), effective_tokens.begin(),
+                   effective_tokens.end());
     return 0;
 }
 
@@ -234,25 +344,29 @@ int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
             }
         }
         memory_->seq_add(seq_id, 0, 0, 1);
+        auto &history = input_history_[seq_id];
+        history.resize(static_cast<size_t>(decode_valid_length_[seq_id] - 1));
+        history.push_back(batches[i]);
+        update_device_kv_range(seq_id, decode_valid_length_[seq_id]);
     }
     return 0;
 }
 
 int HouMoGPTOSS::set_attentions_for_prefill(int current_length, int valid_length) {
-    // set local
-    std::string name = prefill_model_->GetInputName(3);
-    auto& local_mask_input_data = prefill_input_map_.at(name);
-    auto prefill_local_mask_host = generate_mask_f16(1, current_length, valid_length, true);
-    local_mask_input_data.Buffer().CopyFromHost(
-        prefill_local_mask_host.data(), local_mask_input_data.MemSize());
-    prefill_model_->SetInput(name, local_mask_input_data);
-
-    // set global attention mask
-    name = prefill_model_->GetInputName(4);
-    auto &global_mask_input_data = prefill_input_map_.at(name);
-    auto prefill_global_mask_host = generate_mask_f16(1, current_length, valid_length, false);
-    global_mask_input_data.Buffer().CopyFromHost(prefill_global_mask_host.data(), global_mask_input_data.MemSize());
-    prefill_model_->SetInput(name, global_mask_input_data);
+    for (const auto &name : prefill_local_attention_names_) {
+        auto &mask = prefill_input_map_.at(name);
+        auto host = generate_mask_f16(1, prefill_length_, current_length,
+                                      valid_length, true);
+        mask.Buffer().CopyFromHost(host.data(), mask.MemSize());
+        prefill_model_->SetInput(name, mask);
+    }
+    for (const auto &name : prefill_global_attention_names_) {
+        auto &mask = prefill_input_map_.at(name);
+        auto host = generate_mask_f16(1, prefill_length_, current_length,
+                                      valid_length, false);
+        mask.Buffer().CopyFromHost(host.data(), mask.MemSize());
+        prefill_model_->SetInput(name, mask);
+    }
     return 0;
 }
 int HouMoGPTOSS::set_attentions_for_decode(std::vector<int> &seq_ids) {
@@ -264,18 +378,26 @@ int HouMoGPTOSS::set_attentions_for_decode(std::vector<int> &seq_ids) {
 
         int valid_length = decode_valid_length_[seq_id];
         // set local attention mask
-        std::string name = local_attention_names_[batch_id];
-        auto& local_mask_input_data = decode_input_map_.at(name);
-        auto local_mask_host = generate_mask_f16(1, current_length, valid_length, true);
-        local_mask_input_data.Buffer().CopyFromHost(local_mask_host.data(), local_mask_input_data.MemSize());
-        decode_model_->SetInput(name, local_mask_input_data);
+        if (batch_id < static_cast<int>(local_attention_names_.size())) {
+            std::string name = local_attention_names_[batch_id];
+            auto &local_mask_input_data = decode_input_map_.at(name);
+            auto local_mask_host = generate_mask_f16(
+                1, 1, current_length, valid_length, true);
+            local_mask_input_data.Buffer().CopyFromHost(
+                local_mask_host.data(), local_mask_input_data.MemSize());
+            decode_model_->SetInput(name, local_mask_input_data);
+        }
 
         // set global attention mask
-        name = global_attention_names_[batch_id];
-        auto& global_mask_input_data = decode_input_map_.at(name);
-        auto global_mask_host = generate_mask_f16(1, current_length, valid_length, false);
-        global_mask_input_data.Buffer().CopyFromHost(global_mask_host.data(), global_mask_input_data.MemSize());
-        decode_model_->SetInput(name, global_mask_input_data);
+        if (batch_id < static_cast<int>(global_attention_names_.size())) {
+            std::string name = global_attention_names_[batch_id];
+            auto &global_mask_input_data = decode_input_map_.at(name);
+            auto global_mask_host = generate_mask_f16(
+                1, 1, current_length, valid_length, false);
+            global_mask_input_data.Buffer().CopyFromHost(
+                global_mask_host.data(), global_mask_input_data.MemSize());
+            decode_model_->SetInput(name, global_mask_input_data);
+        }
     }
 
     return 0;

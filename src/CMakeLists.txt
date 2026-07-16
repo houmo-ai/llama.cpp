@@ -52,6 +52,7 @@ add_library(llama
             houmo/houmo-gemma4.cpp
             houmo/houmo-gemma4mtp.cpp
             houmo/houmo-gemma4-kv-cache.cpp
+            houmo/oss-kv-cache.cpp
             ${LLAMA_MODELS_SOURCES}
             )
 

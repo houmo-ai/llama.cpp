@@ -1,4 +1,5 @@
 #include "houmo-llmodel.h"
+#include "oss-kv-cache.h"
 /**
  * @brief HouMoGPTOSSModel is the derived class for GPT-OSS model.
  * @details GPT-OSS model is a single-card model.
@@ -22,13 +23,23 @@ class HouMoGPTOSS : public HouMoLLModel::Impl {
   private:
     int set_attentions_for_prefill(int current_length, int valid_length);
     int set_attentions_for_decode(std::vector<int> &seq_ids);
+    bool device_kv_covers_history(int seq_id, int64_t valid_length) const;
+    void update_device_kv_range(int seq_id, int64_t abs_end);
+    void clear_device_kv_range(int seq_id);
     std::vector<float> generate_mask(int batch_size, int query_length,
                                      int past_seq_length, bool is_local);
-    std::vector<uint16_t> generate_mask_f16(int batch_size, int query_length,
-                                           int past_seq_length, bool is_local);
+    std::vector<uint16_t> generate_mask_f16(int batch_size, int fill_length,
+                         int query_length,
+                         int past_seq_length, bool is_local);
 
   private:
     int32_t sliding_window_ = 128;
+    HoumoOSSKVCache kv_reuse_cache_;
+    std::map<int32_t, std::vector<llama_token>> input_history_;
+    std::map<int32_t, int64_t> device_kv_abs_start_;
+    std::map<int32_t, int64_t> device_kv_abs_end_;
+    std::vector<std::string> prefill_local_attention_names_;
+    std::vector<std::string> prefill_global_attention_names_;
     std::vector<std::string> local_attention_names_;
     std::vector<std::string> global_attention_names_;
 };
