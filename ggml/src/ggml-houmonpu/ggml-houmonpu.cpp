@@ -10,6 +10,7 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>
+#include <glob.h>
 #endif
 
 #ifdef _WIN32
@@ -136,6 +137,33 @@ struct houmonpu_sdk {
         }
 
         // 尝试环境变量
+        if (!handle) {
+            glob_t matches = {};
+            const std::string pattern = std::string("/usr/local/*-sdk/hal/lib/") + get_library_name();
+            const std::string standard_sdk = std::string("/usr/local/houmo-sdk/hal/lib/") + get_library_name();
+
+            if (glob(pattern.c_str(), 0, nullptr, &matches) == 0) {
+                for (size_t i = 0; i < matches.gl_pathc && !handle; ++i) {
+                    const std::string path = matches.gl_pathv[i];
+
+                    // The standard Houmo SDK was already attempted first.
+                    if (path == standard_sdk) {
+                        continue;
+                    }
+
+                    GGML_LOG_INFO("[HoumoNPU] Trying to load from customer SDK: %s\n", path.c_str());
+                    handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+                    if (handle) {
+                        GGML_LOG_INFO("[HoumoNPU] Successfully loaded from customer SDK: %s\n", path.c_str());
+                    } else {
+                        GGML_LOG_INFO("[HoumoNPU] Failed to load from customer SDK: %s - %s\n", path.c_str(), dlerror());
+                    }
+                }
+            }
+
+            globfree(&matches);
+        }
+
         if (!handle) {
             const char* env_paths[] = {
                 getenv("HOUMO_SDK_PATH"),
