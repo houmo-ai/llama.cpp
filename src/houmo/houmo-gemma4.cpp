@@ -572,6 +572,8 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         clear_device_kv_range(seq_id);
         input_history_[seq_id].clear();
         kv_reuse_cache_.clear_seq(seq_id);
+        last_committed_tokens_[seq_id] = 0;
+        pending_verify_.erase(seq_id);
     }
 
     if (kv_offset > 0 && kv_cache_.find(seq_id) != kv_cache_.end() &&
@@ -1057,10 +1059,13 @@ int HouMoGemma4::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     }
     if (!accepted_count_input_name_.empty()) {
         auto accepted_tensor = decode_input_map_.at(accepted_count_input_name_);
-        const int32_t accepted_count = last_committed_tokens_[seq_id];
+        const auto committed_it = last_committed_tokens_.find(seq_id);
+        const int32_t accepted_count = committed_it != last_committed_tokens_.end()
+                                           ? committed_it->second
+                                           : 0;
         set_input_data(accepted_tensor, n_decode_batch_, accepted_count);
         decode_model_->SetInput(accepted_count_input_name_, accepted_tensor);
-        LLAMA_LOG_INFO("%s: verify accepted_count seq_id=%d value=%d\n",
+        LLAMA_LOG_INFO("%s: verify accepted_count seq_id=%d committed=%d\n",
                        __func__, seq_id, accepted_count);
     }
     std::vector<int> seq_ids = {seq_id};
@@ -1089,12 +1094,9 @@ int HouMoGemma4::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     auto *decode_ptr = static_cast<ggml_fp16_t *>(decode_data.Buffer().Data());
     const size_t vocab_row = static_cast<size_t>(tensor_dim_or(decode_data, decode_data.Info().Shape().size() - 1, n_vocab_));
     const size_t vocab_rows = std::max<size_t>(1, decode_data.MemSize() / (vocab_row * sizeof(ggml_fp16_t)));
-    const size_t vocab_base_row = vocab_rows > static_cast<size_t>(n_verify)
-                                      ? vocab_rows - static_cast<size_t>(n_verify)
-                                      : 0;
     for (int i = 0; i < n_verify; ++i) {
         if (logits_out[static_cast<size_t>(i)] != nullptr) {
-            const size_t row_idx = std::min(vocab_base_row + static_cast<size_t>(i),
+            const size_t row_idx = std::min(static_cast<size_t>(i),
                                             vocab_rows - 1);
             ggml_fp16_to_fp32_row(decode_ptr + row_idx * vocab_row,
                                   logits_out[static_cast<size_t>(i)],
@@ -1124,12 +1126,11 @@ int HouMoGemma4::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
                                    ? static_cast<int>(n_embd_)
                                    : static_cast<int>(h_shape.back());
             const int rows = std::min({n_verify, h_seq, pre_norm_hidden_dst_rows_});
-            const int src_begin = h_seq > rows ? h_seq - rows : 0;
             const auto *src = static_cast<const uint8_t *>(hidden.Buffer().Data());
             for (int r = 0; r < rows; ++r) {
                 std::memcpy(reinterpret_cast<uint8_t *>(pre_norm_hidden_dst_ +
                             static_cast<size_t>(r) * h_embd),
-                            src + static_cast<size_t>(src_begin + r) * h_embd * sizeof(ggml_fp16_t),
+                            src + static_cast<size_t>(r) * h_embd * sizeof(ggml_fp16_t),
                             static_cast<size_t>(h_embd) * sizeof(ggml_fp16_t));
             }
             break;
@@ -1146,10 +1147,11 @@ int HouMoGemma4::houmo_verify_accept(int seq_id, uint16_t n_accepted) {
     if (it == pending_verify_.end() || !it->second.valid) {
         return 0;
     }
-    const int accepted = std::min<int>(static_cast<int>(n_accepted) + 1,
-                                       it->second.n_verify);
-    last_committed_tokens_[seq_id] = accepted;
-    const int32_t keep_pos = it->second.start_pos + accepted;
+    const int accepted_drafts = std::min<int>(
+        static_cast<int>(n_accepted), std::max(0, it->second.n_verify - 1));
+    const int committed = std::min(accepted_drafts + 1, it->second.n_verify);
+    last_committed_tokens_[seq_id] = committed;
+    const int32_t keep_pos = it->second.start_pos + committed;
     decode_valid_length_[seq_id] = keep_pos;
     update_device_kv_range(seq_id, keep_pos);
     kv_reuse_cache_.release_after(seq_id, keep_pos);
@@ -1163,10 +1165,12 @@ int HouMoGemma4::houmo_verify_accept(int seq_id, uint16_t n_accepted) {
     }
     truncate_history(seq_id, static_cast<size_t>(it->second.start_pos));
     PrefillChunk accepted_chunk;
-    accepted_chunk.n_tokens = static_cast<size_t>(accepted);
+    accepted_chunk.n_tokens = static_cast<size_t>(committed);
     accepted_chunk.tokens.assign(it->second.tokens.begin(),
-                                 it->second.tokens.begin() + accepted);
+                                 it->second.tokens.begin() + committed);
     input_history_[seq_id].push_back(std::move(accepted_chunk));
+    LLAMA_LOG_INFO("%s: verify commit seq_id=%d drafts=%d committed=%d keep_pos=%d\n",
+                   __func__, seq_id, accepted_drafts, committed, keep_pos);
     it->second.valid = false;
     return 0;
 }

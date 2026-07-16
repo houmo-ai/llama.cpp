@@ -66,7 +66,9 @@ std::string topk_token_ids(const float *logits, size_t n, int k) {
 }
 
 std::vector<uint16_t> build_draft_mask_f16(int fill_length, int width,
-                                           int past_len, int sliding_window,
+                                           int visible_length,
+                                           int cache_valid_end,
+                                           int sliding_window,
                                            bool local) {
     std::vector<uint16_t> mask(static_cast<size_t>(std::max(1, fill_length)) *
                                    width,
@@ -74,13 +76,13 @@ std::vector<uint16_t> build_draft_mask_f16(int fill_length, int width,
     if (width <= 0 || fill_length <= 0) {
         return mask;
     }
-    // Align with gemma4.py::_build_draft_masks(): draft mask covers only the
-    // already committed target KV range. The current assistant token is passed
-    // through input_1 and position/valid_length, but is not included in the
-    // visible cache mask here.
-    const int valid = std::min(width, std::max(1, past_len));
-    const int end = valid;
-    const int start = local ? std::max(0, end - sliding_window) : 0;
+    // Before the cache full this
+    // is a prefix [0, N); after it exceeds the window it becomes
+    // [N - sliding_window, N). The current assistant token is passed through
+    // input_1 and position/valid_length and is not visible in this mask.
+    const int visible = std::min(sliding_window, std::max(1, visible_length));
+    const int end = std::min(width, std::max(1, cache_valid_end));
+    const int start = local ? std::max(0, end - visible) : 0;
     for (int k = start; k < end; ++k) {
         mask[static_cast<size_t>(k)] = 0;
     }
@@ -112,10 +114,41 @@ void HouMoGemma4MTP::houmo_init(houmo_memory_i *memory, int seq_max,
     }
     bind_target_cache_inputs();
     resolve_mtp_names(decode_model_.get());
+    resolve_target_sliding_mask_width();
+}
+
+void HouMoGemma4MTP::resolve_target_sliding_mask_width() {
+    target_sliding_mask_width_ = 0;
+    if (target_ == nullptr) {
+        return;
+    }
+    for (const auto &name : target_->local_attention_names_) {
+        const auto it = target_->decode_input_map_.find(name);
+        if (it == target_->decode_input_map_.end()) {
+            continue;
+        }
+        const auto shape = it->second.Info().Shape();
+        if (shape.size() > 3 && shape[3] > 0) {
+            target_sliding_mask_width_ = static_cast<int32_t>(shape[3]);
+            LLAMA_LOG_INFO(
+                "%s: target local mask name='%s' physical width=%d\n",
+                __func__, name.c_str(), target_sliding_mask_width_);
+            return;
+        }
+    }
+    LLAMA_LOG_WARN(
+        "%s: unable to resolve target local mask width; MTP mask will use "
+        "the absolute committed position\n",
+        __func__);
 }
 
 std::vector<std::pair<std::string, tcim::Tensor>> HouMoGemma4MTP::collect_target_cache_inputs() const {
     if (target_ == nullptr) {
+        return {};
+    }
+    if (target_->prefill_model_ == nullptr) {
+        LLAMA_LOG_ERROR("%s: target prefill module is unavailable for MTP cache binding\n",
+                        __func__);
         return {};
     }
     if (!target_->kv_cache_.empty()) {
@@ -123,21 +156,21 @@ std::vector<std::pair<std::string, tcim::Tensor>> HouMoGemma4MTP::collect_target
         const kv_cache_item *item = it != target_->kv_cache_.end()
                                       ? &it->second
                                       : &target_->kv_cache_.begin()->second;
-        if (item->names.size() >= 4 && item->tensors.size() >= item->names.size()) {
+        if (item->names.size() >= 4) {
             const size_t n = item->names.size();
             std::vector<std::pair<std::string, tcim::Tensor>> out;
             out.reserve(4);
-            out.emplace_back(item->names[n - 4], item->tensors[n - 4]);
-            out.emplace_back(item->names[n - 3], item->tensors[n - 3]);
-            out.emplace_back(item->names[n - 2], item->tensors[n - 2]);
-            out.emplace_back(item->names[n - 1], item->tensors[n - 1]);
-            LLAMA_LOG_INFO("%s: Gemma4 MTP target runtime cache mapping: sliding=(%s,%s) full=(%s,%s)\n",
+            for (size_t idx = n - 4; idx < n; ++idx) {
+                const auto &name = item->names[idx];
+                out.emplace_back(name, target_->prefill_model_->GetDevInput(name));
+            }
+            LLAMA_LOG_INFO("%s: Gemma4 MTP target prefill cache mapping: sliding=(%s,%s) full=(%s,%s)\n",
                            __func__, out[0].first.c_str(), out[1].first.c_str(),
                            out[2].first.c_str(), out[3].first.c_str());
             return out;
         }
-        LLAMA_LOG_WARN("%s: runtime KV cache exists but is insufficient for MTP binding: names=%zu tensors=%zu\n",
-                       __func__, item->names.size(), item->tensors.size());
+        LLAMA_LOG_WARN("%s: runtime KV cache names are insufficient for MTP binding: names=%zu\n",
+                       __func__, item->names.size());
     }
 
     LLAMA_LOG_ERROR("%s: no runtime KV cache found for MTP binding\n", __func__);
@@ -258,6 +291,12 @@ void HouMoGemma4MTP::align_draft_memory(int seq_id, int32_t start_pos) {
     } else if (draft_pos > keep_pos) {
         memory_->seq_rm(seq_id, keep_pos, draft_pos);
     }
+    // The target module can rebind its runtime KV inputs after initialization
+    // and verification. Refresh the handles at each accepted draft boundary;
+    // keeping only the initialization-time handles makes the assistant read a
+    // stale target-cache view.
+    target_cache_inputs_ = collect_target_cache_inputs();
+    bind_target_cache_inputs();
     LLAMA_LOG_INFO("%s: Gemma4 MTP new round seq_id=%d target_pos=%d "
                    "draft_pos=%d -> keep_pos=%d\n",
                    __func__, seq_id, target_pos, draft_pos, keep_pos);
@@ -295,21 +334,38 @@ int HouMoGemma4MTP::houmo_decode_mtp_one(const float *h_in,
 
     const int32_t pos = base_pos;
     const int32_t target_pos = target_ ? target_->committed_pos(seq_id) : -1;
-    const int32_t mask_past = target_pos >= 0 ? target_pos : base_pos;
+    // committed_pos() and base_pos are exclusive sequence ends.  The MTP
+    // graph, however, consumes (h_{i-1}, token_i) and expects valid_length
+    // to be the position before token_i.  This matches the Python reference:
+    //     past_len=N, pos_idx=N, valid_length=N-1, mask_source=N.
+    const int32_t graph_valid_length = std::max<int32_t>(0, pos - 1);
+    const int32_t absolute_mask_past = std::max<int32_t>(
+        1, target_pos >= 0 ? target_pos : base_pos);
+    // The shared sliding cache grows from index zero and is capped by the
+    // target decode cache capacity. Do not tail-align every MTP mask to 1040:
+    // Python uses [0, N) before the cache fills and [N - 1024, N) afterwards.
+    const int32_t cache_valid_end = target_sliding_mask_width_ > 0
+                                        ? std::min(absolute_mask_past,
+                                                   target_sliding_mask_width_)
+                                        : absolute_mask_past;
+    const int32_t visible_length =
+        std::min(cache_valid_end, sliding_window_);
 
     LLAMA_LOG_INFO(
         "%s: MTP pos-calc seq_id=%d start_pos=%d "
         "draft_pos_min=%d draft_pos_max=%d target_pos_min=%d "
         "-> pos=%d valid_length=%d "
-        "mask_past=%d\n",
+        "absolute_mask_past=%d visible_length=%d cache_valid_end=%d "
+        "target_mask_width=%d\n",
         __func__, seq_id, start_pos,
         memory_ ? memory_->seq_pos_min(seq_id) : -1,
         memory_ ? memory_->seq_pos_max(seq_id) : -1, target_pos, pos,
-        std::max<int32_t>(0, pos - 1), mask_past);
+        graph_valid_length, absolute_mask_past, visible_length,
+        cache_valid_end, target_sliding_mask_width_);
 
     set_scalar_i32(decode_model_.get(), mtp_names_.valid_length,
                    decode_input_map_.at(mtp_names_.valid_length),
-                   std::max<int32_t>(0, pos - 1));
+                   graph_valid_length);
     set_scalar_i32(decode_model_.get(), mtp_names_.current_length,
                    decode_input_map_.at(mtp_names_.current_length), 1);
 
@@ -318,17 +374,18 @@ int HouMoGemma4MTP::houmo_decode_mtp_one(const float *h_in,
     const int fill = shape.size() > 2 ? static_cast<int>(shape[2]) : 1;
     const int width =
         shape.size() > 3 ? static_cast<int>(shape[3]) : context_length_;
-    auto host = build_draft_mask_f16(fill, width, mask_past,
-                                     sliding_window_, true);
+    auto host = build_draft_mask_f16(fill, width, visible_length,
+                                     cache_valid_end, sliding_window_, true);
     mask.Buffer().CopyFromHost(host.data(), mask.MemSize());
     decode_model_->SetInput(mtp_names_.local_mask, mask);
-    const int valid = std::min(width, std::max(1, mask_past));
-    const int zero_start = std::max(0, valid - sliding_window_);
-    const int zero_end = valid;
+    const int zero_end = std::min(width, std::max(1, cache_valid_end));
+    const int zero_start = std::max(0, zero_end - visible_length);
     LLAMA_LOG_INFO("%s: MTP mask name='%s' local=%d fill=%d width=%d "
-                   "mask_past=%d zero_range=[%d,%d) current=%zu\n",
+                   "visible_length=%d cache_valid_end=%d "
+                   "zero_range=[%d,%d) current=%zu\n",
                    __func__, mtp_names_.local_mask.c_str(), 1, fill, width,
-                   mask_past, zero_start, zero_end, size_t{1});
+                   visible_length, cache_valid_end, zero_start, zero_end,
+                   size_t{1});
     PERF_STOP(MTP_PRERUN);
 
     PERF_START(MTP_RUN);

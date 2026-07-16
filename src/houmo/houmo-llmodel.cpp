@@ -203,8 +203,12 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
                 continue;
             }
             // load prefill
+            const std::vector<std::string> prefill_dummy_tensor_names =
+                arch_name.find("gemma4") != std::string::npos
+                    ? std::vector<std::string>{}
+                    : dummy_tensor_names;
             prefill_model_ = create_infer_engine(file_name, offset, size,
-                                                 dummy_tensor_names);
+                                                 prefill_dummy_tensor_names);
             if (prefill_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load prefill.hmm\n", __func__);
                 return false;
@@ -239,7 +243,12 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
                 continue;
             }
             // load decode
-            decode_model_ = create_infer_engine(file_name, offset, size);
+            const std::vector<std::string> decode_dummy_tensor_names =
+                arch_name.find("gemma4") != std::string::npos
+                    ? dummy_tensor_names
+                    : std::vector<std::string>{};
+            decode_model_ = create_infer_engine(file_name, offset, size,
+                                                decode_dummy_tensor_names);
 
             if (decode_model_ == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to load decode.hmm\n", __func__);
@@ -698,8 +707,21 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                     v_cache_name = v_cache_name + "_batch" + std::to_string(i);
                 }
             }
-            auto kcache = decode_model_->GetDevInput(k_cache_name);
-            auto vcache = decode_model_->GetDevInput(v_cache_name);
+            const bool prefill_owned_gemma4_cache =
+                arch_name.find("gemma4") != std::string::npos &&
+                prefill_model_ != nullptr;
+            auto kcache = prefill_owned_gemma4_cache
+                              ? prefill_model_->GetDevInput(k_cache_name)
+                              : decode_model_->GetDevInput(k_cache_name);
+            auto vcache = prefill_owned_gemma4_cache
+                              ? prefill_model_->GetDevInput(v_cache_name)
+                              : decode_model_->GetDevInput(v_cache_name);
+            if (prefill_owned_gemma4_cache) {
+                std::vector<uint8_t> zeros_k(kcache.MemSize(), 0);
+                std::vector<uint8_t> zeros_v(vcache.MemSize(), 0);
+                kcache.Buffer().CopyFromHost(zeros_k.data(), zeros_k.size());
+                vcache.Buffer().CopyFromHost(zeros_v.data(), zeros_v.size());
+            }
             if (n_decode_batch_ > 1 || size == 1) {
                 item.tensors.push_back(kcache);
                 item.tensors.push_back(vcache);
@@ -713,6 +735,11 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                 kcache.Info().Shape()[kcache.Info().Shape().size() - 2]);
         }
         kv_cache_[i] = item;
+    }
+    if (arch_name.find("gemma4") != std::string::npos) {
+        // Gemma4 decode KV inputs were loaded as dummy tensors and must always
+        // be rebound to the prefill-owned storage before verify/decode runs.
+        need_set_kv_cache_ = 1;
     }
 }
 

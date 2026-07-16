@@ -46,11 +46,13 @@ class HouMoGemma4MTP : public HouMoGemma4 {
                              int32_t start_pos);
     void align_draft_memory(int seq_id, int32_t start_pos);
     void resolve_mtp_names(tcim::Module *model);
+    void resolve_target_sliding_mask_width();
     std::vector<std::pair<std::string, tcim::Tensor>> collect_target_cache_inputs() const;
     void bind_target_cache_inputs();
 
   private:
     HouMoGemma4MTPNames mtp_names_;
     HouMoGemma4 *target_ = nullptr;
+    int32_t target_sliding_mask_width_ = 0;
     std::vector<std::pair<std::string, tcim::Tensor>> target_cache_inputs_;
 };

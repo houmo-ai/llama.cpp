@@ -11,7 +11,7 @@ class HouMoGemma4MTP;
 
 /**
  * @brief HouMoGemma4 is the derived class for Gemma4 HouMo VLM models.
- * @details The runtime input layout follows src/houmo/demo.py:
+ * @details 
  *          input_embeds, valid_length, current_length, full_attention_mask,
  *          sliding_attention_mask, plus KV cache inputs.
  *          Decode stage only feeds sliding/local attention mask.
@@ -89,6 +89,9 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     std::map<int, int64_t> device_kv_abs_start_;
     std::map<int, int64_t> device_kv_abs_end_;
     std::string accepted_count_input_name_;
+    // Matches gemma4.py::last_committed_tokens. The runtime accepted_count
+    // input is the number of verify input rows retained from the previous
+    // round: accepted draft tokens plus the first target/base token.
     std::map<int, int32_t> last_committed_tokens_;
     struct VerifyPending {
       bool valid = false;
