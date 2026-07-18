@@ -534,6 +534,10 @@ extern "C" {
     //       ref: https://github.com/ggml-org/llama.cpp/pull/17046#discussion_r2503085732
     LLAMA_API uint32_t llama_n_ctx      (const struct llama_context * ctx);
     LLAMA_API uint32_t llama_n_ctx_seq  (const struct llama_context * ctx);
+
+    // Returns the actual context length of the HMM group routed by seq_id.
+    // For non-HMM contexts this is equivalent to llama_n_ctx_seq().
+    LLAMA_API uint32_t llama_n_ctx_seq_id(const struct llama_context * ctx, llama_seq_id seq_id);
     LLAMA_API uint32_t llama_n_batch    (const struct llama_context * ctx);
     LLAMA_API uint32_t llama_n_ubatch   (const struct llama_context * ctx);
     LLAMA_API uint32_t llama_n_seq_max  (const struct llama_context * ctx);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -29,7 +30,7 @@ class HouMoLLModel {
     bool houmo_load(llama_model_loader & ml, std::vector<int> device_ids);
     // is_mtp: true → 本 ctx 是 MTP 草稿 context (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP)，
     //         false → target context。由上层 llama_context::houmo_init 根据 cparams.ctx_type 传入。
-    void houmo_init(houmo_memory_i *memory, int seq_max = 8,
+    bool houmo_init(houmo_memory_i *memory, int seq_max = 8,
           ggml_abort_callback abort_callback = nullptr,
           void *abort_callback_data = nullptr,
           bool is_mtp = false);
@@ -116,13 +117,33 @@ class HouMoLLModel {
     int n_decode_batch();
     int n_prefill_batch();
     uint32_t n_context_length();
+    uint32_t n_context_length(int seq_id) const;
     void lora_init(std::string file_name, void *adapter);
     void lora_set_scale(void *adapter, float scale);
     void lora_clear();
     class Impl;  // Forward declaration of the implementation class
   private:
-    Impl *impl_;     // target/current ctx implementation
-    Impl *impl_mtp_; // MTP implementation for single-GGUF MTP
+    struct SeqRoute {
+        int group_index = -1;
+        int group_id = -1;
+        int local_seq_id = -1;
+        Impl *impl = nullptr;
+    };
+
+    bool route_seq(int global_seq_id, bool is_mtp, SeqRoute &route) const;
+
+    bool target_initialized_ = false;
+    bool mtp_initialized_ = false;
+    int target_seq_max_ = 0;
+    int mtp_seq_max_ = 0;
+    std::vector<Impl *> impls_;
+    std::vector<Impl *> impls_mtp_;
+    std::vector<int> group_ids_;
+    std::vector<int> mtp_group_ids_;
+    std::vector<int> local_seq_max_;
+    std::vector<int> local_seq_max_mtp_;
+    std::vector<std::unique_ptr<houmo_memory_i>> memories_;
+    std::vector<std::unique_ptr<houmo_memory_i>> memories_mtp_;
 };
 
 struct kv_cache_item {
@@ -243,6 +264,7 @@ public:
   int n_decode_batch() const { return n_decode_batch_; }
   int n_prefill_batch() const { return n_prefill_batch_; }
   uint32_t n_context_length() const { return context_length_;}
+  bool supports_seq_max(int seq_max, std::string &reason) const;
   void lora_init(std::string file_name, void *adapter);
   void lora_set_scale(void *adapter, float scale);
   void lora_clear();
@@ -252,6 +274,9 @@ public:
   void set_embedding_layer(std::shared_ptr<HoumoEmbeddingLayer> layer) {
       embedding_layer_ = layer;
   }
+  tcim::Module::WeightManager weight_manager() const { return wm_; }
+  void set_weight_manager(const tcim::Module::WeightManager &wm) { wm_ = wm; }
+  void set_load_group_id(int group_id) { load_group_id_ = group_id; }
 protected:
   /**
    * @brief Initialize the model input and output.
@@ -389,6 +414,7 @@ protected:
   std::vector<int> device_ids_ = {0};
   bool enable_lazy_mode_ = false;
   bool asr_force_aligner_ = false;
+  int load_group_id_ = 0;
   houmo_memory_i *memory_ = nullptr;
   std::map<std::string, lora_item> lora_map;
   tcim::Tensor lora_mask_float_;

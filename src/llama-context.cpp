@@ -28,11 +28,16 @@ void llama_context::houmo_init(int32_t seq_max) {
     std::shared_ptr<HouMoLLModel> hm_llmodel = model.hm_llmodel;
     memory = std::make_unique<houmo_memory_i>();
     const bool is_mtp = (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP);
-    hm_llmodel->houmo_init(dynamic_cast<houmo_memory_i *>(memory.get()), seq_max,
-                           abort_callback, abort_callback_data, is_mtp);
+    if (!hm_llmodel->houmo_init(dynamic_cast<houmo_memory_i *>(memory.get()), seq_max,
+                                abort_callback, abort_callback_data, is_mtp)) {
+        throw std::runtime_error(is_mtp ? "failed to initialize HouMo MTP runtime"
+                                        : "failed to initialize HouMo target runtime");
+    }
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
 
-    cparams.n_ctx = std::min(cparams.n_ctx, hm_llmodel->n_context_length());
+    // Different HMM groups may expose different context lengths. Keep the
+    // caller configured context here; each routed HouMo backend validates its
+    // own actual context length before running the graph.
     cparams.n_ctx_seq = cparams.n_ctx;
     cparams.n_batch = std::max<uint32_t>(cparams.n_batch, 256);
     cparams.n_ubatch = std::max<uint32_t>(cparams.n_ubatch, 256);
@@ -1686,16 +1691,9 @@ int llama_context::houmo_decode(const llama_batch & batch) {
             dec_seqs.push_back(sid);
             dec_logits.push_back(logits_ptr_for(entries[0]));
         }
-        const int B = hm_llmodel->n_decode_batch();
-        for (size_t i = 0; i < dec_tokens.size(); i += B) {
-            const int n = std::min((int) (dec_tokens.size() - i), B);
-            std::vector<llama_token> tb(dec_tokens.begin() + i, dec_tokens.begin() + i + n);
-            std::vector<int>         sb(dec_seqs.begin()   + i, dec_seqs.begin()   + i + n);
-            std::vector<float *>     lb(dec_logits.begin() + i, dec_logits.begin() + i + n);
-            ret = hm_llmodel->houmo_decode(tb, sb, lb);
-            if (ret != 0) {
-                return ret;
-            }
+        ret = hm_llmodel->houmo_decode(dec_tokens, dec_seqs, dec_logits);
+        if (ret != 0) {
+            return ret;
         }
     }
 
@@ -3847,6 +3845,16 @@ uint32_t llama_n_ctx(const llama_context * ctx) {
 }
 
 uint32_t llama_n_ctx_seq(const llama_context * ctx) {
+    return ctx->n_ctx_seq();
+}
+
+uint32_t llama_n_ctx_seq_id(const llama_context * ctx, llama_seq_id seq_id) {
+    if (ctx == nullptr || seq_id < 0) {
+        return 0;
+    }
+    if (ctx->houmo_is_hmm()) {
+        return ctx->get_model().hm_llmodel->n_context_length(seq_id);
+    }
     return ctx->n_ctx_seq();
 }
 

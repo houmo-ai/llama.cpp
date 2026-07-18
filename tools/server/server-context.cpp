@@ -1101,7 +1101,11 @@ private:
             slot.ctx_tgt = ctx_tgt;
             slot.ctx_dft = ctx_dft.get();
             slot.spec    = spec.get();
-            slot.n_ctx   = n_ctx_slot;
+            slot.n_ctx   = is_hmm ? (int) llama_n_ctx_seq_id(ctx_tgt, i) : n_ctx_slot;
+            if (slot.n_ctx <= 0) {
+                SRV_ERR("failed to determine context size for HMM slot %d\n", i);
+                return false;
+            }
             slot.is_hmm  = is_hmm;
 
             slot.mctx                   = mctx;
