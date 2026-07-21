@@ -12683,8 +12683,30 @@ bool load_system_certs(ctx_t ctx) {
 #endif
 
 #else
-  // Other Unix: use default verify paths
-  return SSL_CTX_set_default_verify_paths(ssl_ctx) == 1;
+  // Other Unix: first honor SSL_CERT_FILE/SSL_CERT_DIR and the TLS backend's
+  // built-in defaults, then try common CA locations used by Linux/Unix
+  // distributions. BoringSSL's built-in CA file is /etc/ssl/cert.pem, which
+  // does not cover Debian/Ubuntu and several other distributions by itself.
+  bool loaded = SSL_CTX_set_default_verify_paths(ssl_ctx) == 1;
+
+  for (auto path = impl::system_ca_paths(); *path; ++path) {
+    if (SSL_CTX_load_verify_locations(ssl_ctx, *path, nullptr) == 1) {
+      loaded = true;
+      break;
+    }
+  }
+
+  for (auto dir = impl::system_ca_dirs(); *dir; ++dir) {
+    if (SSL_CTX_load_verify_locations(ssl_ctx, nullptr, *dir) == 1) {
+      loaded = true;
+      break;
+    }
+  }
+
+  // Missing candidate paths are expected on other distributions. Do not
+  // leave their errors in the per-thread OpenSSL/BoringSSL error queue.
+  ERR_clear_error();
+  return loaded;
 #endif
 }
 
