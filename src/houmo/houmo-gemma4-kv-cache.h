@@ -4,6 +4,7 @@
 #include "houmo-llmodel.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -20,13 +21,9 @@ class HoumoGemma4KVCache {
     void init(const std::map<int, kv_cache_item> &kv_cache,
           int sliding_window = 1024, int prefill_length = 320);
 
-    bool enabled() const { return checkpoint_pool_.enabled(); }
-    int checkpoint_interval() const {
-      return checkpoint_pool_.checkpoint_interval();
-    }
-    int checkpoint_max_count() const {
-      return checkpoint_pool_.checkpoint_max_count();
-    }
+    bool enabled() const { return !checkpoint_pools_.empty(); }
+    int checkpoint_interval() const { return checkpoint_interval_; }
+    int checkpoint_max_count() const { return checkpoint_max_count_; }
 
     // Rebuild the sliding KV tensors in @p item for target @p valid_length.
     // Returns true when a snapshot covered [valid_length-1024, valid_length).
@@ -66,7 +63,9 @@ class HoumoGemma4KVCache {
                           int64_t dst_offset,
                           int64_t length);
     void discover_bindings(const kv_cache_item &item);
-    void allocate_pool(const kv_cache_item &item);
+    bool allocate_pool(int seq_id, const kv_cache_item &item);
+    HoumoCheckpointPool *find_pool(int seq_id);
+    const HoumoCheckpointPool *find_pool(int seq_id) const;
     bool restore_from_slot(HoumoCheckpointPool::Slot &slot, int64_t valid_length,
                  kv_cache_item &item);
     bool should_save(int seq_id, int64_t abs_end, bool force) const;
@@ -75,7 +74,11 @@ class HoumoGemma4KVCache {
     int sliding_window_ = 1024;
     int snapshot_size_ = 1344;
     int prefill_length_ = 320;
+    int checkpoint_interval_ = 4096;
+    int checkpoint_max_count_ = 0;
+    HoumoCheckpointPool::Storage checkpoint_storage_ =
+      HoumoCheckpointPool::Storage::kDevice;
 
     std::vector<TensorBinding> bindings_;
-    HoumoCheckpointPool checkpoint_pool_;
+    std::map<int, HoumoCheckpointPool> checkpoint_pools_;
 };

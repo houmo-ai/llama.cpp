@@ -4,6 +4,7 @@
 #include "houmo-llmodel.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -17,13 +18,9 @@ class HoumoOSSKVCache {
     void init(const std::map<int, kv_cache_item> &kv_cache,
               int sliding_window = 128, int prefill_length = 256);
 
-    bool enabled() const { return checkpoint_pool_.enabled(); }
-    int checkpoint_interval() const {
-        return checkpoint_pool_.checkpoint_interval();
-    }
-    int checkpoint_max_count() const {
-        return checkpoint_pool_.checkpoint_max_count();
-    }
+    bool enabled() const { return !checkpoint_pools_.empty(); }
+    int checkpoint_interval() const { return checkpoint_interval_; }
+    int checkpoint_max_count() const { return checkpoint_max_count_; }
 
     bool prepare_for_prefill(int seq_id, int64_t valid_length,
                              kv_cache_item &item);
@@ -44,7 +41,9 @@ class HoumoOSSKVCache {
     static bool parse_layer_id(const std::string &name, int &layer_id);
     static bool is_sliding_kv_name(const std::string &name);
     void discover_bindings(const kv_cache_item &item);
-    void allocate_pool(const kv_cache_item &item);
+    bool allocate_pool(int seq_id, const kv_cache_item &item);
+    HoumoCheckpointPool *find_pool(int seq_id);
+    const HoumoCheckpointPool *find_pool(int seq_id) const;
     bool restore_from_slot(HoumoCheckpointPool::Slot &slot,
                            int64_t valid_length, kv_cache_item &item);
     bool should_save(int seq_id, int64_t abs_end, bool force) const;
@@ -53,6 +52,10 @@ class HoumoOSSKVCache {
     int sliding_window_ = 128;
     int snapshot_size_ = 384;
     int prefill_length_ = 256;
+    int checkpoint_interval_ = 4096;
+    int checkpoint_max_count_ = 0;
+    HoumoCheckpointPool::Storage checkpoint_storage_ =
+      HoumoCheckpointPool::Storage::kDevice;
     std::vector<TensorBinding> bindings_;
-    HoumoCheckpointPool checkpoint_pool_;
+    std::map<int, HoumoCheckpointPool> checkpoint_pools_;
 };

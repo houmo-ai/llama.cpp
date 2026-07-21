@@ -745,6 +745,7 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
 
 void HouMoLLModel::Impl::set_kv_cache_for_prefill(int seq_id) {
     if (kv_cache_.find(seq_id) == kv_cache_.end()) {
+        LLAMA_LOG_ERROR("kv_cache_.find(%d) failed.\n", seq_id);
         return;
     }
     auto &item = kv_cache_[seq_id];
@@ -793,33 +794,40 @@ int HouMoLLModel::Impl::set_input_for_decode(std::vector<llama_token> &batches,
 }
 
 int HouMoLLModel::Impl::set_xlenght_for_decode(std::vector<int> &seq_ids) {
-    (void)seq_ids;  // 避免未使用的参数警告
-    std::vector<int32_t> valid_length_vec(n_decode_batch_, 1);
-    // seq 绑定slot
+    // 0 表示该物理 batch 未参与本轮 decode；有效 valid_length 至少为 1。
+    std::vector<int32_t> valid_length_vec(n_decode_batch_, 0);
+    std::vector<int32_t> current_length_vec(n_decode_batch_, 0);
+    for (int seq_id : seq_ids) {
+        const int batch_id = n_decode_batch_ == 1 ? 0 : seq_id;
+        if (batch_id < 0 || batch_id >= n_decode_batch_) {
+            LLAMA_LOG_ERROR("%s: invalid seq_id=%d mapped batch_id=%d, "
+                            "n_decode_batch_=%d\n",
+                            __func__, seq_id, batch_id, n_decode_batch_);
+            return -1;
+        }
+        const int32_t valid_length =
+            decode_valid_length_[seq_id] > 0 ? decode_valid_length_[seq_id] : 1;
+        if (valid_length >= context_length_) {
+            LLAMA_LOG_WARN("%s: valid_length seq_id=%d batch_id=%d value=%d "
+                           ">= context_length_, end of decoding\n",
+                           __func__, seq_id, batch_id, valid_length);
+            return 1;
+        }
+        valid_length_vec[batch_id] = valid_length;
+        current_length_vec[batch_id] = 1;
+        LLAMA_LOG_DEBUG("%s: seq_id=%d -> batch_id=%d valid_length=%d "
+                        "current_length=1\n",
+                        __func__, seq_id, batch_id, valid_length);
+    }
     for (size_t i = 0; i < valid_length_vec.size(); i++) {
-        valid_length_vec[i] =
-            decode_valid_length_[i] > 0 ? decode_valid_length_[i] : 1;
         if (valid_length_vec[i] >= context_length_) {
-            LLAMA_LOG_WARN("%s: valid_length_vec[%zu] = %d >= context_length_ , "
+            LLAMA_LOG_WARN("%s: valid_length_vec[%zu] = %d >= context_length_, "
                            "end of decoding\n",
                            __func__, i, valid_length_vec[i]);
             return 1;
         }
     }
-    if (decode_valid_length_names_.size() == 1 && n_decode_batch_ > 1) {
-        // 量化输出的是多batch的模型
-        auto decode_valid_length =
-            decode_input_map_.at(decode_valid_length_names_[0]);
-        set_input_data(decode_valid_length, valid_length_vec);
-        decode_model_->SetInput(decode_valid_length_names_[0],
-                                decode_valid_length);
-        std::vector<int32_t> current_length_vec(n_decode_batch_, 1);
-        auto decode_current_length =
-            decode_input_map_.at(decode_current_length_names_[0]);
-        set_input_data(decode_current_length, current_length_vec);
-        decode_model_->SetInput(decode_current_length_names_[0],
-                                decode_current_length);
-    } else {
+    {
         // 工具链编译成多batch模型,特征如下
         // current_length, current_length_batch1, ...current_length_batchx
         // valid_length, valid_length_batch1, ...valid_length_batchx
@@ -833,31 +841,26 @@ int HouMoLLModel::Impl::set_xlenght_for_decode(std::vector<int> &seq_ids) {
         }
 
         for (size_t i = 0; i < valid_length_vec.size(); i++) {
-            // valid_length
-            std::string name = decode_valid_length_names_[i];
-            auto decode_valid_length = decode_input_map_.at(name);
-            set_input_data(decode_valid_length, 1, valid_length_vec[i]);
-            auto status = decode_model_->SetInput(name, decode_valid_length);
-            if (status != tcim::Status::OK) {
-                LLAMA_LOG_ERROR("%s: failed to set input %s\n", __func__,
-                                name.c_str());
-                return -1;
-            }
-            // current_length
-            name = decode_current_length_names_[i];
-            auto current_valid_length = decode_input_map_.at(name);
-            bool found = false;
-            for (size_t j = 0; j < seq_ids.size(); j++) {
-                if (seq_ids[j] == (int)i) {
-                    found = true;
-                    break;
+            tcim::Status status;
+            std::string name;
+            // 未参与本轮 decode 的 batch 不能覆盖 valid_length，否则可能
+            // 使用错误位置推进并破坏该 slot 的 KV cache。
+            if (valid_length_vec[i] > 0) {
+                name = decode_valid_length_names_[i];
+                auto decode_valid_length = decode_input_map_.at(name);
+                set_input_data(decode_valid_length, 1, valid_length_vec[i]);
+                status = decode_model_->SetInput(name, decode_valid_length);
+                if (status != tcim::Status::OK) {
+                    LLAMA_LOG_ERROR("%s: failed to set input %s\n", __func__,
+                                    name.c_str());
+                    return -1;
                 }
             }
-            if (found) {
-                set_input_data(current_valid_length, 1, 1);
-            } else {
-                set_input_data(current_valid_length, 1, 0);
-            }
+            // current_length 设置为0， 期望工具链不再计算。
+            // http://jira.houmo.ai/browse/HMSW-4468
+            name = decode_current_length_names_[i];
+            auto current_valid_length = decode_input_map_.at(name);
+            set_input_data(current_valid_length, 1, current_length_vec[i]);
             // LLAMA_LOG_DEBUG("name = %s, current_valid_length: %d\n",
             //                 name.c_str(), 1);
             status = decode_model_->SetInput(name, current_valid_length);
