@@ -424,6 +424,14 @@ bool HoumoQwen35LLM::slice_snapshot_history(
         }
         const size_t offset = copy_begin - chunk_begin;
         const size_t count = copy_end - copy_begin;
+        if (chunk.is_embedding &&
+            (offset != 0 || count != chunk.size())) {
+            LLAMA_LOG_ERROR(
+                "%s: range [%zu..%zu) cuts vision chunk [%zu..%zu) "
+                "for seq_id=%d\n",
+                __func__, begin, end, chunk_begin, chunk_end, seq_id);
+            return false;
+        }
         PrefillChunk part;
         part.is_embedding = chunk.is_embedding;
         part.bidirectional_attention = chunk.bidirectional_attention;
@@ -450,35 +458,72 @@ bool HoumoQwen35LLM::slice_snapshot_history(
     return true;
 }
 
-void HoumoQwen35LLM::prepare_text_prefill(
+bool HoumoQwen35LLM::position_at_token_boundary(
+    const std::vector<PrefillChunk> &chunks, size_t token_boundary,
+    int32_t &position) const {
+    size_t consumed = 0;
+    position = 0;
+    for (const auto &chunk : chunks) {
+        if (consumed == token_boundary) {
+            return true;
+        }
+        if (consumed > token_boundary) {
+            return false;
+        }
+
+        const size_t remaining = token_boundary - consumed;
+        const size_t take = std::min(remaining, chunk.size());
+        if (chunk.is_embedding) {
+            const size_t grid_tokens =
+                static_cast<size_t>(std::max<int>(0, chunk.nx)) *
+                static_cast<size_t>(std::max<int>(0, chunk.ny));
+            if (chunk.nx <= 0 || chunk.ny <= 0 ||
+                grid_tokens != chunk.size() || take != chunk.size()) {
+                return false;
+            }
+            position += std::max<int>(chunk.nx, chunk.ny);
+        } else {
+            position += static_cast<int32_t>(take);
+        }
+        consumed += take;
+    }
+    return consumed == token_boundary;
+}
+
+bool HoumoQwen35LLM::prepare_prefill_replay(
     int seq_id,
     int32_t kv_offset,
-    const std::vector<llama_token> &tokens,
-    std::vector<llama_token> &effective_tokens,
+    const std::vector<PrefillChunk> &pending_chunks,
+    bool require_snapshot,
     std::vector<PrefillChunk> &effective_chunks,
-    int32_t &effective_kv_offset) {
-    effective_tokens = tokens;
-    effective_chunks.clear();
-    append_text_chunk(effective_chunks, tokens);
+    int32_t &effective_kv_offset,
+    int32_t &effective_position_base) {
+    effective_chunks = pending_chunks;
     effective_kv_offset = kv_offset;
+    effective_position_base = kv_offset + decode_position_offset_[seq_id];
 
     if (!state_cache_.enabled()) {
-        return;
+        return true;
     }
     if (kv_offset == 0) {
         state_cache_.reset_for_fresh_prefill(seq_id);
-        return;
+        decode_position_offset_[seq_id] = 0;
+        effective_position_base = 0;
+        return true;
     }
 
     auto *snapshot = state_cache_.find_snapshot(seq_id);
     if (snapshot == nullptr || !snapshot->valid) {
-        LLAMA_LOG_WARN("%s: no state snapshot for seq_id=%d at kv_offset=%d\n",
-                       __func__, seq_id, kv_offset);
+        LLAMA_LOG_ERROR("%s: no state snapshot for seq_id=%d at kv_offset=%d\n",
+                        __func__, seq_id, kv_offset);
+        if (require_snapshot) {
+            return false;
+        }
         state_cache_.mark_initialized(seq_id, true);
-        return;
+        return true;
     }
     if (snapshot->last_processed_pos == kv_offset) {
-        return;
+        return true;
     }
 
     const size_t saved_history_size = chunk_token_count(snapshot->chunks);
@@ -487,38 +532,21 @@ void HoumoQwen35LLM::prepare_text_prefill(
 
     const int rollback_pos = best_ckpt > 0 ? best_ckpt : 0;
     if (rollback_pos >= kv_offset) {
+        if (!position_at_token_boundary(
+                snapshot->chunks, static_cast<size_t>(kv_offset),
+                effective_position_base)) {
+            LLAMA_LOG_ERROR(
+                "%s: checkpoint boundary %d is unsafe for seq_id=%d\n",
+                __func__, kv_offset, seq_id);
+            state_cache_.invalidate_snapshot(seq_id, true);
+            return false;
+        }
         state_cache_.mark_initialized(seq_id, true);
         snapshot->valid = false;
-        return;
+        return true;
     }
 
-    if (static_cast<size_t>(kv_offset) <= saved_history_size) {
-        effective_tokens.clear();
-        if (!slice_snapshot_history(seq_id, static_cast<size_t>(rollback_pos),
-                                    static_cast<size_t>(kv_offset),
-                                    effective_chunks)) {
-            LLAMA_LOG_WARN(
-                "%s: mixed snapshot history cannot fill gap [%d..%d) "
-                "for seq_id=%d, refusing replay\n",
-                __func__, rollback_pos, kv_offset, seq_id);
-            state_cache_.mark_initialized(seq_id, true);
-            state_cache_.invalidate_snapshot(seq_id, true);
-            return;
-        }
-        append_text_chunk(effective_chunks, tokens);
-        for (const auto &chunk : effective_chunks) {
-            if (!chunk.is_embedding) {
-                effective_tokens.insert(effective_tokens.end(),
-                                        chunk.tokens.begin(),
-                                        chunk.tokens.end());
-            }
-        }
-        effective_kv_offset = rollback_pos;
-        if (memory_) {
-            memory_->seq_rm(seq_id, rollback_pos, kv_offset);
-        }
-        state_cache_.mark_initialized(seq_id, best_ckpt > 0);
-    } else {
+    if (static_cast<size_t>(kv_offset) > saved_history_size) {
         LLAMA_LOG_WARN(
             "%s: saved history too short (%zu) to fill gap [%d..%d) "
             "for seq_id=%d, refusing replay; state may be inaccurate. "
@@ -526,12 +554,50 @@ void HoumoQwen35LLM::prepare_text_prefill(
             __func__, saved_history_size, rollback_pos, kv_offset, seq_id);
         state_cache_.mark_initialized(seq_id, true);
         state_cache_.invalidate_snapshot(seq_id, true);
+        return false;
     }
+
+    std::vector<PrefillChunk> replay_chunks;
+    if (!slice_snapshot_history(seq_id, static_cast<size_t>(rollback_pos),
+                                static_cast<size_t>(kv_offset),
+                                replay_chunks) ||
+        !position_at_token_boundary(snapshot->chunks,
+                                    static_cast<size_t>(rollback_pos),
+                                    effective_position_base)) {
+        LLAMA_LOG_ERROR(
+            "%s: unsafe replay range [%d..%d) for seq_id=%d\n",
+            __func__, rollback_pos, kv_offset, seq_id);
+        state_cache_.invalidate_snapshot(seq_id, true);
+        return false;
+    }
+    LLAMA_LOG_DEBUG(
+        "%s: replay positions seq_id=%d physical=[%d..%d) "
+        "logical_base=%d replay_tokens=%zu decode_pos_offset_before=%d\n",
+        __func__, seq_id, rollback_pos, kv_offset, effective_position_base,
+        chunk_token_count(replay_chunks), decode_position_offset_[seq_id]);
+
+    replay_chunks.insert(replay_chunks.end(), pending_chunks.begin(),
+                         pending_chunks.end());
+    effective_chunks = std::move(replay_chunks);
+    effective_kv_offset = rollback_pos;
+    if (memory_) {
+        memory_->seq_rm(seq_id, rollback_pos, kv_offset);
+    }
+    state_cache_.mark_initialized(seq_id, best_ckpt > 0);
+    LLAMA_LOG_INFO(
+        "%s: rollback/replay seq_id=%d state_pos=%d kv=%d->%d "
+        "replay=%d input=%zu source=%s rope_base=%d\n",
+        __func__, seq_id, snapshot->last_processed_pos, kv_offset,
+        rollback_pos, kv_offset - rollback_pos,
+        chunk_token_count(pending_chunks),
+        best_ckpt > 0 ? "checkpoint" : "zero",
+        effective_position_base);
 
     snapshot->valid = false;
     if (best_ckpt <= 0) {
         state_cache_.clear_all_checkpoints(seq_id);
     }
+    return true;
 }
 
 void HoumoQwen35LLM::export_prefill_hidden(
@@ -626,7 +692,7 @@ int HoumoQwen35LLM::copy_prefill_logits(float *logits,
     return 0;
 }
 
-void HoumoQwen35LLM::update_text_prefill_snapshot(
+bool HoumoQwen35LLM::update_text_prefill_snapshot(
     int seq_id,
     int32_t effective_kv_offset,
     int32_t valid_length,
@@ -642,13 +708,16 @@ void HoumoQwen35LLM::update_text_prefill_snapshot(
     // Checkpoints for the newly processed suffix were saved before this
     // snapshot update. Only rewrite history here; releasing checkpoints after
     // effective_kv_offset would immediately discard those fresh checkpoints.
-    state_cache_.trim_snapshot_to_kv_offset(
-        seq_id, effective_kv_offset, /*release_checkpoints=*/false);
+    if (!state_cache_.trim_snapshot_to_kv_offset(
+            seq_id, effective_kv_offset, /*release_checkpoints=*/false)) {
+        return false;
+    }
     for (const auto &chunk : effective_chunks) {
         snapshot.chunks.push_back(chunk);
     }
     snapshot.last_processed_pos = valid_length;
     snapshot.valid = true;
+    return true;
 }
 
 int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
@@ -658,19 +727,52 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     }
 
     const int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
+    // Pending vision chunks are normally caught above. A text-only request
+    // can still need to replay already committed vision chunks from the state
+    // snapshot after KV prefix reuse. Route that case through the chunk-aware
+    // M-RoPE executor as well.
+    if (state_cache_.enabled()) {
+        const auto *snapshot = state_cache_.find_snapshot(seq_id);
+        const bool state_needs_replay =
+            snapshot != nullptr && snapshot->valid &&
+            snapshot->last_processed_pos != kv_offset;
+        const bool snapshot_has_vision =
+            state_needs_replay &&
+            std::any_of(snapshot->chunks.begin(), snapshot->chunks.end(),
+                        [](const PrefillChunk &chunk) {
+                            return chunk.is_embedding;
+                        });
+        if (snapshot_has_vision) {
+            return houmo_prefill_vision(tokens, seq_id, logits);
+        }
+    }
+
     if (kv_offset == 0) {
         decode_position_offset_[seq_id] = 0;
     }
 
-    std::vector<llama_token> effective_tokens;
+    std::vector<PrefillChunk> pending_chunks;
+    append_text_chunk(pending_chunks, tokens);
     std::vector<PrefillChunk> effective_chunks;
     int32_t effective_kv_offset = 0;
-    prepare_text_prefill(seq_id, kv_offset, tokens,
-                         effective_tokens, effective_chunks,
-                         effective_kv_offset);
+    int32_t effective_position_base = 0;
+    if (!prepare_prefill_replay(seq_id, kv_offset, pending_chunks,
+                                /*require_snapshot=*/false,
+                                effective_chunks, effective_kv_offset,
+                                effective_position_base)) {
+        LLAMA_LOG_ERROR("%s: failed to prepare replay for seq_id=%d\n",
+                        __func__, seq_id);
+        return -1;
+    }
 
     if (state_cache_.enabled()) {
-        state_cache_.trim_snapshot_to_kv_offset(seq_id, effective_kv_offset);
+        if (!state_cache_.trim_snapshot_to_kv_offset(
+                seq_id, effective_kv_offset)) {
+            LLAMA_LOG_ERROR(
+                "%s: unsafe snapshot boundary %d for seq_id=%d\n",
+                __func__, effective_kv_offset, seq_id);
+            return -1;
+        }
         if (effective_kv_offset == 0) {
             state_cache_.mark_initialized(seq_id, false);
         }
@@ -688,7 +790,10 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
     if (process_tokens == 0) {
         auto &snapshot = state_cache_.snapshot(seq_id);
-        state_cache_.trim_snapshot_to_kv_offset(seq_id, effective_kv_offset);
+        if (!state_cache_.trim_snapshot_to_kv_offset(
+                seq_id, effective_kv_offset)) {
+            return -1;
+        }
         snapshot.last_processed_pos = effective_kv_offset;
         snapshot.valid = true;
         decode_valid_length_[seq_id] = effective_kv_offset;
@@ -759,7 +864,8 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             return -1;
         }
 
-        int prefill_position_base = valid_length + decode_position_offset_[seq_id];
+        const int prefill_position_base =
+            effective_position_base + (valid_length - effective_kv_offset);
         auto position_ids = build_rope_position_ids(prefill_position_base, prefill_length_);
         if (run_prefill_round(seq_id, input_data, valid_length, current_length,
                               position_ids.data(), position_ids.data(),
@@ -782,8 +888,10 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         memory_->seq_add(seq_id, 0, 0, static_cast<int32_t>(process_tokens));
     }
 
-    update_text_prefill_snapshot(seq_id, effective_kv_offset, valid_length,
-                                 effective_chunks);
+    if (!update_text_prefill_snapshot(seq_id, effective_kv_offset,
+                                      valid_length, effective_chunks)) {
+        return -1;
+    }
 
     return 0;
 }
@@ -882,49 +990,76 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         chunk_history_[seq_id].push_back(std::move(chunk));
     }
 
+    const int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
+    if (kv_offset == 0) {
+        decode_position_offset_[seq_id] = 0;
+    }
+    const int32_t old_decode_position_offset = decode_position_offset_[seq_id];
+
+    int32_t effective_kv_offset = 0;
+    int32_t effective_position_base = 0;
+    std::vector<PrefillChunk> effective_chunks;
+    if (!prepare_prefill_replay(
+            seq_id, kv_offset, chunk_history_[seq_id],
+            /*require_snapshot=*/kv_offset > 0,
+            effective_chunks, effective_kv_offset,
+            effective_position_base)) {
+        clear_vision_cache(seq_id);
+        return -1;
+    }
+    chunk_history_[seq_id] = std::move(effective_chunks);
+
     size_t total_tokens = 0;
     size_t last_vision_end_local = 0;
-    for (auto &chunk : chunk_history_[seq_id]) {
+    for (const auto &chunk : chunk_history_[seq_id]) {
+        if (chunk.is_embedding) {
+            const size_t grid_tokens =
+                static_cast<size_t>(std::max<int>(0, chunk.nx)) *
+                static_cast<size_t>(std::max<int>(0, chunk.ny));
+            if (chunk.nx <= 0 || chunk.ny <= 0 ||
+                grid_tokens != chunk.n_tokens) {
+                LLAMA_LOG_ERROR(
+                    "%s: invalid replay vision chunk nx=%d ny=%d "
+                    "n_tokens=%zu seq_id=%d\n",
+                    __func__, chunk.nx, chunk.ny, chunk.n_tokens, seq_id);
+                clear_vision_cache(seq_id);
+                return -1;
+            }
+        } else if (chunk.tokens.size() < chunk.n_tokens) {
+            LLAMA_LOG_ERROR(
+                "%s: replay text chunk has %zu tokens, expected %zu "
+                "for seq_id=%d\n",
+                __func__, chunk.tokens.size(), chunk.n_tokens, seq_id);
+            clear_vision_cache(seq_id);
+            return -1;
+        }
         total_tokens += chunk.n_tokens;
         if (chunk.is_embedding) {
             last_vision_end_local = total_tokens;
         }
     }
 
-    int32_t kv_offset = memory_ ? memory_->seq_pos_min(seq_id) : 0;
-
-    if ((total_tokens + kv_offset) >= static_cast<size_t>(context_length_)) {
-        LLAMA_LOG_ERROR("%s: total %zu + kv_offset %d >= context_length %d\n",
-                        __func__, total_tokens, kv_offset, context_length_);
+    if ((total_tokens + effective_kv_offset) >=
+        static_cast<size_t>(context_length_)) {
+        LLAMA_LOG_ERROR(
+            "%s: total %zu + effective_kv_offset %d >= context_length %d\n",
+            __func__, total_tokens, effective_kv_offset, context_length_);
         clear_vision_cache(seq_id);
         return 1;
     }
 
-    // Prepare state for vision prefill.
-    if (state_cache_.enabled()) {
-        auto *snapshot = state_cache_.find_snapshot(seq_id);
-        if (kv_offset == 0) {
-            state_cache_.reset_for_fresh_prefill(seq_id);
-        } else if (snapshot != nullptr) {
-            if (snapshot->last_processed_pos != kv_offset) {
-                LLAMA_LOG_WARN(
-                    "%s: state prefix may be stale before vision seq_id=%d "
-                    "kv_offset=%d last_processed_pos=%d; keeping prefix "
-                    "checkpoints for replay\n",
-                    __func__, seq_id, kv_offset,
-                        snapshot->last_processed_pos);
-            }
-                    state_cache_.mark_initialized(seq_id, true);
-        }
-    }
+    decode_position_offset_[seq_id] =
+        effective_position_base - effective_kv_offset;
 
     std::vector<int32_t> time_pos_ids, height_pos_ids, width_pos_ids;
     int32_t final_pos = 0;
-    compute_vision_position_ids(seq_id, kv_offset, tokens,
+    compute_vision_position_ids(seq_id, effective_kv_offset, tokens,
                                 time_pos_ids, height_pos_ids, width_pos_ids,
                                 final_pos);
 
-    decode_position_offset_[seq_id] = final_pos - static_cast<int32_t>(total_tokens) - kv_offset;
+    const int32_t new_decode_position_offset =
+        final_pos - static_cast<int32_t>(total_tokens) - effective_kv_offset;
+    decode_position_offset_[seq_id] = old_decode_position_offset;
 
     // Pad position IDs.  We use a variable-step round loop below so the
     // start of any round is bounded by total_tokens, and each slice reads
@@ -935,10 +1070,10 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
     height_pos_ids.resize(padded_size, height_pos_ids.empty() ? 0 : height_pos_ids.back());
     width_pos_ids.resize(padded_size, width_pos_ids.empty() ? 0 : width_pos_ids.back());
 
-    int32_t valid_length = kv_offset;
+    int32_t valid_length = effective_kv_offset;
     int32_t current_length = 0;
     const int32_t safe_pos_abs =
-        kv_offset + static_cast<int32_t>(last_vision_end_local);
+        effective_kv_offset + static_cast<int32_t>(last_vision_end_local);
     bool safe_ckpt_saved = false;
 
     auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
@@ -979,32 +1114,37 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
             }
 
             const auto &chunk = chunks[chunk_idx];
-            const size_t required_elems = chunk.n_tokens *
-                                          static_cast<size_t>(n_embd_);
-            if (chunk.embeddings.size() < required_elems) {
-                LLAMA_LOG_ERROR(
-                    "%s: chunk %zu embedding data too short: have %zu "
-                    "elements, need %zu for seq_id=%d\n",
-                    __func__, chunk_idx, chunk.embeddings.size(),
-                    required_elems, seq_id);
-                clear_vision_cache(seq_id);
-                return -1;
-            }
-
             const size_t available_tokens =
                 chunk.n_tokens - chunk_token_offset;
             const size_t copy_tokens =
                 std::min(available_tokens, step - copied_tokens);
-            const size_t src_elem = chunk_token_offset *
-                                    static_cast<size_t>(n_embd_);
             const size_t dst_elem = copied_tokens *
                                     static_cast<size_t>(n_embd_);
-            const size_t copy_bytes = copy_tokens *
-                                      static_cast<size_t>(n_embd_) *
-                                      sizeof(uint16_t);
-            std::memcpy(round_dst + dst_elem * sizeof(uint16_t),
-                        chunk.embeddings.data() + src_elem,
-                        copy_bytes);
+            auto *dst = round_dst + dst_elem * sizeof(uint16_t);
+            if (chunk.is_embedding) {
+                const size_t required_elems = chunk.n_tokens *
+                                              static_cast<size_t>(n_embd_);
+                if (chunk.embeddings.size() < required_elems) {
+                    LLAMA_LOG_ERROR(
+                        "%s: chunk %zu embedding data too short: have %zu "
+                        "elements, need %zu for seq_id=%d\n",
+                        __func__, chunk_idx, chunk.embeddings.size(),
+                        required_elems, seq_id);
+                    clear_vision_cache(seq_id);
+                    return -1;
+                }
+                const size_t src_elem = chunk_token_offset *
+                                        static_cast<size_t>(n_embd_);
+                const size_t copy_bytes = copy_tokens *
+                                          static_cast<size_t>(n_embd_) *
+                                          sizeof(uint16_t);
+                std::memcpy(dst, chunk.embeddings.data() + src_elem,
+                            copy_bytes);
+            } else {
+                embedding_layer_->get_embedding_batch(
+                    chunk.tokens.data() + chunk_token_offset,
+                    copy_tokens, dst);
+            }
 
             copied_tokens += copy_tokens;
             chunk_token_offset += copy_tokens;
@@ -1035,7 +1175,8 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         }
     }
 
-    decode_valid_length_[seq_id] = kv_offset + static_cast<int32_t>(total_tokens);
+    decode_valid_length_[seq_id] =
+        effective_kv_offset + static_cast<int32_t>(total_tokens);
 
     if (logits != nullptr) {
         PERF_START(PREFILL_GETOUTPUT);
@@ -1072,16 +1213,21 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
     // history, so future text prefills can replay text + embedding chunks.
     {
         auto &snapshot = state_cache_.snapshot(seq_id);
-        if (kv_offset > 0) {
+        if (effective_kv_offset > 0) {
             if (chunk_token_count(snapshot.chunks) <
-                static_cast<size_t>(kv_offset)) {
+                static_cast<size_t>(effective_kv_offset)) {
                 LLAMA_LOG_WARN(
                     "%s: existing snapshot chunk history (%zu) shorter than "
-                    "kv_offset (%d) for seq_id=%d\n",
-                    __func__, chunk_token_count(snapshot.chunks), kv_offset,
-                    seq_id);
+                    "effective_kv_offset (%d) for seq_id=%d\n",
+                    __func__, chunk_token_count(snapshot.chunks),
+                    effective_kv_offset, seq_id);
             }
-            state_cache_.trim_snapshot_to_kv_offset(seq_id, kv_offset);
+            if (!state_cache_.trim_snapshot_to_kv_offset(
+                    seq_id, effective_kv_offset,
+                    /*release_checkpoints=*/false)) {
+                clear_vision_cache(seq_id);
+                return -1;
+            }
         } else {
             snapshot.chunks.clear();
         }
@@ -1095,6 +1241,12 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         snapshot.valid = true;
     }
 
+    decode_position_offset_[seq_id] = new_decode_position_offset;
+    LLAMA_LOG_DEBUG(
+        "%s: commit position seq_id=%d valid_length=%d "
+        "decode_pos_offset=%d decode_position=%d\n",
+        __func__, seq_id, valid_length, decode_position_offset_[seq_id],
+        valid_length + decode_position_offset_[seq_id]);
     clear_vision_cache(seq_id);
     return 0;
 }
@@ -1364,7 +1516,8 @@ int HoumoQwen35LLM::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
         return -1;
     }
 
-    auto position_ids = build_rope_position_ids(start_pos, n_slots);
+    auto position_ids = build_rope_position_ids(
+        start_pos + decode_position_offset_[seq_id], n_slots);
     auto set_pos = [&](const std::vector<std::string> &names,
                        const char *what) -> int {
         const std::string name = resolve_batch_name(names, 0);

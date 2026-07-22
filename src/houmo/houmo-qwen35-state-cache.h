@@ -60,7 +60,7 @@ class HoumoQwen35StateCache {
     void save_state_checkpoint(int seq_id, int position);
     int find_and_restore_best_checkpoint(int seq_id, int max_position);
     void restore_zero_state(int seq_id);
-    void trim_snapshot_to_kv_offset(int seq_id, int32_t kv_offset,
+    bool trim_snapshot_to_kv_offset(int seq_id, int32_t kv_offset,
                                     bool release_checkpoints = true);
     void clear_all_checkpoints(int seq_id);
 
@@ -77,6 +77,8 @@ class HoumoQwen35StateCache {
                                       int n_decode_batch);
     void init_state_cache_snapshots();
     void init_checkpoint_pool(int context_length, bool multi_device);
+    HoumoCheckpointPool *find_checkpoint_pool(int seq_id);
+    const HoumoCheckpointPool *find_checkpoint_pool(int seq_id) const;
     std::string state_output_name(size_t idx, int accept_pos) const;
 
     std::shared_ptr<tcim::Module> state_prefill_model_;
@@ -88,9 +90,9 @@ class HoumoQwen35StateCache {
     std::map<int, StateCacheEntry> state_cache_;
     std::map<int, bool> state_cache_initialized_;
     std::vector<size_t> checkpoint_tensor_indices_;
-    int checkpoint_min_interval_ = 1024;
-    size_t checkpoint_max_count_ = 40;
+    int checkpoint_min_interval_ = 4096;
+    size_t checkpoint_max_count_ = 10;
     HoumoCheckpointPool::Storage checkpoint_storage_ = HoumoCheckpointPool::Storage::kHost;
-    HoumoCheckpointPool checkpoint_pool_;
+    std::map<int, HoumoCheckpointPool> checkpoint_pools_;
     std::map<int, PrefillSnapshot> prefill_snapshots_;
 };

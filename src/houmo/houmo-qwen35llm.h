@@ -58,22 +58,27 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     size_t chunk_token_count(const std::vector<PrefillChunk> &chunks) const;
     bool slice_snapshot_history(int seq_id, size_t begin, size_t end,
                   std::vector<PrefillChunk> &out) const;
+    bool position_at_token_boundary(
+      const std::vector<PrefillChunk> &chunks, size_t token_boundary,
+      int32_t &position) const;
     void append_text_chunk(std::vector<PrefillChunk> &chunks,
                  const std::vector<llama_token> &tokens) const;
     void append_snapshot_text_history(int seq_id,
                       const llama_token *tokens,
                       size_t n_tokens);
-    void prepare_text_prefill(int seq_id, int32_t kv_offset,
-                              const std::vector<llama_token> &tokens,
-                              std::vector<llama_token> &effective_tokens,
-                  std::vector<PrefillChunk> &effective_chunks,
-                  int32_t &effective_kv_offset);
+    bool prepare_prefill_replay(
+      int seq_id, int32_t kv_offset,
+      const std::vector<PrefillChunk> &pending_chunks,
+      bool require_snapshot,
+      std::vector<PrefillChunk> &effective_chunks,
+      int32_t &effective_kv_offset,
+      int32_t &effective_position_base);
     void export_prefill_hidden(int32_t kv_offset, int32_t valid_length,
                                int32_t current_length);
     void maybe_save_prefill_checkpoint(int seq_id, size_t round, size_t rounds,
                                        int32_t valid_length);
     int copy_prefill_logits(float *logits, int32_t current_length);
-    void update_text_prefill_snapshot(
+    bool update_text_prefill_snapshot(
         int seq_id, int32_t effective_kv_offset, int32_t valid_length,
       const std::vector<PrefillChunk> &effective_chunks);
 

@@ -717,10 +717,8 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                               ? prefill_model_->GetDevInput(v_cache_name)
                               : decode_model_->GetDevInput(v_cache_name);
             if (prefill_owned_gemma4_cache) {
-                std::vector<uint8_t> zeros_k(kcache.MemSize(), 0);
-                std::vector<uint8_t> zeros_v(vcache.MemSize(), 0);
-                kcache.Buffer().CopyFromHost(zeros_k.data(), zeros_k.size());
-                vcache.Buffer().CopyFromHost(zeros_v.data(), zeros_v.size());
+                kcache.Buffer().MemSet(0);
+                vcache.Buffer().MemSet(0);
             }
             if (n_decode_batch_ > 1 || size == 1) {
                 item.tensors.push_back(kcache);

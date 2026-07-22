@@ -57,14 +57,15 @@ void HoumoQwen35StateCache::configure_state_cache(
     state_decode_model_ = std::move(decode);
     checkpoint_min_interval_ = prefill_length * 4;
 
-    checkpoint_pool_.configure_from_env(
+    HoumoCheckpointPool config;
+    config.configure_from_env(
         checkpoint_min_interval_, static_cast<int>(checkpoint_max_count_),
         /*min_interval=*/1, /*max_interval=*/0xffffff,
         /*max_count_limit=*/80, checkpoint_storage_);
-    checkpoint_min_interval_ = checkpoint_pool_.checkpoint_interval();
+    checkpoint_min_interval_ = config.checkpoint_interval();
     checkpoint_max_count_ =
-        static_cast<size_t>(checkpoint_pool_.checkpoint_max_count());
-    checkpoint_storage_ = checkpoint_pool_.checkpoint_storage();
+        static_cast<size_t>(config.checkpoint_max_count());
+    checkpoint_storage_ = config.checkpoint_storage();
 }
 
 void HoumoQwen35StateCache::reset_state_cache_metadata() {
@@ -76,25 +77,24 @@ void HoumoQwen35StateCache::reset_state_cache_metadata() {
     state_cache_.clear();
     state_cache_initialized_.clear();
     prefill_snapshots_.clear();
-    checkpoint_pool_.clear();
+    checkpoint_pools_.clear();
 }
 
 bool HoumoQwen35StateCache::should_save_checkpoint(int seq_id, int position,
                                                    bool force) {
-    if (find_snapshot(seq_id) == nullptr || !checkpoint_pool_.enabled() ||
-        position <= 0) {
+    auto *pool = find_checkpoint_pool(seq_id);
+    if (find_snapshot(seq_id) == nullptr || pool == nullptr ||
+        !pool->enabled() || position <= 0) {
         return false;
     }
-    auto *exact = checkpoint_pool_.find_exact_covering(seq_id, position,
-                                                       position);
+    auto *exact = pool->find_exact_covering(seq_id, position, position);
     if (exact != nullptr) {
         return false;
     }
     if (force) {
         return true;
     }
-    auto *slot = checkpoint_pool_.find_nearest_before(seq_id, INT64_MAX,
-                                                      position + 1);
+    auto *slot = pool->find_nearest_before(seq_id, INT64_MAX, position + 1);
     if (slot == nullptr) {
         return true;
     }
@@ -274,9 +274,9 @@ void HoumoQwen35StateCache::allocate_state_cache_entries(
 void HoumoQwen35StateCache::init_checkpoint_pool(int context_length,
                                                  bool multi_device) {
     (void)multi_device; // currently unused
+    checkpoint_pools_.clear();
     if (checkpoint_max_count_ == 0) {
-        checkpoint_pool_.clear();
-        LLAMA_LOG_INFO("%s: skip checkpoint pool init because checkpoint_max_count_=0\n",
+        LLAMA_LOG_INFO("%s: skip checkpoint pools init because checkpoint_max_count_=0\n",
                        __func__);
         return;
     }
@@ -286,32 +286,56 @@ void HoumoQwen35StateCache::init_checkpoint_pool(int context_length,
     checkpoint_max_count_ = std::min(
         checkpoint_max_count_,
         static_cast<size_t>(context_length / checkpoint_min_interval_));
-    checkpoint_pool_.configure(checkpoint_min_interval_,
-                               static_cast<int>(checkpoint_max_count_),
-                               checkpoint_storage_);
-    std::vector<tcim::Tensor> prototypes;
-    prototypes.reserve(checkpoint_tensor_indices_.size());
-    for (size_t idx : checkpoint_tensor_indices_) {
-        prototypes.push_back(state_decode_model_->GetDevInput(state_cache_names_[idx]));
+    double total_mb = 0.0;
+    for (const auto &[seq_id, entry] : state_cache_) {
+        std::vector<tcim::Tensor> prototypes;
+        prototypes.reserve(checkpoint_tensor_indices_.size());
+        for (size_t idx : checkpoint_tensor_indices_) {
+            if (idx < entry.tensors.size()) {
+                prototypes.push_back(entry.tensors[idx]);
+            }
+        }
+        auto &pool = checkpoint_pools_[seq_id];
+        pool.configure(checkpoint_min_interval_,
+                       static_cast<int>(checkpoint_max_count_),
+                       checkpoint_storage_);
+        if (!pool.allocate(prototypes, true)) {
+            checkpoint_pools_.erase(seq_id);
+            LLAMA_LOG_WARN("%s: failed Qwen3.5 checkpoint pool seq_id=%d\n",
+                           __func__, seq_id);
+            continue;
+        }
+        total_mb += pool.allocated_mb();
     }
-    if (!checkpoint_pool_.allocate(prototypes, true)) {
+    if (checkpoint_pools_.empty()) {
         checkpoint_max_count_ = 0;
-    } else {
-        checkpoint_max_count_ = static_cast<size_t>(
-            checkpoint_pool_.checkpoint_max_count());
     }
-    LLAMA_LOG_INFO("%s: pre-allocated Qwen3.5 state checkpoint pool "
-                   "slots=%zu tensors_per_slot=%zu storage=%s total_mb=%.2f\n",
-                   __func__, checkpoint_pool_.size(),
+    LLAMA_LOG_INFO("%s: pre-allocated Qwen3.5 state checkpoint pools "
+                   "seqs=%zu slots_per_seq=%zu tensors_per_slot=%zu "
+                   "storage=%s total_mb=%.2f\n",
+                   __func__, checkpoint_pools_.size(), checkpoint_max_count_,
                    checkpoint_tensor_indices_.size(),
-                   checkpoint_pool_.checkpoint_storage() ==
-                           HoumoCheckpointPool::Storage::kDevice
+                   checkpoint_storage_ == HoumoCheckpointPool::Storage::kDevice
                        ? "device" : "host",
-                   checkpoint_pool_.allocated_mb());
+                   total_mb);
+}
+
+HoumoCheckpointPool *HoumoQwen35StateCache::find_checkpoint_pool(int seq_id) {
+    auto it = checkpoint_pools_.find(seq_id);
+    return it == checkpoint_pools_.end() ? nullptr : &it->second;
+}
+
+const HoumoCheckpointPool *HoumoQwen35StateCache::find_checkpoint_pool(
+    int seq_id) const {
+    auto it = checkpoint_pools_.find(seq_id);
+    return it == checkpoint_pools_.end() ? nullptr : &it->second;
 }
 
 void HoumoQwen35StateCache::clear_all_checkpoints(int seq_id) {
-    checkpoint_pool_.clear_seq(seq_id);
+    auto *pool = find_checkpoint_pool(seq_id);
+    if (pool != nullptr) {
+        pool->clear_seq(seq_id);
+    }
 }
 
 void HoumoQwen35StateCache::set_state_cache_for_prefill(int seq_id) {
@@ -406,7 +430,8 @@ int HoumoQwen35StateCache::bind_verify_state_to_cache(int seq_id, int accept_pos
 }
 
 void HoumoQwen35StateCache::save_state_checkpoint(int seq_id, int position) {
-    if (!checkpoint_pool_.enabled()) {
+    auto *pool = find_checkpoint_pool(seq_id);
+    if (pool == nullptr || !pool->enabled()) {
         return;
     }
     if (state_prefill_model_ == nullptr) {
@@ -435,8 +460,8 @@ void HoumoQwen35StateCache::save_state_checkpoint(int seq_id, int position) {
         }
     }
     PERF_START(SAVE_CHECKPOINT_COPY);
-    const bool saved = checkpoint_pool_.save_full(seq_id, position, position,
-                                                  state_tensors);
+    const bool saved = pool->save_full(seq_id, position, position,
+                                       state_tensors);
     PERF_STOP(SAVE_CHECKPOINT_COPY);
     if (!saved) {
         return;
@@ -445,23 +470,30 @@ void HoumoQwen35StateCache::save_state_checkpoint(int seq_id, int position) {
     LLAMA_LOG_INFO("%s: saved checkpoint seq_id=%d pos=%d "
                    "state_tensors=%zu storage=%s active_ckpts=%zu\n",
                    __func__, seq_id, position, state_tensors.size(),
-                   checkpoint_pool_.checkpoint_storage() ==
+                   pool->checkpoint_storage() ==
                            HoumoCheckpointPool::Storage::kDevice
                        ? "device" : "host",
-                   checkpoint_pool_.active_count(seq_id));
+                   pool->active_count(seq_id));
 }
 
 int HoumoQwen35StateCache::find_and_restore_best_checkpoint(int seq_id,
                                                       int max_position) {
-    if (!checkpoint_pool_.enabled()) {
+    auto *pool = find_checkpoint_pool(seq_id);
+    if (pool == nullptr || !pool->enabled()) {
         return -1;
     }
     auto snap_iter = prefill_snapshots_.find(seq_id);
     if (snap_iter == prefill_snapshots_.end() || !snap_iter->second.valid) {
         return -1;
     }
-    auto *slot = checkpoint_pool_.find_nearest_before(seq_id, INT64_MAX,
-                                                      max_position + 1);
+    const size_t history_tokens =
+        chunk_token_count(snap_iter->second.chunks);
+    // Checkpoints are only saved at completed prefill boundaries. Limit the
+    // lookup to history represented by the snapshot; replay code validates
+    // the selected boundary when slicing mixed text/vision history.
+    const int64_t search_max = std::min<int64_t>(
+        max_position, static_cast<int64_t>(history_tokens));
+    auto *slot = pool->find_nearest_before(seq_id, INT64_MAX, search_max + 1);
     if (slot == nullptr) {
         return -1;
     }
@@ -479,7 +511,7 @@ int HoumoQwen35StateCache::find_and_restore_best_checkpoint(int seq_id,
         }
     }
     PERF_START(RESTORE_CHECKPOINT_COPY);
-    const bool restored = checkpoint_pool_.restore_full(*slot, state_tensors);
+    const bool restored = pool->restore_full(*slot, state_tensors);
     PERF_STOP(RESTORE_CHECKPOINT_COPY);
     if (!restored) {
         return -1;
@@ -487,7 +519,7 @@ int HoumoQwen35StateCache::find_and_restore_best_checkpoint(int seq_id,
     int restored_pos = static_cast<int>(slot->abs_end);
 
     // Erase stale checkpoints after restored_pos (free slots, no realloc).
-    checkpoint_pool_.release_after(seq_id, restored_pos);
+    pool->release_after(seq_id, restored_pos);
 
     LLAMA_LOG_INFO("%s: restored checkpoint seq_id=%d pos=%d "
                    "reused_tokens=%d (max_allowed=%d)\n",
@@ -498,21 +530,27 @@ int HoumoQwen35StateCache::find_and_restore_best_checkpoint(int seq_id,
 void HoumoQwen35StateCache::restore_zero_state(int seq_id) {
     auto cache_iter = state_cache_.find(seq_id);
     if (cache_iter == state_cache_.end()) {
+        LLAMA_LOG_WARN("%s: state cache not found for seq_id=%d\n",
+                       __func__, seq_id);
         return;
     }
     auto &tensors = cache_iter->second.tensors;
+    size_t restored = 0;
     for (size_t idx : checkpoint_tensor_indices_) {
         if (idx < tensors.size()) {
             zero_tensor(tensors[idx]);
+            ++restored;
         }
     }
+    LLAMA_LOG_INFO("%s: restored zero state seq_id=%d state_tensors=%zu\n",
+                   __func__, seq_id, restored);
 }
 
-void HoumoQwen35StateCache::trim_snapshot_to_kv_offset(
+bool HoumoQwen35StateCache::trim_snapshot_to_kv_offset(
     int seq_id, int32_t kv_offset, bool release_checkpoints) {
     auto snap_iter = prefill_snapshots_.find(seq_id);
     if (snap_iter == prefill_snapshots_.end()) {
-        return;
+        return true;
     }
 
     auto &snapshot = snap_iter->second;
@@ -535,6 +573,13 @@ void HoumoQwen35StateCache::trim_snapshot_to_kv_offset(
                 ? chunk.embeddings.size() / old_tokens
                 : 0;
         const size_t keep = trim_size > position ? trim_size - position : 0;
+        if (chunk.is_embedding && keep > 0 && keep < old_tokens) {
+            LLAMA_LOG_ERROR(
+                "%s: trim position %d cuts vision chunk [%zu..%zu) "
+                "for seq_id=%d\n",
+                __func__, trim_pos, position, position + old_tokens, seq_id);
+            return false;
+        }
         chunk.n_tokens = keep;
         if (chunk.is_embedding) {
             chunk.embeddings.resize(keep * elems_per_token);
@@ -553,7 +598,10 @@ void HoumoQwen35StateCache::trim_snapshot_to_kv_offset(
     }
 
     if (release_checkpoints) {
-        checkpoint_pool_.release_after(seq_id, trim_pos);
+        auto *pool = find_checkpoint_pool(seq_id);
+        if (pool != nullptr) {
+            pool->release_after(seq_id, trim_pos);
+        }
     }
 
     // IMPORTANT: do NOT clamp last_processed_pos here.
@@ -564,13 +612,16 @@ void HoumoQwen35StateCache::trim_snapshot_to_kv_offset(
     // replay, causing duplicated-token state advance.
 
     if (changed) {
+        const auto *pool = find_checkpoint_pool(seq_id);
         LLAMA_LOG_INFO(
             "%s: trimmed snapshot by boundary seq_id=%d valid_length=%d "
             "history_tokens=%zu ckpts=%zu state_pos=%d "
             "release_checkpoints=%d\n",
             __func__, seq_id, trim_pos, chunk_token_count(snapshot.chunks),
-            checkpoint_pool_.active_count(seq_id), snapshot.last_processed_pos,
+            pool == nullptr ? 0 : pool->active_count(seq_id),
+            snapshot.last_processed_pos,
             release_checkpoints ? 1 : 0);
     }
+    return true;
 }
 
