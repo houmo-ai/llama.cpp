@@ -4,6 +4,8 @@
 #include <cctype>
 #include <climits>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include "ggml.h"
 #include "llama-impl.h"
 #include "time-perf.h"
@@ -144,18 +146,25 @@ void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,
 }
 
 void HoumoQwen35LLM::resolve_input_names() {
-    prefill_time_pos_name_ =
-        find_input_name_any(prefill_input_map_, {"time_position"});
-    prefill_height_pos_name_ =
-        find_input_name_any(prefill_input_map_, {"height_position", "hight_position"});
-    prefill_width_pos_name_ =
-        find_input_name_any(prefill_input_map_, {"width_position"});
-    prefill_valid_length_name_ =
-        find_input_name_any(prefill_input_map_, {"valid_length", "past_seq_length"});
-    prefill_current_length_name_ =
-        find_input_name_any(prefill_input_map_, {"current_length", "current_input_length"});
-    prefill_linear_mask_name_ =
-        find_input_name_any(prefill_input_map_, {"linear_attn_mask"});
+    prefill_time_pos_name_ = find_input_name_any(
+        prefill_input_map_, {"time_position", "time_position.hmcc.format"});
+    prefill_height_pos_name_ = find_input_name_any(
+        prefill_input_map_,
+        {"height_position", "hight_position", "height_position.hmcc.format",
+         "hight_position.hmcc.format"});
+    prefill_width_pos_name_ = find_input_name_any(
+        prefill_input_map_, {"width_position", "width_position.hmcc.format"});
+    prefill_valid_length_name_ = find_input_name_any(
+        prefill_input_map_,
+        {"valid_length", "past_seq_length", "valid_length.hmcc.format",
+         "past_seq_length.hmcc.format"});
+    prefill_current_length_name_ = find_input_name_any(
+        prefill_input_map_,
+        {"current_length", "current_input_length", "current_length.hmcc.format",
+         "current_input_length.hmcc.format"});
+    prefill_linear_mask_name_ = find_input_name_any(
+        prefill_input_map_,
+        {"linear_attn_mask", "linear_attn_mask.hmcc.format"});
 
     decode_time_pos_names_.clear();
     decode_height_pos_names_.clear();
@@ -165,17 +174,24 @@ void HoumoQwen35LLM::resolve_input_names() {
     decode_current_length_names_.clear();
 
     decode_time_pos_names_ = collect_input_names_any(
-        decode_input_map_, {"time_position"});
+        decode_input_map_, {"time_position", "time_position.hmcc.format"});
     decode_height_pos_names_ = collect_input_names_any(
-        decode_input_map_, {"height_position", "hight_position"});
+        decode_input_map_,
+        {"height_position", "hight_position", "height_position.hmcc.format",
+         "hight_position.hmcc.format"});
     decode_width_pos_names_ = collect_input_names_any(
-        decode_input_map_, {"width_position"});
+        decode_input_map_, {"width_position", "width_position.hmcc.format"});
     decode_valid_length_names_ = collect_input_names_any(
-        decode_input_map_, {"valid_length", "past_seq_length"});
+        decode_input_map_,
+        {"valid_length", "past_seq_length", "valid_length.hmcc.format",
+         "past_seq_length.hmcc.format"});
     decode_current_length_names_ = collect_input_names_any(
-        decode_input_map_, {"current_length", "current_input_length"});
+        decode_input_map_,
+        {"current_length", "current_input_length", "current_length.hmcc.format",
+         "current_input_length.hmcc.format"});
     decode_linear_mask_names_ = collect_input_names_any(
-        decode_input_map_, {"linear_attn_mask"});
+        decode_input_map_,
+        {"linear_attn_mask", "linear_attn_mask.hmcc.format"});
 }
 
 
@@ -263,6 +279,77 @@ void HoumoQwen35LLM::set_linear_attn_mask(tcim::Tensor &tensor, int fill_length,
     }
 }
 
+int HoumoQwen35LLM::set_lora_inputs(
+    tcim::Module &model,
+    std::map<std::string, tcim::Tensor> &input_map) {
+    namespace fs = std::filesystem;
+    if (lora_map.empty()) {
+        return 0;
+    }
+    std::string enabled_path;
+    for (const auto &pair : lora_map) {
+        if (pair.second.scale != 0.0f) {
+            if (!fs::is_directory(pair.first)) {
+                LLAMA_LOG_ERROR("%s: LoRA directory not found: %s\n",
+                                __func__, pair.first.c_str());
+                return -1;
+            }
+            enabled_path = pair.first;
+            break; // 一次一个lora
+        }
+    }
+
+    if (!enabled_path.empty()) {
+        for (const auto &entry : fs::directory_iterator(enabled_path)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".bin") {
+                continue;
+            }
+            const std::string input_name = entry.path().stem().string();
+            LLAMA_LOG_INFO("%s: loading LoRA input '%s' from %s\n",
+                            __func__, input_name.c_str(),
+                            entry.path().string().c_str());
+            auto input = input_map.find(input_name);
+            if (input == input_map.end()) {
+                LLAMA_LOG_ERROR("%s: LoRA input '%s' from %s is not present "
+                                "in the model\n",
+                                __func__, input_name.c_str(),
+                                entry.path().string().c_str());
+                return -1;
+            }
+
+            const uintmax_t file_size = fs::file_size(entry.path());
+            std::vector<char> bytes(static_cast<size_t>(file_size));
+            std::ifstream stream(entry.path(), std::ios::binary);
+            if (!stream.read(bytes.data(),
+                             static_cast<std::streamsize>(bytes.size()))) {
+                LLAMA_LOG_ERROR("%s: failed to read LoRA input: %s\n",
+                                __func__, entry.path().string().c_str());
+                return -1;
+            }
+            input->second.Buffer().CopyFromHost(bytes.data(), bytes.size());
+            if (model.SetInput(input_name, input->second) != tcim::Status::OK) {
+                LLAMA_LOG_ERROR("%s: failed to set LoRA input '%s'\n",
+                                __func__, input_name.c_str());
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    for (auto &input : input_map) {
+        // 只能清空lora
+        if (input.first.find("lora") != std::string::npos) {
+            zero_tensor(input.second);
+            if (model.SetInput(input.first, input.second) != tcim::Status::OK) {
+                LLAMA_LOG_ERROR("%s: failed to clear LoRA input '%s'\n",
+                                __func__, input.first.c_str());
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 int HoumoQwen35LLM::run_prefill_round(int seq_id,
                                       tcim::Tensor &input_data,
                                       int32_t valid_length,
@@ -310,14 +397,12 @@ int HoumoQwen35LLM::run_prefill_round(int seq_id,
     }
 
     if (is_first_round) {
-        for (const auto &pair : lora_map) {
-            if (prefill_input_map_.count(pair.first) > 0) {
-                auto lora_mask = prefill_input_map_[pair.first];
-                lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
-                                                       lora_mask_float_.MemSize());
-                lora_mask_float_.CastTo(lora_mask);
-                prefill_model_->SetInput(pair.first, lora_mask);
-            }
+        if (set_lora_inputs(*prefill_model_, prefill_input_map_) != 0) {
+            return -1;
+        }
+        if (set_lora_inputs(*decode_model_, decode_input_map_) != 0) {
+            LLAMA_LOG_ERROR("%s: failed to set decode LoRA inputs\n", __func__);
+            return -1;
         }
     }
 
@@ -1358,15 +1443,6 @@ int HoumoQwen35LLM::houmo_decode(std::vector<llama_token> &batches,
     state_cache_.set_state_cache_for_decode(seq_ids, /*accept_pos=*/0);
     set_kv_cache_for_decode(seq_ids);
 
-    for (const auto &pair : lora_map) {
-        if (decode_input_map_.count(pair.first) > 0) {
-            auto lora_mask = decode_input_map_[pair.first];
-            lora_mask_float_.Buffer().CopyFromHost(&pair.second.scale,
-                                                   lora_mask_float_.MemSize());
-            lora_mask_float_.CastTo(lora_mask);
-            decode_model_->SetInput(pair.first, lora_mask);
-        }
-    }
     PERF_STOP(DECODE_SETINPUT);
 
     PERF_START(DECODE_RUN);

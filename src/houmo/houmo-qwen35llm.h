@@ -79,6 +79,8 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
                                        int32_t valid_length,
                                        bool is_prompt_final_prefill);
     int copy_prefill_logits(float *logits, int32_t current_length);
+    int set_lora_inputs(tcim::Module &model,
+                        std::map<std::string, tcim::Tensor> &input_map);
     bool update_text_prefill_snapshot(
         int seq_id, int32_t effective_kv_offset, int32_t valid_length,
       const std::vector<PrefillChunk> &effective_chunks);

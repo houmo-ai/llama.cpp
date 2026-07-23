@@ -34,6 +34,13 @@ size_t chunk_token_count(const std::vector<PrefillChunk> &chunks) {
 
 std::string make_state_output_name(const std::string &input_name) {
     std::string output_name = input_name;
+    //FIXME:  @guoxing.xu This is a temporary hack to handle temp model.
+    constexpr const char *hmcc_suffix = ".hmcc.format";
+    if (output_name.size() >= std::strlen(hmcc_suffix) &&
+        output_name.compare(output_name.size() - std::strlen(hmcc_suffix),
+                            std::strlen(hmcc_suffix), hmcc_suffix) == 0) {
+        output_name.erase(output_name.size() - std::strlen(hmcc_suffix));
+    }
     auto pos = output_name.find("past_conv_cache_");
     if (pos != std::string::npos) {
         output_name.replace(pos, std::strlen("past_conv_cache_"),

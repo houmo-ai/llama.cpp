@@ -38,6 +38,7 @@ void llama_context::houmo_init(int32_t seq_max) {
     // Different HMM groups may expose different context lengths. Keep the
     // caller configured context here; each routed HouMo backend validates its
     // own actual context length before running the graph.
+    cparams.n_ctx = hm_llmodel->n_context_length();
     cparams.n_ctx_seq = cparams.n_ctx;
     cparams.n_batch = std::max<uint32_t>(cparams.n_batch, 256);
     cparams.n_ubatch = std::max<uint32_t>(cparams.n_ubatch, 256);
@@ -1230,6 +1231,7 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
 void llama_context::set_adapters_lora(llama_adapter_lora ** adapters, size_t n_adapters, float * scales) {
     LLAMA_LOG_DEBUG("%s: adapters = %p\n", __func__, (void *) adapters);
     if (model.hparams.is_hmm) {
+        model.hm_llmodel->lora_clear();
         for (size_t i = 0; i < n_adapters; i++) {
             model.hm_llmodel->lora_set_scale(adapters[i], scales[i]);
         }
