@@ -53,9 +53,9 @@ void HoumoQwen35StateCache::configure_state_cache(
     std::shared_ptr<tcim::Module> prefill,
     std::shared_ptr<tcim::Module> decode,
     int prefill_length) {
+    (void) prefill_length;
     state_prefill_model_ = std::move(prefill);
     state_decode_model_ = std::move(decode);
-    checkpoint_min_interval_ = prefill_length * 4;
 
     HoumoCheckpointPool config;
     config.configure_from_env(

@@ -645,18 +645,20 @@ void HoumoQwen35LLM::export_prefill_hidden(
 }
 
 void HoumoQwen35LLM::maybe_save_prefill_checkpoint(
-    int seq_id, size_t round, size_t rounds, int32_t valid_length) {
+    int seq_id, size_t round, size_t rounds, int32_t valid_length,
+    bool is_prompt_final_prefill) {
     if (valid_length <= 0) {
         return;
     }
 
-    // Always retain a checkpoint at the completed prefill boundary. Prefix
-    // reuse commonly truncates generated tokens back to this position; without
-    // a final checkpoint the linear-attention state must replay from zero.
+    // llama.cpp can split a long prompt into multiple batches (for example,
+    // 2048 tokens each). Only force the penultimate model round for the batch
+    // that actually requests logits, which marks the completed prompt prefill.
+    // Intermediate batches continue to use checkpoint_min_interval_.
     const bool is_second_last = round + 2 == rounds;
-    const bool is_last = round + 1 == rounds;
+    const bool force = is_prompt_final_prefill && is_second_last;
     if (state_cache_.should_save_checkpoint(seq_id, valid_length,
-                                            is_second_last || is_last)) {
+                                            force)) {
         state_cache_.save_state_checkpoint(seq_id, valid_length);
     }
 }
@@ -876,7 +878,8 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
 
         export_prefill_hidden(kv_offset, valid_length, current_length);
         valid_length += current_length;
-        maybe_save_prefill_checkpoint(seq_id, round, rounds, valid_length);
+        maybe_save_prefill_checkpoint(seq_id, round, rounds, valid_length,
+                                      logits != nullptr);
     }
 
     decode_valid_length_[seq_id] = valid_length;

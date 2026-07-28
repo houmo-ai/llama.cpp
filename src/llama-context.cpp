@@ -1747,11 +1747,11 @@ int llama_context::houmo_decode(const llama_batch & batch) {
         if (ret != 0) {
             return ret;
         }
-        std::string result;
-        for (const auto & e : entries) {
-            result +=common_token_to_piece(&model.vocab, e.token, true);
-        }
-        LLAMA_LOG_INFO("%s", result.c_str());
+        // std::string result;
+        // for (const auto & e : entries) {
+        //     result +=common_token_to_piece(&model.vocab, e.token, true);
+        // }
+        // LLAMA_LOG_DEBUG("%s", result.c_str());
 
     }
 

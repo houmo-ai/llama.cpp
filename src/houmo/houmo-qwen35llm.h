@@ -76,7 +76,8 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     void export_prefill_hidden(int32_t kv_offset, int32_t valid_length,
                                int32_t current_length);
     void maybe_save_prefill_checkpoint(int seq_id, size_t round, size_t rounds,
-                                       int32_t valid_length);
+                                       int32_t valid_length,
+                                       bool is_prompt_final_prefill);
     int copy_prefill_logits(float *logits, int32_t current_length);
     bool update_text_prefill_snapshot(
         int seq_id, int32_t effective_kv_offset, int32_t valid_length,
