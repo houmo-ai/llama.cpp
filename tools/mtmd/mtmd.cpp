@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -143,8 +144,8 @@ mtmd_context_params mtmd_context_params_default() {
 }
 
 struct mtmd_context {
-    HoumoVision * hm_vision = nullptr; // for HMM-based vision models
-    HoumoAudio * hm_audio = nullptr; // for HMM-based audio models
+    std::unique_ptr<HoumoVision> hm_vision; // for HMM-based vision models
+    std::unique_ptr<HoumoAudio> hm_audio; // for HMM-based audio models
     struct clip_ctx * ctx_v; // vision
     struct clip_ctx * ctx_a; // audio
     const struct llama_model * text_model;
@@ -251,15 +252,15 @@ struct mtmd_context {
             }
             if(ctx_v) {
                 if (clip_is_minicpmv(ctx_v)) {
-                    hm_vision = new HoumoMinicpmVision();
+                    hm_vision = std::make_unique<HoumoMinicpmVision>();
                 } else if(clip_is_glm(ctx_v)) {
                     //FIXME: add glm-ocr
                 } else if (clip_get_projector_type(ctx_v) == PROJECTOR_TYPE_GLM4V) {
-                    hm_vision = new HoumoGLMOCRVision();
+                    hm_vision = std::make_unique<HoumoGLMOCRVision>();
                 } else if (clip_is_gemma4v(ctx_v)) {
-                    hm_vision = new HoumoGemmaVision(clip_get_hparams(ctx_v)->patch_size);
+                    hm_vision = std::make_unique<HoumoGemmaVision>(clip_get_hparams(ctx_v)->patch_size);
                 } else {
-                    hm_vision = new HoumoQwenVision();
+                    hm_vision = std::make_unique<HoumoQwenVision>();
                 }
                 if (!hm_vision->init(mmproj_fname, device_ids))
                     throw std::runtime_error(string_format(
@@ -267,11 +268,11 @@ struct mtmd_context {
             }
             if (ctx_a) {
                 if (clip_get_projector_type(ctx_a) == PROJECTOR_TYPE_GLMA) {
-                    hm_audio = new HoumoGLMAsrAudio();
+                    hm_audio = std::make_unique<HoumoGLMAsrAudio>();
                 } else if (clip_get_projector_type(ctx_a) == PROJECTOR_TYPE_GEMMA4A) {
-                    hm_audio = new HoumoGemmaAudio();
+                    hm_audio = std::make_unique<HoumoGemmaAudio>();
                 } else {
-                    hm_audio = new HoumoQwen3Audio();
+                    hm_audio = std::make_unique<HoumoQwen3Audio>();
                 }
                 if (!hm_audio->init(mmproj_fname, device_ids))
                     throw std::runtime_error(string_format(
