@@ -1087,8 +1087,9 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
 
         auto analysis = p.ref("analysis");
         auto preamble = p.rule("preamble", p.literal("<|channel|>commentary<|message|>") + p.content(content) + end);
-        auto final_msg = p.rule("final", stray_commentary + p.literal("<|channel|>final<|message|>") + p.content(content));
-
+        // auto final_msg = p.rule("final", stray_commentary + p.literal("<|channel|>final<|message|>") + p.content(content));
+        auto constraint = p.optional(p.space() + p.optional(p.literal("<|constrain|>")) + constrain_type);
+        auto final_msg = p.rule("final", stray_commentary + p.literal("<|channel|>final") + constraint + p.literal("<|message|>") + p.content(content));
         // Consume any unsolicited tool calls, e.g. builtin functions
         auto unsolicited = p.rule("unsolicited", p.atomic(p.optional(channel) + p.literal(" to=") + content + end));
 
