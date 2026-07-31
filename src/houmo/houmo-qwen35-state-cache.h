@@ -79,13 +79,17 @@ class HoumoQwen35StateCache {
     void init_checkpoint_pool(int context_length, bool multi_device);
     HoumoCheckpointPool *find_checkpoint_pool(int seq_id);
     const HoumoCheckpointPool *find_checkpoint_pool(int seq_id) const;
-    std::string state_output_name(size_t idx, int accept_pos) const;
+    std::string state_input_name(size_t idx, int batch_id) const;
+    std::string state_output_name(size_t idx, int batch_id,
+                                  int accept_pos) const;
 
     std::shared_ptr<tcim::Module> state_prefill_model_;
     std::shared_ptr<tcim::Module> state_decode_model_;
+    // Batch 0 uses these bare names. Decode batch 1+ appends _batchN.
     std::vector<std::string> state_cache_names_;
-    std::vector<std::string> state_cache_output_names_;
-    std::vector<std::vector<std::string>> state_cache_split_output_names_;
+    // Verify only uses decode batch 0. The second dimension is accept_pos.
+    std::vector<std::vector<std::string>> state_decode_split_output_names_;
+    int state_decode_batch_count_ = 1;
     int decode_verify_seq_ = 1;
     std::map<int, StateCacheEntry> state_cache_;
     std::map<int, bool> state_cache_initialized_;

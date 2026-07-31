@@ -1625,7 +1625,8 @@ int HoumoQwen35LLM::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     }
 
     std::vector<int> seq_ids = {seq_id};
-    state_cache_.set_state_cache_for_decode(seq_ids, /*accept_pos=*/0, /*bind_outputs=*/false);
+    state_cache_.set_state_cache_for_decode(
+        seq_ids, /*accept_pos=*/0, /*bind_outputs=*/false);
     set_kv_cache_for_decode(seq_ids);
     PERF_STOP(VERIFY_SETINPUT);
 
