@@ -12,6 +12,7 @@
 #include "houmo-embedding_layer.h"
 #include "houmo-memory.h"
 #include "llama-model-loader.h"
+#include "llama-io.h"
 #include "ggml.h"
 // houmo llm model defination
 //
@@ -64,6 +65,11 @@ class HouMoLLModel {
     int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
                      std::vector<float *> &logits_out);
     int houmo_verify_accept(int seq_id, uint16_t n_accepted);
+
+    void state_write(llama_io_write_i & io, llama_seq_id seq_id,
+             llama_state_seq_flags flags, bool is_mtp) const;
+    void state_read(llama_io_read_i & io, llama_seq_id seq_id,
+            llama_state_seq_flags flags, bool is_mtp);
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings);
     bool is_embedding();
@@ -144,6 +150,7 @@ class HouMoLLModel {
     std::vector<int> local_seq_max_mtp_;
     std::vector<std::unique_ptr<houmo_memory_i>> memories_;
     std::vector<std::unique_ptr<houmo_memory_i>> memories_mtp_;
+    houmo_memory_i * memory_ = nullptr;
 };
 
 struct kv_cache_item {
@@ -231,6 +238,12 @@ public:
   virtual int houmo_verify_accept(int /*seq_id*/, uint16_t /*n_accepted*/) {
     return -1;
   }
+
+  virtual void state_write(llama_io_write_i & io, int local_seq_id,
+                           llama_state_seq_flags flags) const;
+  virtual void state_read(llama_io_read_i & io, int local_seq_id,
+                          llama_state_seq_flags flags);
+  virtual int state_position(int /*local_seq_id*/) const { return -1; }
   virtual bool is_embedding() {
     return false;
   }

@@ -959,8 +959,11 @@ private:
                 SRV_ERR("failed to create draft context for '%s'\n", params_dft.model.path.c_str());
                 return false;
             }
+            // Houmo currently cannot physically remove arbitrary token ranges.
+            // Treat it as full-sequence removal only until the backend exposes
+            // an explicit rollback capability.
             if (is_hmm)
-                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
             else
                 ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
 
@@ -981,7 +984,7 @@ private:
                 return false;
             }
             if (is_hmm)
-                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
             else
                 ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
 
@@ -1063,7 +1066,7 @@ private:
 
         slots.clear();
         if (is_hmm)
-            ctx_tgt_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+            ctx_tgt_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
         else
             ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
         if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
@@ -2309,10 +2312,6 @@ private:
                 } break;
             case SERVER_TASK_TYPE_SLOT_SAVE:
                 {
-                    if (!check_no_mtmd(task.id)) {
-                        break;
-                    }
-
                     const int id_slot = task.slot_action.id_slot;
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
@@ -2332,8 +2331,12 @@ private:
                     std::string filename = task.slot_action.filename;
                     std::string filepath = task.slot_action.filepath;
 
-                    const llama_tokens & tokens = slot->prompt.tokens.get_tokens();
+                    const llama_tokens & tokens = slot->prompt.tokens.get_all_tokens();
                     const size_t nwrite = llama_state_seq_save_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), token_count);
+                    if (nwrite == 0) {
+                        send_error(task, "Unable to save slot state", ERROR_TYPE_SERVER);
+                        break;
+                    }
 
                     const int64_t t_end = ggml_time_us();
                     const double t_save_ms = (t_end - t_start) / 1000.0;
@@ -2350,7 +2353,6 @@ private:
                 } break;
             case SERVER_TASK_TYPE_SLOT_RESTORE:
                 {
-                    if (!check_no_mtmd(task.id)) break;
                     const int id_slot = task.slot_action.id_slot;
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
@@ -2381,6 +2383,10 @@ private:
                     tokens.resize(token_count);
                     slot->prompt.tokens.clear();
                     slot->prompt.tokens.insert(tokens);
+                    // Keep the restored server-side token view linear. Media
+                    // embeddings and mixed chunk history are already restored
+                    // by the model sequence state; no mtmd chunk object is
+                    // needed unless a later request introduces new media.
 
                     const int64_t t_end = ggml_time_us();
                     const double t_restore_ms = (t_end - t_start) / 1000.0;
@@ -2397,9 +2403,6 @@ private:
                 } break;
             case SERVER_TASK_TYPE_SLOT_ERASE:
                 {
-                    if (!check_no_mtmd(task.id)) {
-                        break;
-                    }
                     const int id_slot = task.slot_action.id_slot;
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
@@ -2586,8 +2589,8 @@ private:
             if (spec) {
                 common_speculative_get_draft_params(spec.get(), slot.id).drafting = false;
 
-                const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-                const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+                const bool use_ckpt_tgt = !is_hmm && ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+                const bool use_ckpt_dft = !is_hmm && ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
                 int n_draft_max = slot.get_n_draft_max();
 
@@ -2643,7 +2646,7 @@ private:
             slot.n_draft_total += draft.size();
 
             // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
-            const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+            const bool use_ckpt_dft = !is_hmm && ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
             if (ctx_dft) {
                 if (use_ckpt_dft) {
@@ -2654,12 +2657,12 @@ private:
             }
 
             if (!draft.empty()) {
-                const bool use_ckpt_tgt =
+                const bool use_ckpt_tgt = !is_hmm && (
                     ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                   (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_tgt));
+                    (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_tgt)));
 
-                const bool use_ckpt_dft =
-                   (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_dft.get()));
+                const bool use_ckpt_dft = !is_hmm &&
+                    (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_dft.get()));
 
                 if (use_ckpt_tgt) {
                     //const int64_t t_start = ggml_time_us();
@@ -3522,9 +3525,9 @@ private:
 
                     const uint32_t n_rollback = slot.spec_draft.size() + 1 - accepted.size();
 
-                    const bool use_ckpt_tgt =
+                    const bool use_ckpt_tgt = !is_hmm && (
                         ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                       (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_rollback > llama_n_rs_seq(ctx_tgt));
+                              (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_rollback > llama_n_rs_seq(ctx_tgt)));
 
                     // check for partial draft acceptance
                     if (n_rollback > 0) {

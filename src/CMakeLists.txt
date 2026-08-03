@@ -39,9 +39,11 @@ add_library(llama
             unicode.cpp
             unicode.h
             houmo/houmo-llmodel.cpp
+            houmo/houmo-state-io.cpp
             houmo/houmo-gptoss.cpp
             houmo/houmo-qwenllm.cpp
             houmo/houmo-qwen35llm.cpp
+            houmo/houmo-qwen35-seq-state.cpp
             houmo/houmo-checkpoint-pool.cpp
             houmo/houmo-qwen35-state-cache.cpp
             houmo/houmo-qwen35mtp.cpp
@@ -50,6 +52,7 @@ add_library(llama
             houmo/houmo-embed.cpp
             houmo/houmo-embedding_layer.cpp
             houmo/houmo-gemma4.cpp
+            houmo/houmo-gemma4-seq-state.cpp
             houmo/houmo-gemma4mtp.cpp
             houmo/houmo-gemma4-kv-cache.cpp
             houmo/oss-kv-cache.cpp

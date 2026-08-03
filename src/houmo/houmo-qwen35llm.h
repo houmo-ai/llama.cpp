@@ -11,6 +11,7 @@
  * @brief HoumoQwen35LLM is the derived class for Qwen3.5 HouMo model.
  */
 class HoumoQwen35LLM : public HouMoLLModel::Impl {
+  friend class HoumoQwen35SeqState;
   public:
     HoumoQwen35LLM() = default;
     ~HoumoQwen35LLM() override = default;
@@ -31,6 +32,11 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings) override;
     bool is_embedding() override;
+    void state_write(llama_io_write_i & io, int local_seq_id,
+             llama_state_seq_flags flags) const override;
+    void state_read(llama_io_read_i & io, int local_seq_id,
+            llama_state_seq_flags flags) override;
+    int state_position(int local_seq_id) const override;
 
   protected:
     void resolve_input_names();

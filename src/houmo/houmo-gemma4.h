@@ -18,6 +18,7 @@ class HouMoGemma4MTP;
  */
 class HouMoGemma4 : public HouMoLLModel::Impl {
     friend class HouMoGemma4MTP;
+  friend class HoumoGemma4SeqState;
 
   public:
     HouMoGemma4() = default;
@@ -36,6 +37,11 @@ class HouMoGemma4 : public HouMoLLModel::Impl {
     int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
              std::vector<float *> &logits_out) override;
     int houmo_verify_accept(int seq_id, uint16_t n_accepted) override;
+    void state_write(llama_io_write_i & io, int local_seq_id,
+             llama_state_seq_flags flags) const override;
+    void state_read(llama_io_read_i & io, int local_seq_id,
+            llama_state_seq_flags flags) override;
+    int state_position(int local_seq_id) const override;
 
   private:
     int32_t committed_pos(int seq_id) const {

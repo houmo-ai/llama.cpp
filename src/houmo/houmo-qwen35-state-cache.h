@@ -63,6 +63,17 @@ class HoumoQwen35StateCache {
     bool trim_snapshot_to_kv_offset(int seq_id, int32_t kv_offset,
                                     bool release_checkpoints = true);
     void clear_all_checkpoints(int seq_id);
+    const std::vector<std::string> & state_names() const {
+        return state_cache_names_;
+    }
+    const StateCacheEntry * find_entry(int seq_id) const {
+        auto it = state_cache_.find(seq_id);
+        return it == state_cache_.end() ? nullptr : &it->second;
+    }
+    StateCacheEntry * find_entry(int seq_id) {
+        auto it = state_cache_.find(seq_id);
+        return it == state_cache_.end() ? nullptr : &it->second;
+    }
 
   private:
     void reset_state_cache_metadata();

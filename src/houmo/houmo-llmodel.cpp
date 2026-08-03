@@ -20,6 +20,7 @@
 #include <fstream>
 #include <map>
 #include <regex>
+#include <stdexcept>
 #include <set>
 #include <sstream>
 #include <string>
@@ -97,6 +98,15 @@ class GroupMemory final : public houmo_memory_i {
         return memory_->seq_pos_max(global(id));
     }
 
+    void state_write(llama_io_write_i &io, llama_seq_id id = -1,
+                     llama_state_seq_flags flags = 0) const override {
+        memory_->state_write(io, global(id), flags);
+    }
+    void state_read(llama_io_read_i &io, llama_seq_id id = -1,
+                    llama_state_seq_flags flags = 0) override {
+        memory_->state_read(io, global(id), flags);
+    }
+
   private:
     llama_seq_id global(llama_seq_id local) const {
         return local * group_count_ + group_index_;
@@ -127,6 +137,42 @@ HouMoLLModel::Impl *create_impl(const std::string &arch, bool mtp,
 }
 
 } // namespace
+
+namespace {
+constexpr uint32_t HOUMO_STATE_MAGIC = 0x484d5354; // HMST
+constexpr uint32_t HOUMO_STATE_VERSION = 1;
+
+struct houmo_state_header {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t flags;
+    int32_t source_seq_id;
+    int32_t group_id;
+    int32_t local_seq_id;
+};
+} // namespace
+
+void houmo_memory_i::state_write_impl(llama_io_write_i &io,
+                                      llama_seq_id seq_id,
+                                      llama_state_seq_flags flags) const {
+    model_->state_write(io, seq_id, flags, is_mtp_);
+}
+
+void houmo_memory_i::state_read_impl(llama_io_read_i &io,
+                                     llama_seq_id seq_id,
+                                     llama_state_seq_flags flags) {
+    model_->state_read(io, seq_id, flags, is_mtp_);
+}
+
+void HouMoLLModel::Impl::state_write(llama_io_write_i &, int,
+                                     llama_state_seq_flags) const {
+    throw std::runtime_error("Houmo state serialization is not supported by this model");
+}
+
+void HouMoLLModel::Impl::state_read(llama_io_read_i &, int,
+                                    llama_state_seq_flags) {
+    throw std::runtime_error("Houmo state restore is not supported by this model");
+}
 
 static bool string_replace_once(std::string &str, const std::string &from,
                                 const std::string &to) {
@@ -1051,6 +1097,61 @@ bool HouMoLLModel::route_seq(int global_seq_id, bool is_mtp,
     return true;
 }
 
+void HouMoLLModel::state_write(llama_io_write_i &io, llama_seq_id seq_id,
+                               llama_state_seq_flags flags, bool is_mtp) const {
+    if (seq_id < 0) {
+        throw std::runtime_error("Houmo full-context state is not supported; save a sequence instead");
+    }
+    SeqRoute route;
+    if (!route_seq(seq_id, is_mtp, route)) {
+        throw std::runtime_error("invalid Houmo sequence id");
+    }
+    const houmo_state_header header = {
+        HOUMO_STATE_MAGIC,
+        HOUMO_STATE_VERSION,
+        flags,
+        seq_id,
+        route.group_id,
+        route.local_seq_id,
+    };
+    io.write(&header, sizeof(header));
+    route.impl->state_write(io, route.local_seq_id, flags);
+}
+
+void HouMoLLModel::state_read(llama_io_read_i &io, llama_seq_id seq_id,
+                              llama_state_seq_flags flags, bool is_mtp) {
+    if (seq_id < 0) {
+        throw std::runtime_error("Houmo full-context state is not supported; restore a sequence instead");
+    }
+    SeqRoute route;
+    if (!route_seq(seq_id, is_mtp, route)) {
+        throw std::runtime_error("invalid Houmo sequence id");
+    }
+    houmo_state_header header = {};
+    io.read(&header, sizeof(header));
+    if (header.magic != HOUMO_STATE_MAGIC) {
+        throw std::runtime_error("wrong Houmo state magic");
+    }
+    if (header.version != HOUMO_STATE_VERSION) {
+        throw std::runtime_error("unsupported Houmo state version");
+    }
+    if (header.flags != flags) {
+        throw std::runtime_error("Houmo state flags mismatch");
+    }
+    // Source and destination slots may be routed to different physical model
+    // groups. The model payload validates tensor names, shapes, strides and
+    // dtypes against the destination group before committing any data.
+    route.impl->state_read(io, route.local_seq_id, flags);
+    if ((flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == 0) {
+        const llama_pos restored_pos = static_cast<llama_pos>(route.impl->state_position(route.local_seq_id));
+        if (restored_pos < 0) {
+            throw std::runtime_error("invalid restored Houmo sequence position");
+        }
+        memory_->seq_rm(seq_id, 0, -1);
+        memory_->seq_add(seq_id, 0, 0, restored_pos);
+    }
+}
+
 // Forward method calls to the implementation
 bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
     if (!impls_.empty() || !impls_mtp_.empty()) {
@@ -1125,6 +1226,13 @@ bool HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
                               ggml_abort_callback abort_callback,
                               void *abort_callback_data,
                               bool is_mtp) {
+    if (memory_ == nullptr) {
+        memory_ = memory;
+    } else if (memory_ != memory) {
+        LLAMA_LOG_ERROR("%s: target and draft contexts must share Houmo memory\n", __func__);
+        return false;
+    }
+
     if (is_mtp) {
         if (mtp_initialized_) {
             LLAMA_LOG_ERROR("%s: MTP runtime is already initialized\n", __func__);
@@ -1145,6 +1253,7 @@ bool HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
                             __func__, reason.c_str());
             return false;
         }
+        memory->bind(this, true);
         memories_mtp_.push_back(std::make_unique<GroupMemory>(memory, 0, 1));
         impls_mtp_.front()->houmo_init(memories_mtp_.back().get(), 1,
                                        abort_callback, abort_callback_data);
@@ -1176,6 +1285,9 @@ bool HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
             new_local_seq_max.push_back(local_seq_max);
         }
         for (int i = 0; i < count; ++i) {
+            if (i == 0) {
+                memory->bind(this, false);
+            }
             memories_.push_back(std::make_unique<GroupMemory>(memory, i, count));
             impls_[i]->houmo_init(memories_.back().get(), new_local_seq_max[i],
                                   abort_callback, abort_callback_data);
