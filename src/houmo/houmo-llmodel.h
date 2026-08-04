@@ -381,6 +381,15 @@ protected:
   std::shared_ptr<tcim::Module>
   create_infer_engine(const std::string &file_name, size_t offset, size_t size,
                       std::vector<std::string> dummy_tensor_names = {});
+  void zero_tensor(tcim::Tensor &tensor) const {
+      if (tensor.Device() == tcim::Device::COMPND) {
+          for (const auto &sub_tensor : tcim::CompTensor(tensor).SubTensors()) {
+              sub_tensor.Buffer().MemSet(0);
+          }
+      } else {
+          tensor.Buffer().MemSet(0);
+      }
+  }
 
 protected:
   int prefill_length_ = 256;

@@ -116,16 +116,6 @@ std::string resolve_batch_name(const std::vector<std::string> &names,
     return names.front();
 }
 
-void zero_tensor(tcim::Tensor &tensor) {
-    if (tensor.Device() == tcim::Device::COMPND) {
-        for (const auto & sub_tensor : tcim::CompTensor(tensor).SubTensors()) {
-            sub_tensor.Buffer().MemSet(0);
-        }
-    } else {
-        tensor.Buffer().MemSet(0);
-    }
-}
-
 } // namespace
 
 void HoumoQwen35LLM::houmo_init(houmo_memory_i *memory, int seq_max,

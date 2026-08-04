@@ -887,8 +887,8 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                               ? prefill_model_->GetDevInput(v_cache_name)
                               : decode_model_->GetDevInput(v_cache_name);
             if (prefill_owned_gemma4_cache) {
-                kcache.Buffer().MemSet(0);
-                vcache.Buffer().MemSet(0);
+                zero_tensor(kcache);
+                zero_tensor(vcache);
             }
             if (n_decode_batch_ > 1 || size == 1) {
                 item.tensors.push_back(kcache);

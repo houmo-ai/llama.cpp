@@ -1693,9 +1693,26 @@ int llama_context::houmo_decode(const llama_batch & batch) {
             dec_seqs.push_back(sid);
             dec_logits.push_back(logits_ptr_for(entries[0]));
         }
-        ret = hm_llmodel->houmo_decode(dec_tokens, dec_seqs, dec_logits);
-        if (ret != 0) {
-            return ret;
+        const int decode_batch = hm_llmodel->n_decode_batch();
+        if (!dec_tokens.empty() && decode_batch <= 0) {
+            LLAMA_LOG_ERROR("%s: invalid HouMo decode batch size: %d\n",
+                            __func__, decode_batch);
+            return -1;
+        }
+        for (size_t offset = 0; offset < dec_tokens.size();
+             offset += static_cast<size_t>(decode_batch)) {
+            const size_t count = std::min(
+                static_cast<size_t>(decode_batch), dec_tokens.size() - offset);
+            std::vector<llama_token> tokens(
+                dec_tokens.begin() + offset, dec_tokens.begin() + offset + count);
+            std::vector<int> seqs(
+                dec_seqs.begin() + offset, dec_seqs.begin() + offset + count);
+            std::vector<float *> logits_out(
+                dec_logits.begin() + offset, dec_logits.begin() + offset + count);
+            ret = hm_llmodel->houmo_decode(tokens, seqs, logits_out);
+            if (ret != 0) {
+                return ret;
+            }
         }
     }
 
