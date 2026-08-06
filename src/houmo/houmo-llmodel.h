@@ -14,6 +14,7 @@
 #include "llama-model-loader.h"
 #include "llama-io.h"
 #include "ggml.h"
+#include "houmo-weight-manager-pool.h"
 // houmo llm model defination
 //
 // @guoxing.xu 2025-05-23
@@ -288,7 +289,15 @@ public:
       embedding_layer_ = layer;
   }
   tcim::Module::WeightManager weight_manager() const { return wm_; }
-  void set_weight_manager(const tcim::Module::WeightManager &wm) { wm_ = wm; }
+  void set_weight_manager(const tcim::Module::WeightManager &wm) {
+      wm_ = wm;
+      wm_configured_ = true;
+  }
+  void set_weight_manager_handle(std::shared_ptr<houmo_weight_manager_handle> handle) {
+      wm_handle_ = std::move(handle);
+      wm_ = wm_handle_->manager;
+      wm_configured_ = true;
+  }
   void set_load_group_id(int group_id) { load_group_id_ = group_id; }
 protected:
   /**
@@ -402,6 +411,13 @@ protected:
   int n_decode_batch_ = 1;
   int n_split_count_ = 1;
 
+  // Keep the shared manager handle declared before Module objects so C++
+  // destroys Modules first. This prevents the pool entry from expiring while
+  // TCIM Modules are still releasing their device allocations.
+  tcim::Module::WeightManager wm_;
+  std::shared_ptr<houmo_weight_manager_handle> wm_handle_;
+  bool wm_configured_ = false;
+
   std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_ = nullptr;
   std::shared_ptr<tcim::Module> prefill_model_ = nullptr;
   std::shared_ptr<tcim::Module> decode_model_ = nullptr;
@@ -413,8 +429,6 @@ protected:
   //                      空指针表示本次调用无需写出。
   float *pre_norm_hidden_dst_     = nullptr;
   int    pre_norm_hidden_dst_rows_ = 0;
-  tcim::Module::WeightManager wm_;
-
   std::map<std::string, tcim::Tensor> prefill_input_map_;
   std::map<std::string, tcim::Tensor> prefill_output_map_;
   std::map<std::string, tcim::Tensor> decode_input_map_;

@@ -39,6 +39,7 @@ add_library(llama
             unicode.cpp
             unicode.h
             houmo/houmo-llmodel.cpp
+            houmo/houmo-weight-manager-pool.cpp
             houmo/houmo-state-io.cpp
             houmo/houmo-gptoss.cpp
             houmo/houmo-qwenllm.cpp

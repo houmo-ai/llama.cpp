@@ -224,12 +224,11 @@ static bool is_kv_cache_io_name(const std::string &name) {
 std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     bool prefill, void *raw_data, int64_t size, bool load_from_file,
     std::vector<std::string> dummy_tensor_names) {
-    if (wm_.GetInitStatus() != tcim::Status::OK) {
-        std::string backend = "";
-        backend = "Xh2HalBackend";
-        tcim::DevManager dev_manager =
-            tcim::DevManager::Create(device_ids_, backend);
+    if (!wm_configured_) {
+        const std::string backend = "Xh2HalBackend";
+        tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids_, backend);
         wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
+        wm_configured_ = true;
     }
     tcim::Status status;
     auto infer_model = std::make_shared<tcim::Module>();
@@ -267,12 +266,10 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
 std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     const std::string &file_name, size_t offset, size_t size,
     std::vector<std::string> dummy_tensor_names) {
-    if (wm_.GetInitStatus() != tcim::Status::OK) {
-        std::string backend = "";
-        backend = "Xh2HalBackend";
-        tcim::DevManager dev_manager =
-            tcim::DevManager::Create(device_ids_, backend);
-        wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
+    if (!wm_configured_) {
+        const std::string backend = "Xh2HalBackend";
+        set_weight_manager_handle(houmo_weight_manager_acquire(
+                file_name, device_ids_, backend));
     }
     tcim::Status status;
     auto infer_model = std::make_shared<tcim::Module>();
@@ -318,6 +315,10 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         dummy_tensor_names.push_back(v_cache_name);
     }
     parse_deviceids();
+    if (!wm_configured_) {
+        set_weight_manager_handle(houmo_weight_manager_acquire(
+                file_name, device_ids_, "Xh2HalBackend"));
+    }
     // 1. 加载 embedding
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
@@ -329,8 +330,7 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         if (strncmp(name, "quant_embedding.bin",
                     strlen("quant_embedding.bin")) == 0) {
             if (embedding_layer_ == nullptr)
-                embedding_layer_ =
-                    std::make_shared<HoumoEmbeddingLayer>(file_name, offset, size);
+                embedding_layer_ = houmo_embedding_layer_acquire(file_name, offset, size);
         } else if (std::regex_match(name, kPrefillMtpPattern)) {
             if (hmm_group_id(name) != load_group_id_) continue;
             if (!load_mtp_modules) {

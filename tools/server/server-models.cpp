@@ -192,11 +192,13 @@ void server_model_meta::update_caps() {
 server_models::server_models(
         const common_params & params,
         int argc,
-        char ** argv)
+        char ** argv,
+        bool metadata_only)
             : ctx_preset(LLAMA_EXAMPLE_SERVER),
               base_params(params),
               base_env(get_environment()),
-              base_preset(ctx_preset.load_from_args(argc, argv)) {
+              base_preset(ctx_preset.load_from_args(argc, argv)),
+              metadata_only(metadata_only) {
     // clean up base preset
     unset_reserved_args(base_preset, true);
     // set binary path
@@ -388,7 +390,7 @@ void server_models::load_models() {
                 models_to_load.push_back(name);
             }
         }
-        if ((int)models_to_load.size() > base_params.models_max) {
+        if (base_params.models_max > 0 && (int)models_to_load.size() > base_params.models_max) {
             throw std::runtime_error(string_format(
                 "number of models to load on startup (%zu) exceeds models_max (%d)",
                 models_to_load.size(), base_params.models_max));
@@ -396,6 +398,9 @@ void server_models::load_models() {
 
         lk.unlock();
         for (const auto & name : models_to_load) {
+            if (metadata_only) {
+                continue;
+            }
             SRV_INF("(startup) loading model %s\n", name.c_str());
             load(name);
         }
@@ -557,6 +562,9 @@ void server_models::load_models() {
 
         lk.unlock();
         for (const auto & name : to_autoload) {
+            if (metadata_only) {
+                continue;
+            }
             SRV_INF("(reload) loading new model %s\n", name.c_str());
             load(name);
         }

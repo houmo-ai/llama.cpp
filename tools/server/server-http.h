@@ -3,6 +3,7 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,6 +25,9 @@ struct server_http_res {
 
     // TODO: move this to a virtual function once we have proper polymorphism support
     std::function<bool(std::string &)> next = nullptr;
+    // Optional owner used by in-process routers to keep the selected model
+    // instance alive for the full lifetime of a streaming response.
+    std::shared_ptr<void> lifetime_guard;
     bool is_stream() const {
         return next != nullptr;
     }
