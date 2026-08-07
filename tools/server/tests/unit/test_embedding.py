@@ -101,6 +101,24 @@ def test_embedding_mixed_input(input, is_multi_prompt: bool):
         assert len(data[0]['embedding']) > 1
 
 
+@pytest.mark.parametrize("input", [
+    None,
+    {"invalid": "object"},
+])
+def test_embedding_invalid_input_type(input):
+    global server
+    server.start()
+
+    res = server.make_request("POST", "/v1/embeddings", data={"input": input})
+    assert res.status_code == 400
+    assert "error" in res.body
+
+    # Invalid client input must not affect subsequent inference requests.
+    res = server.make_request("POST", "/v1/embeddings", data={"input": "recovery probe"})
+    assert res.status_code == 200
+    assert len(res.body["data"]) == 1
+
+
 def test_embedding_pooling_mean():
     global server
     server.pooling = 'mean'

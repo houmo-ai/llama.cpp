@@ -66,6 +66,7 @@ class HouMoLLModel {
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings);
     bool is_embedding();
+    int max_parallel_sequences() const;
     bool is_asr_force_aligner();
     bool has_decode_model();
 
@@ -176,6 +177,9 @@ public:
       (void)embeddings; // unused parameter
       return 0;
   }
+  // Optional hard limit for backends whose physical batch is indexed by seq_id.
+  // A value of zero means that the backend does not declare such a limit.
+  virtual int max_parallel_sequences() const { return 0; }
   virtual int houmo_decode(std::vector<llama_token> &batches,
                            std::vector<int> &seq_ids,
                            std::vector<float *> logits) = 0;

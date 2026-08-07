@@ -32,6 +32,18 @@ void llama_context::houmo_init(int32_t seq_max) {
                            abort_callback, abort_callback_data, is_mtp);
     LLAMA_LOG_INFO("%s: HMM graph init success\n", __func__);
 
+    if (hm_llmodel->is_embedding()) {
+        const int max_parallel = hm_llmodel->max_parallel_sequences();
+        if (max_parallel > 0 && seq_max > max_parallel) {
+            LLAMA_LOG_WARN(
+                "%s: requested n_seq_max=%d exceeds the HMM embedding batch=%d; "
+                "capping n_seq_max to the model capacity\n",
+                __func__, seq_max, max_parallel);
+            seq_max           = max_parallel;
+            cparams.n_seq_max = static_cast<uint32_t>(max_parallel);
+        }
+    }
+
     cparams.n_ctx = std::min(cparams.n_ctx, hm_llmodel->n_context_length());
     cparams.n_ctx_seq = cparams.n_ctx;
     cparams.n_batch = std::max<uint32_t>(cparams.n_batch, 256);

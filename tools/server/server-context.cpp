@@ -913,6 +913,15 @@ private:
             }
         }
 
+        const int32_t context_parallel = static_cast<int32_t>(llama_n_seq_max(ctx_tgt));
+        if (params_base.n_parallel > context_parallel) {
+            SRV_WRN(
+                "requested n_parallel=%d exceeds the context capacity=%d; "
+                "capping the number of server slots\n",
+                params_base.n_parallel, context_parallel);
+            params_base.n_parallel = context_parallel;
+        }
+
         if (params_base.speculative.has_dft()) {
             // TODO speculative: move to common/speculative.cpp?
             const auto & params_spec = params_base.speculative.draft;

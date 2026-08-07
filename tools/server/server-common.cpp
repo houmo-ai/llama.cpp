@@ -827,7 +827,7 @@ static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_co
             return server_tokens(tmp, false);
         }
    } else {
-       throw std::runtime_error("\"prompt\" elements must be a string, a list of tokens, a JSON object containing a prompt string, or a list of mixed strings & tokens.");
+       throw std::invalid_argument("\"prompt\" elements must be a string, a list of tokens, a JSON object containing a prompt string, or a list of mixed strings & tokens.");
    }
 }
 

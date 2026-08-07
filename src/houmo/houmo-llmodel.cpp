@@ -742,14 +742,17 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
 }
 
 void HouMoLLModel::Impl::set_kv_cache_for_prefill(int seq_id) {
-    if (kv_cache_.find(seq_id) == kv_cache_.end()) {
+    if (kv_cache_.empty()) {
+        return;
+    }
+    const auto item = kv_cache_.find(seq_id);
+    if (item == kv_cache_.end()) {
         LLAMA_LOG_ERROR("kv_cache_.find(%d) failed.\n", seq_id);
         return;
     }
-    auto &item = kv_cache_[seq_id];
-    for (size_t idx = 0; idx < item.tensors.size(); idx++) {
-        std::string name = item.names[idx];
-        auto tensor = item.tensors[idx];
+    for (size_t idx = 0; idx < item->second.tensors.size(); idx++) {
+        std::string name = item->second.names[idx];
+        auto tensor = item->second.tensors[idx];
         prefill_model_->SetInput(name, tensor);
     }
 }
@@ -1033,6 +1036,9 @@ int HouMoLLModel::houmo_embedding(
     return impl_->houmo_embedding(batches, embeddings);
 }
 bool HouMoLLModel::is_embedding() { return impl_->is_embedding(); }
+int HouMoLLModel::max_parallel_sequences() const {
+    return impl_ ? impl_->max_parallel_sequences() : 0;
+}
 bool HouMoLLModel::is_asr_force_aligner() { return impl_->is_asr_force_aligner(); }
 bool HouMoLLModel::has_decode_model() { return impl_->has_decode_model(); }
 
