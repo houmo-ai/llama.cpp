@@ -269,7 +269,7 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     if (!wm_configured_) {
         const std::string backend = "Xh2HalBackend";
         set_weight_manager_handle(houmo_weight_manager_acquire(
-                file_name, device_ids_, backend));
+                file_name, device_ids_, backend, {}));
     }
     tcim::Status status;
     auto infer_model = std::make_shared<tcim::Module>();
@@ -315,12 +315,30 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         dummy_tensor_names.push_back(v_cache_name);
     }
     parse_deviceids();
+    std::vector<houmo_content_range> embedding_ranges;
+    const int n_tensors = gguf_get_n_tensors(ctx);
+    for (int i = 0; i < n_tensors; ++i) {
+        const char *raw_name = gguf_get_tensor_name(ctx, i);
+        if (raw_name == nullptr) {
+            continue;
+        }
+        const std::string name(raw_name);
+        const int64_t tensor_size = static_cast<int64_t>(gguf_get_tensor_size(ctx, i));
+        const int64_t tensor_offset = static_cast<int64_t>(
+                gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx));
+        houmo_content_range range{name, tensor_offset, tensor_size};
+        if (name.compare(0, strlen("quant_embedding.bin"),
+                         "quant_embedding.bin") == 0) {
+            embedding_ranges.push_back(range);
+        }
+    }
+    const std::string embedding_identity = houmo_content_identity(file_name, embedding_ranges);
     if (!wm_configured_) {
         set_weight_manager_handle(houmo_weight_manager_acquire(
-                file_name, device_ids_, "Xh2HalBackend"));
+                file_name, device_ids_, "Xh2HalBackend",
+                embedding_identity));
     }
     // 1. 加载 embedding
-    const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
         const char *name = gguf_get_tensor_name(ctx, i);
         LLAMA_LOG_INFO("tensor[%d]: name = %s\n", i, name);
@@ -330,7 +348,8 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         if (strncmp(name, "quant_embedding.bin",
                     strlen("quant_embedding.bin")) == 0) {
             if (embedding_layer_ == nullptr)
-                embedding_layer_ = houmo_embedding_layer_acquire(file_name, offset, size);
+                embedding_layer_ = houmo_embedding_layer_acquire(
+                        file_name, offset, size, embedding_identity);
         } else if (std::regex_match(name, kPrefillMtpPattern)) {
             if (hmm_group_id(name) != load_group_id_) continue;
             if (!load_mtp_modules) {
