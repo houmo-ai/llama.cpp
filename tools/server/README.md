@@ -1117,6 +1117,14 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
 }
 ```
 
+### POST `/slots/{id_slot}?action=pause`: Pause the specified slot.
+
+Pauses scheduling of the slot while preserving its KV/recurrent state in place. The slot remains occupied and can be resumed later.
+
+### POST `/slots/{id_slot}?action=resume`: Resume a paused slot.
+
+Resumes scheduling of a slot previously paused with `action=pause`.
+
 ### GET `/lora-adapters`: Get list of all LoRA adapters
 
 This endpoint returns the loaded LoRA adapters. You can add adapters using `--lora` when starting the server, for example: `--lora my_adapter_1.gguf --lora my_adapter_2.gguf ...`

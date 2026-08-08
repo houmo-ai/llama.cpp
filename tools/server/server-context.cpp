@@ -129,6 +129,7 @@ enum slot_state {
     SLOT_STATE_PROCESSING_PROMPT,
     SLOT_STATE_DONE_PROMPT,
     SLOT_STATE_GENERATING,
+    SLOT_STATE_PAUSED,
 };
 
 enum server_state {
@@ -196,6 +197,7 @@ struct server_slot {
 
     // state
     slot_state state = SLOT_STATE_IDLE;
+    slot_state state_before_pause = SLOT_STATE_IDLE;
 
     server_prompt prompt;
 
@@ -301,6 +303,7 @@ struct server_slot {
 
         task_prev = std::move(task);
         task.reset();
+        state_before_pause = SLOT_STATE_IDLE;
 
         llama_set_sampler(ctx_tgt, id, nullptr);
 
@@ -639,6 +642,7 @@ struct server_slot {
             {"n_ctx",         n_ctx},
             {"speculative",   can_speculate()},
             {"is_processing", is_processing()},
+            {"is_paused",     state == SLOT_STATE_PAUSED},
         };
 
         const auto & ptask = task ? task : task_prev;
@@ -2427,6 +2431,42 @@ private:
                     res->n_erased = n_erased;
                     queue_results.send(std::move(res));
                 } break;
+            case SERVER_TASK_TYPE_SLOT_PAUSE:
+            case SERVER_TASK_TYPE_SLOT_RESUME:
+                {
+                    const int id_slot = task.slot_action.id_slot;
+                    server_slot * slot = get_slot_by_id(id_slot);
+                    if (slot == nullptr) {
+                        send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
+
+                    const bool pause = task.type == SERVER_TASK_TYPE_SLOT_PAUSE;
+                    if (pause) {
+                        if (!slot->is_processing()) {
+                            send_error(task, "Slot is idle", ERROR_TYPE_INVALID_REQUEST);
+                            break;
+                        }
+                        if (slot->state == SLOT_STATE_PAUSED) {
+                            send_error(task, "Slot is already paused", ERROR_TYPE_INVALID_REQUEST);
+                            break;
+                        }
+                        slot->state_before_pause = slot->state;
+                        slot->state = SLOT_STATE_PAUSED;
+                    } else {
+                        if (slot->state != SLOT_STATE_PAUSED) {
+                            send_error(task, "Slot is not paused", ERROR_TYPE_INVALID_REQUEST);
+                            break;
+                        }
+                        slot->state = slot->state_before_pause;
+                    }
+
+                    auto res = std::make_unique<server_task_result_slot_state>();
+                    res->id = task.id;
+                    res->id_slot = id_slot;
+                    res->paused = pause;
+                    queue_results.send(std::move(res));
+                } break;
             case SERVER_TASK_TYPE_GET_LORA:
                 {
                     // TODO @ngxson : make lora_adapters a dedicated member of server_context
@@ -2571,9 +2611,29 @@ private:
         std::vector<server_slot *> generating;
         std::vector<server_slot *> drafting;
 
+        // HMM uses one-slot-at-a-time decode.  If a higher-priority request is
+        // waiting, do not submit lower-priority slots to the next NPU decode.
+        // Slot state (KV/recurrent/sampler) remains in place; this is a
+        // cross-slot scheduling pause, not a context snapshot.
+        int32_t selected_hmm_priority = INT32_MAX;
+        if (is_hmm) {
+            for (auto & slot : slots) {
+                if (slot.is_processing() && slot.state != SLOT_STATE_WAIT_OTHER && slot.task &&
+                    slot.task->params.priority < selected_hmm_priority) {
+                    selected_hmm_priority = std::min(selected_hmm_priority, slot.task->params.priority);
+                }
+            }
+        }
+
         // determine which slots are generating and drafting
         for (auto & slot : slots) {
             if (slot.state != SLOT_STATE_GENERATING) {
+                continue;
+            }
+
+            if (is_hmm && slot.task->params.priority != selected_hmm_priority) {
+                SLT_DBG(slot, "paused by higher-priority HMM slot/task (slot_prio=%d, selected_prio=%d)\n",
+                        slot.task->params.priority, selected_hmm_priority);
                 continue;
             }
 
@@ -2702,6 +2762,10 @@ private:
         if (params_base.cont_batching || batch.n_tokens == 0) {
             for (auto & slot : slots) {
                 if (!slot.is_processing()) {
+                    continue;
+                }
+
+                if (is_hmm && slot.task->params.priority != selected_hmm_priority) {
                     continue;
                 }
 
@@ -4241,7 +4305,8 @@ void server_routes::init_routes() {
 
     this->post_slots = [this](const server_http_req & req) {
         auto res = create_response();
-        if (params.slot_save_path.empty()) {
+        std::string action = req.get_param("action");
+        if (params.slot_save_path.empty() && action != "pause" && action != "resume") {
             res->error(format_error_response("This server does not support slots action. Start it with `--slot-save-path`", ERROR_TYPE_NOT_SUPPORTED));
             return res;
         }
@@ -4256,8 +4321,6 @@ void server_routes::init_routes() {
             return res;
         }
 
-        std::string action = req.get_param("action");
-
         if (action == "save") {
             return handle_slots_save(req, id_slot);
         }
@@ -4266,6 +4329,12 @@ void server_routes::init_routes() {
         }
         if (action == "erase") {
             return handle_slots_erase(req, id_slot);
+        }
+        if (action == "pause") {
+            return handle_slots_pause(req, id_slot);
+        }
+        if (action == "resume") {
+            return handle_slots_resume(req, id_slot);
         }
 
         res->error(format_error_response("Invalid action", ERROR_TYPE_INVALID_REQUEST));
@@ -4939,6 +5008,46 @@ std::unique_ptr<server_res_generator> server_routes::handle_slots_erase(const se
     }
 
     GGML_ASSERT(dynamic_cast<server_task_result_slot_erase*>(result.get()) != nullptr);
+    res->ok(result->to_json());
+    return res;
+}
+
+std::unique_ptr<server_res_generator> server_routes::handle_slots_pause(const server_http_req & req, int id_slot) {
+    auto res = create_response();
+    auto & rd = res->rd;
+    server_task task(SERVER_TASK_TYPE_SLOT_PAUSE);
+    task.id = rd.get_new_id();
+    task.slot_action.id_slot = id_slot;
+    rd.post_task(std::move(task));
+    auto result = rd.next(req.should_stop);
+    if (!result) {
+        GGML_ASSERT(req.should_stop());
+        return res;
+    }
+    if (result->is_error()) {
+        res->error(result->to_json());
+        return res;
+    }
+    res->ok(result->to_json());
+    return res;
+}
+
+std::unique_ptr<server_res_generator> server_routes::handle_slots_resume(const server_http_req & req, int id_slot) {
+    auto res = create_response();
+    auto & rd = res->rd;
+    server_task task(SERVER_TASK_TYPE_SLOT_RESUME);
+    task.id = rd.get_new_id();
+    task.slot_action.id_slot = id_slot;
+    rd.post_task(std::move(task));
+    auto result = rd.next(req.should_stop);
+    if (!result) {
+        GGML_ASSERT(req.should_stop());
+        return res;
+    }
+    if (result->is_error()) {
+        res->error(result->to_json());
+        return res;
+    }
     res->ok(result->to_json());
     return res;
 }
