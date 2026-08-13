@@ -109,9 +109,17 @@ int HouMoGLMOCRModel::houmo_prefill(std::vector<llama_token> &tokens,
             chunk_history_[seq_id].clear();
         }
 
-        embedding_layer_->get_embedding_batch(
-            tokens, input_embedding_ids_[seq_id].data() +
-                        offset_embedding_ids_[seq_id] * n_embd_);
+        if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+            embedding_layer_->get_embedding_batch_npu(
+                tokens.data(), tokens.size(),
+                input_embedding_ids_[seq_id].data() +
+                    offset_embedding_ids_[seq_id] * n_embd_,
+                0);
+        } else {
+            embedding_layer_->get_embedding_batch(
+                tokens, input_embedding_ids_[seq_id].data() +
+                            offset_embedding_ids_[seq_id] * n_embd_);
+        }
 
         PositionChunk chunk;
         chunk.n_tokens = (int)tokens.size();

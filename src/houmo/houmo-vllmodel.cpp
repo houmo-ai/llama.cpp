@@ -83,9 +83,17 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
     int32_t current_length = 0;
     // 先计算embedding.
     LLAMA_LOG_INFO("%s: empty tokens, skip embedding. seq_id = %d\n", __func__, seq_id);
-    embedding_layer_->get_embedding_batch(
-        tokens, input_embedding_ids_[seq_id].data() +
-                    offset_embedding_ids_[seq_id] * n_embd_);
+    if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+        embedding_layer_->get_embedding_batch_npu(
+            tokens.data(), tokens.size(),
+            input_embedding_ids_[seq_id].data() +
+                offset_embedding_ids_[seq_id] * n_embd_,
+            0);
+    } else {
+        embedding_layer_->get_embedding_batch(
+            tokens, input_embedding_ids_[seq_id].data() +
+                        offset_embedding_ids_[seq_id] * n_embd_);
+    }
 
     offset_embedding_ids_[seq_id] += tokens.size();
     prefill_input_lengths_[seq_id].push_back(tokens.size());

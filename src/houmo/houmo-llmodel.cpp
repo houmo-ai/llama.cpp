@@ -157,6 +157,11 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         enable_lazy_mode_ = (std::string(env) == "1");
     }
     LLAMA_LOG_INFO("LLAMA_ENABLE_LAZY_MODE: %d\n", enable_lazy_mode_);
+    // --embed-npu: 环境变量或 CLI 参数控制
+    {
+        const char *env = std::getenv("LLAMA_ARG_EMBED_NPU");
+        embed_npu_ = (env && std::string(env) == "1");
+    }
     std::vector<std::string> dummy_tensor_names;
     // 防止更高效使用内存，这个将prefill 设置为dummy_tensor_names
     for (int idx = 0; idx < n_blocks_; idx++) {
@@ -178,9 +183,13 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         if (strncmp(name, "quant_embedding.bin",
                     strlen("quant_embedding.bin")) == 0) {
-            if (embedding_layer_ == nullptr)
+            if (embedding_layer_ == nullptr) {
                 embedding_layer_ =
                     std::make_shared<HoumoEmbeddingLayer>(file_name, offset, size);
+                if (embed_npu_) {
+                    embedding_layer_->init_npu();
+                }
+            }
         } else if (std::regex_match(name, kPrefillMtpPattern)) {
             if (!load_mtp_modules) {
                 LLAMA_LOG_INFO("%s: skip prefill_mtp.hmm for target impl\n", __func__);
@@ -785,7 +794,12 @@ int HouMoLLModel::Impl::set_input_for_decode(std::vector<llama_token> &batches,
     }
     auto input_data = decode_input_map_.at(decode_model_->GetInputName(0));
     try {
-        embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
+        if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+            embedding_layer_->get_embedding_batch_npu(
+                input_ids.data(), input_ids.size(), input_data.Data());
+        } else {
+            embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
+        }
     } catch (...) {
         LLAMA_LOG_ERROR("%s: failed to get embedding batch\n", __func__);
         return -1;

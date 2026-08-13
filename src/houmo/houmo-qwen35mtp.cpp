@@ -382,9 +382,15 @@ int HoumoQwen35MTP::run_mtp_prefill(const float *h_in,
 
         // 2. Set embedding input: tokens[cursor..cursor+mtp_valid-1]
         std::vector<uint8_t> embed_src(mtp_valid * embed_row * 2, 0);
-        embedding_layer_->get_embedding_batch(tokens.data() + cursor,
-                                              mtp_valid,
-                                              embed_src.data());
+        if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+            embedding_layer_->get_embedding_batch_npu(
+                tokens.data() + cursor, mtp_valid,
+                embed_src.data(), 0);
+        } else {
+            embedding_layer_->get_embedding_batch(tokens.data() + cursor,
+                                                  mtp_valid,
+                                                  embed_src.data());
+        }
         set_padded_raw16_input(m, ns.input_embedding_in, embed_tensor,
                                embed_src.data(), mtp_valid, embed_row);
 
@@ -563,7 +569,12 @@ int HoumoQwen35MTP::run_mtp_decode(const float *h_in,
 
     // 2. Set embedding input (single row)
     std::vector<uint8_t> embed_src(embed_row * 2, 0);
-    embedding_layer_->get_embedding_batch(tokens.data(), 1, embed_src.data());
+    if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+        embedding_layer_->get_embedding_batch_npu(
+            tokens.data(), 1, embed_src.data(), 0);
+    } else {
+        embedding_layer_->get_embedding_batch(tokens.data(), 1, embed_src.data());
+    }
     set_padded_raw16_input(m, ns.input_embedding_in, embed_tensor,
                            embed_src.data(), 1, embed_row);
 

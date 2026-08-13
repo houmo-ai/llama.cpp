@@ -2,6 +2,15 @@
 #include <fstream>
 #include <cstring>
 #include "llama-impl.h"
+#include "tcim/tcim_runtime.h"
+
+// NpuState: PIMPL 隐藏 tcim 依赖 (仅在 --embed-npu 时创建)
+struct HoumoEmbeddingLayer::NpuState {
+    tcim::Tensor device_emb;       // embedding 权重 [vocab_size, 1, n_embd] fp16 on NPU
+};
+
+// PIMPL 析构: 必须在 NpuState 完整定义之后 (在 .cpp 中)
+HoumoEmbeddingLayer::~HoumoEmbeddingLayer() = default;
 
 HoumoEmbeddingLayer::HoumoEmbeddingLayer(const std::string &weight_path, int64_t offset,
                                int64_t size) {
@@ -48,6 +57,55 @@ void HoumoEmbeddingLayer::get_embedding_batch(const int32_t *token_ids, size_t n
         size_t offset = token_id * n_embd_ * sizeof(int16_t);
         memcpy(out_batch_char + i * n_embd_ * sizeof(int16_t),
                &data_[offset], n_embd_ * sizeof(int16_t));
+    }
+}
+
+// ===== NPU 路径 (--embed-npu) =====
+void HoumoEmbeddingLayer::init_npu(int device_id) {
+    if (npu_ready_) return;  // 已经初始化过了
+
+    // device_id < 0 时从 HOUMO_DEVICE_ID 环境变量读取
+    if (device_id < 0) {
+        device_id = 0;
+        const char *env = std::getenv("HOUMO_DEVICE_ID");
+        if (env) {
+            device_id = std::stoi(env);
+        }
+    }
+
+    size_t elem_count = vocab_size_ * n_embd_;
+    // ① 创建 NPU Device Tensor [vocab_size, 1, n_embd] fp16
+    npu_ = std::make_unique<NpuState>();
+    auto info = tcim::TensorInfo::CreateNDInfo(
+        {static_cast<int>(vocab_size_), 1, static_cast<int>(n_embd_)},
+        tcim::DataType::FLOAT16);
+    npu_->device_emb = tcim::Tensor::CreateDeviceTensor(info, 0, device_id);
+
+    // ② Host → Device: 直接拷贝原始字节
+    size_t n_bytes = elem_count * sizeof(int16_t);
+    npu_->device_emb.Buffer().CopyFromHost(data_.data(), n_bytes);
+
+    npu_ready_ = true;
+    // ③ 释放 CPU 端 data_ 副本 (swap 彻底归还) → 真正省 CPU 内存
+    std::vector<int8_t>().swap(data_);
+    LLAMA_LOG_INFO("%s: NPU embedding ready, device=%d, vocab=%d, dim=%d, %.1f MB, CPU data_ freed\n",
+        __func__, device_id, vocab_size_, n_embd_, n_bytes / 1048576.0);
+}
+
+void HoumoEmbeddingLayer::get_embedding_batch_npu(const int32_t *token_ids, size_t n, void *dst, int offset_rows) {
+    if (!npu_ready_) return;
+
+    const size_t row_bytes = n_embd_ * sizeof(int16_t);
+    uint8_t *host_base = static_cast<uint8_t *>(dst);
+
+    for (size_t i = 0; i < n; ++i) {
+        validate_token_id(token_ids[i]);
+        // SelectROI 从 NPU Device Tensor 中取出一行 embedding
+        auto src = npu_->device_emb.SelectROI(
+            {static_cast<int>(token_ids[i]), 0, 0}, {1, 1, static_cast<int>(n_embd_)});
+        // D2H: 从 NPU Device 拷贝到目标 buffer 对应位置
+        uint8_t *row_dst = host_base + (static_cast<size_t>(offset_rows) + i) * row_bytes;
+        src.Buffer().CopyToHost(row_dst, row_bytes);
     }
 }
 

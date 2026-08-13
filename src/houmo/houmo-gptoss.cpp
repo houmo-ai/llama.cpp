@@ -219,7 +219,12 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         //             prefill_loop_round, valid_length, current_length);
         auto &input_data = prefill_input_map_.at(prefill_model_->GetInputName(0));
         memset(input_data.Data(), 0, input_data.MemSize());
-        embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
+        if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+            embedding_layer_->get_embedding_batch_npu(
+                input_ids.data(), input_ids.size(), input_data.Data(), 0);
+        } else {
+            embedding_layer_->get_embedding_batch(input_ids, input_data.Data());
+        }
 
         auto prefill_valid_length =
             prefill_input_map_.at(prefill_model_->GetInputName(1));

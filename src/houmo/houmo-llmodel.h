@@ -372,6 +372,8 @@ protected:
   int    pre_norm_hidden_dst_rows_ = 0;
   tcim::Module::WeightManager wm_;
 
+  bool embed_npu_ = false;  // --embed-npu 标志
+
   std::map<std::string, tcim::Tensor> prefill_input_map_;
   std::map<std::string, tcim::Tensor> prefill_output_map_;
   std::map<std::string, tcim::Tensor> decode_input_map_;

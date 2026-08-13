@@ -710,8 +710,14 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                     clear_cached_inputs(seq_id);
                     return -1;
                 }
-                embedding_layer_->get_embedding_batch(chunk.tokens.data() + chunk_offset,
-                                                      count, dst);
+                if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+                    embedding_layer_->get_embedding_batch_npu(
+                        chunk.tokens.data() + chunk_offset, count,
+                        dst, 0);
+                } else {
+                    embedding_layer_->get_embedding_batch(chunk.tokens.data() + chunk_offset,
+                                                          count, dst);
+                }
                 std::copy(chunk.tokens.begin() + chunk_offset,
                           chunk.tokens.begin() + chunk_offset + count,
                           pli_round.begin() + static_cast<std::ptrdiff_t>(round_offset));
@@ -998,7 +1004,12 @@ int HouMoGemma4::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
 
     PERF_START(VERIFY_SETINPUT);
     std::memset(input_data.Data(), 0, input_data.MemSize());
-    embedding_layer_->get_embedding_batch(tokens.data(), n_verify, input_data.Data());
+    if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+        embedding_layer_->get_embedding_batch_npu(
+            tokens.data(), n_verify, input_data.Data(), 0);
+    } else {
+        embedding_layer_->get_embedding_batch(tokens.data(), n_verify, input_data.Data());
+    }
     decode_model_->SetInput(decode_model_->GetInputName(0), input_data);
 
     auto valid_tensor = decode_input_map_.at(decode_model_->GetInputName(1));

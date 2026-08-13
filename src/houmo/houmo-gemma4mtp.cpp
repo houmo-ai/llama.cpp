@@ -326,7 +326,12 @@ int HouMoGemma4MTP::houmo_decode_mtp_one(const float *h_in,
     const size_t embed_row_bytes = embed_row * sizeof(ggml_fp16_t);
     const size_t hidden_row_bytes = hidden_row * sizeof(ggml_fp16_t);
     const auto *hidden_src = reinterpret_cast<const uint8_t *>(h_in);
-    embedding_layer_->get_embedding_batch(&token, 1, input_buf.data());
+    if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+        embedding_layer_->get_embedding_batch_npu(
+            &token, 1, input_buf.data(), 0);
+    } else {
+        embedding_layer_->get_embedding_batch(&token, 1, input_buf.data());
+    }
     std::memcpy(input_buf.data() + embed_row_bytes, hidden_src,
                 hidden_row_bytes);
     input_tensor.Buffer().CopyFromHost(input_buf.data(), input_tensor.MemSize());

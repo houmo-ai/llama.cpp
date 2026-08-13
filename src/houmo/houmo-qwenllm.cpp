@@ -156,9 +156,15 @@ int HoumoQwenLLM::houmo_prefill_impl(
                        chunk.embeddings.data() + local_start * n_embd_,
                        take * n_embd_ * sizeof(uint16_t));
             } else {
-                embedding_layer_->get_embedding_batch(
-                    chunk.tokens.data() + local_start, (int) take,
-                    input_ptr + copied * n_embd_);
+                if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+                    embedding_layer_->get_embedding_batch_npu(
+                        chunk.tokens.data() + local_start, (int) take,
+                        input_ptr + copied * n_embd_, 0);
+                } else {
+                    embedding_layer_->get_embedding_batch(
+                        chunk.tokens.data() + local_start, (int) take,
+                        input_ptr + copied * n_embd_);
+                }
             }
             copied += take;
             global_pos += chunk_tokens;
@@ -420,7 +426,12 @@ int HoumoQwenLLM::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     auto input_name = decode_model_->GetInputName(0);
     auto input_data = decode_input_map_.at(input_name);
     try {
-        embedding_layer_->get_embedding_batch(tokens, input_data.Data());
+        if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+            embedding_layer_->get_embedding_batch_npu(
+                tokens.data(), tokens.size(), input_data.Data(), 0);
+        } else {
+            embedding_layer_->get_embedding_batch(tokens, input_data.Data());
+        }
     } catch (...) {
         LLAMA_LOG_ERROR("%s: get_embedding_batch failed\n", __func__);
         return -1;
@@ -563,9 +574,15 @@ int HoumoQwenLLM::houmo_asr_force_align(
         chunk.n_tokens = tokens.size();
         chunk.embeddings.resize(tokens.size() * n_embd_);
         if (!tokens.empty()) {
-            embedding_layer_->get_embedding_batch(
-                tokens.data(), (int) tokens.size(),
-                chunk.embeddings.data());
+            if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+                embedding_layer_->get_embedding_batch_npu(
+                    tokens.data(), (int) tokens.size(),
+                    chunk.embeddings.data(), 0);
+            } else {
+                embedding_layer_->get_embedding_batch(
+                    tokens.data(), (int) tokens.size(),
+                    chunk.embeddings.data());
+            }
         }
         auto &cached_chunks = chunk_history_[seq_id];
         cached_chunks.push_back(std::move(chunk));

@@ -855,8 +855,14 @@ int HoumoQwen35LLM::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                         chunk.tokens.size());
                     return -1;
                 }
-                embedding_layer_->get_embedding_batch(
-                    chunk.tokens.data() + chunk_offset, count, dst);
+                if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+                    embedding_layer_->get_embedding_batch_npu(
+                        chunk.tokens.data() + chunk_offset, count,
+                        input_data.Data(), static_cast<int>(round_offset));
+                } else {
+                    embedding_layer_->get_embedding_batch(
+                        chunk.tokens.data() + chunk_offset, count, dst);
+                }
             }
             copied += count;
         }
@@ -988,8 +994,13 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
         chunk.n_tokens = tokens.size();
         chunk.tokens = tokens;
         chunk.embeddings.resize(tokens.size() * n_embd_);
-        embedding_layer_->get_embedding_batch(
-            tokens.data(), tokens.size(), chunk.embeddings.data());
+        if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+            embedding_layer_->get_embedding_batch_npu(
+                tokens.data(), tokens.size(), chunk.embeddings.data(), 0);
+        } else {
+            embedding_layer_->get_embedding_batch(
+                tokens.data(), tokens.size(), chunk.embeddings.data());
+        }
         chunk_history_[seq_id].push_back(std::move(chunk));
     }
 
@@ -1144,9 +1155,15 @@ int HoumoQwen35LLM::houmo_prefill_vision(std::vector<llama_token> &tokens,
                 std::memcpy(dst, chunk.embeddings.data() + src_elem,
                             copy_bytes);
             } else {
-                embedding_layer_->get_embedding_batch(
-                    chunk.tokens.data() + chunk_token_offset,
-                    copy_tokens, dst);
+                if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+                    embedding_layer_->get_embedding_batch_npu(
+                        chunk.tokens.data() + chunk_token_offset,
+                        copy_tokens, input_data.Data(), static_cast<int>(copied_tokens));
+                } else {
+                    embedding_layer_->get_embedding_batch(
+                        chunk.tokens.data() + chunk_token_offset,
+                        copy_tokens, dst);
+                }
             }
 
             copied_tokens += copy_tokens;
@@ -1487,8 +1504,13 @@ int HoumoQwen35LLM::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     auto input_data = act_iter->second;
     zero_tensor(input_data);
     try {
-        embedding_layer_->get_embedding_batch(tokens.data(), n_verify,
-                                             input_data.Data());
+        if (embed_npu_ && embedding_layer_->is_npu_ready()) {
+            embedding_layer_->get_embedding_batch_npu(
+                tokens.data(), n_verify, input_data.Data(), 0);
+        } else {
+            embedding_layer_->get_embedding_batch(tokens.data(), n_verify,
+                                                 input_data.Data());
+        }
     } catch (...) {
         LLAMA_LOG_ERROR("%s: failed to get verify embedding batch\n", __func__);
         return -1;
