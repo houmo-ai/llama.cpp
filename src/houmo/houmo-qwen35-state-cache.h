@@ -84,6 +84,7 @@ class HoumoQwen35StateCache {
     std::shared_ptr<tcim::Module> state_prefill_model_;
     std::shared_ptr<tcim::Module> state_decode_model_;
     std::vector<std::string> state_cache_names_;
+    std::vector<std::string> state_cache_prefill_output_names_;
     std::vector<std::string> state_cache_output_names_;
     std::vector<std::vector<std::string>> state_cache_split_output_names_;
     int decode_verify_seq_ = 1;

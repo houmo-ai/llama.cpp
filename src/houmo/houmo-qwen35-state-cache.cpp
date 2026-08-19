@@ -70,6 +70,7 @@ void HoumoQwen35StateCache::configure_state_cache(
 
 void HoumoQwen35StateCache::reset_state_cache_metadata() {
     state_cache_names_.clear();
+    state_cache_prefill_output_names_.clear();
     state_cache_output_names_.clear();
     state_cache_split_output_names_.clear();
     checkpoint_tensor_indices_.clear();
@@ -214,13 +215,31 @@ std::vector<std::string> HoumoQwen35StateCache::collect_state_split_outputs(
 
 void HoumoQwen35StateCache::discover_state_cache_bindings(
     const std::vector<std::string> &all_output_names) {
-    auto add_name = [&](const std::string &name, const std::string &output_name,
+    std::vector<std::string> prefill_output_names;
+    if (state_prefill_model_ != nullptr) {
+        prefill_output_names.reserve(state_prefill_model_->GetOutputNum());
+        for (size_t idx = 0; idx < state_prefill_model_->GetOutputNum(); ++idx) {
+            prefill_output_names.push_back(state_prefill_model_->GetOutputName(idx));
+        }
+    }
+
+    size_t prefill_output_count = 0;
+    size_t prefill_in_place_count = 0;
+    auto add_name = [&](const std::string &name,
+                        const std::string &prefill_output_name,
+                        const std::string &output_name,
                         std::vector<std::string> &&split_outputs) {
         auto iter = std::find(state_cache_names_.begin(), state_cache_names_.end(), name);
         if (iter == state_cache_names_.end()) {
             state_cache_names_.push_back(name);
+            state_cache_prefill_output_names_.push_back(prefill_output_name);
             state_cache_output_names_.push_back(output_name);
             state_cache_split_output_names_.push_back(std::move(split_outputs));
+            if (prefill_output_name.empty()) {
+                ++prefill_in_place_count;
+            } else {
+                ++prefill_output_count;
+            }
         }
     };
     for (size_t idx = 0; idx < state_decode_model_->GetInputNum(); ++idx) {
@@ -230,6 +249,18 @@ void HoumoQwen35StateCache::discover_state_cache_bindings(
         }
 
         const std::string output_name = make_state_output_name(input_name);
+        const bool has_prefill_output =
+            std::find(prefill_output_names.begin(), prefill_output_names.end(),
+                      output_name) != prefill_output_names.end();
+        if (!has_prefill_output) {
+            // Some compiled Qwen hybrid prefill graphs update recurrent state
+            // through the device input in-place and do not expose a matching
+            // output. Keep the output name empty so prefill only binds input.
+            LLAMA_LOG_DEBUG(
+                "%s: prefill output '%s' is absent for state input '%s'; "
+                "using in-place state update\n",
+                __func__, output_name.c_str(), input_name.c_str());
+        }
         // 优先看 bare 名是否真的存在于 decode 输出里 (普通 1-token decode);
         // 否则按 verify 形态尝试 <bare>_<pos> 收集 split 输出。
         std::vector<std::string> split_outs;
@@ -239,8 +270,13 @@ void HoumoQwen35StateCache::discover_state_cache_bindings(
         if (!has_bare) {
             split_outs = collect_state_split_outputs(all_output_names, output_name);
         }
-        add_name(input_name, output_name, std::move(split_outs));
+        add_name(input_name, has_prefill_output ? output_name : "", output_name,
+                 std::move(split_outs));
     }
+
+    LLAMA_LOG_INFO(
+        "%s: prefill state cache outputs bound=%zu, in_place=%zu\n",
+        __func__, prefill_output_count, prefill_in_place_count);
 }
 
 void HoumoQwen35StateCache::init_checkpoint_tensor_indices() {
@@ -352,13 +388,15 @@ void HoumoQwen35StateCache::set_state_cache_for_prefill(int seq_id) {
         restore_zero_state(seq_id);
         state_cache_initialized_[seq_id] = true;
     }
-    // Set inputs/outputs for the model - tensors are already in place
+    // Bind every state input as before, but only bind a prefill output when the
+    // compiled graph actually exposes it. Newer graphs update recurrent state
+    // in-place and omit recurrent_state_out_* from their output interface.
     for (size_t idx = 0; idx < tensors.size(); ++idx) {
         state_prefill_model_->SetDevInput(state_cache_names_[idx], tensors[idx]);
-        if (idx < state_cache_output_names_.size() &&
-            !state_cache_output_names_[idx].empty()) {
-            state_prefill_model_->SetDevOutput(state_cache_output_names_[idx],
-                                         tensors[idx]);
+        if (idx < state_cache_prefill_output_names_.size() &&
+            !state_cache_prefill_output_names_[idx].empty()) {
+            state_prefill_model_->SetDevOutput(
+                state_cache_prefill_output_names_[idx], tensors[idx]);
         }
     }
 }
@@ -624,4 +662,3 @@ bool HoumoQwen35StateCache::trim_snapshot_to_kv_offset(
     }
     return true;
 }
-
