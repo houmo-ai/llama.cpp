@@ -3,6 +3,7 @@
 #include "arg.h"
 #include "build-info.h"
 #include "server-common.h"
+#include "postmo-device-arbiter.h"
 
 #include <atomic>
 #include <ctime>
@@ -59,6 +60,12 @@ server_http_context::handler_t * route_handler(server_routes & routes, const ser
         if (path == "/models" || path == "/v1/models") return &routes.get_models;
         if (path == "/lora-adapters") return &routes.get_lora_adapters;
         if (path == "/slots")         return &routes.get_slots;
+        const std::string checkpoint_suffix = "/checkpoints";
+        if (path.rfind("/slots/", 0) == 0 &&
+            path.size() >= checkpoint_suffix.size() &&
+            path.compare(path.size() - checkpoint_suffix.size(), checkpoint_suffix.size(), checkpoint_suffix) == 0) {
+            return &routes.get_slot_checkpoints;
+        }
         return nullptr;
     }
     if (path == "/props") return &routes.post_props;
@@ -92,8 +99,12 @@ struct threaded_models::instance {
     std::atomic<bool> ready { false };
     std::string error;
 
-    explicit instance(const server_model_meta & source)
-        : params(params_from_meta(source)), routes(params, context), meta(source) {}
+    instance(
+            const server_model_meta & source,
+            const std::shared_ptr<postmo::device_arbiter> & arbiter)
+        : params(params_from_meta(source)), routes(params, context), meta(source) {
+        context.set_device_arbiter(arbiter);
+    }
 
     ~instance() {
         context.terminate();
@@ -104,7 +115,9 @@ struct threaded_models::instance {
 };
 
 threaded_models::threaded_models(const common_params & params, int argc, char ** argv)
-    : base_params(params), catalog(params, argc, argv, true) {
+    : base_params(params),
+      catalog(params, argc, argv, true),
+      device_arbiter(std::make_shared<postmo::device_arbiter>()) {
     for (const auto & meta : catalog.get_all_meta()) {
         std::string value;
         if (meta.preset.get_option(COMMON_ARG_PRESET_LOAD_ON_STARTUP, value) &&
@@ -130,7 +143,7 @@ std::string threaded_models::resolve_name(const std::string & requested) {
 }
 
 std::shared_ptr<threaded_models::instance> threaded_models::start_instance(const server_model_meta & meta) {
-    auto inst = std::make_shared<instance>(meta);
+    auto inst = std::make_shared<instance>(meta, device_arbiter);
     inst->meta.status = SERVER_MODEL_STATUS_LOADING;
     bool owns_load = false;
     {
@@ -156,6 +169,39 @@ std::shared_ptr<threaded_models::instance> threaded_models::start_instance(const
         inst->routes.update_meta(inst->context);
         inst->meta.loaded_info = inst->routes.get_model_info();
         inst->loop_thread = std::thread([inst]() { inst->context.start_loop(); });
+        if (!inst->params.slot_checkpoint_preload_session.empty()) {
+            const std::function<bool()> should_stop = []() { return false; };
+            const std::string id_slot = std::to_string(inst->params.slot_checkpoint_preload_slot);
+            server_http_req preload_req {
+                {
+                    {"action", "checkpoint_restore"},
+                    {"id_slot", id_slot},
+                },
+                {},
+                "/slots/" + id_slot,
+                "action=checkpoint_restore",
+                safe_json_to_str({
+                    {"model", meta.name},
+                    {"session_id", inst->params.slot_checkpoint_preload_session},
+                    {"name", inst->params.slot_checkpoint_preload_name},
+                }),
+                {},
+                should_stop,
+            };
+            auto preload_res = inst->routes.post_slots(preload_req);
+            if (!preload_res || preload_res->status >= 400) {
+                throw std::runtime_error(
+                    "failed to preload named checkpoint: " +
+                    (preload_res ? preload_res->data : std::string("empty response")));
+            }
+            SRV_INF("threaded model %s: restored checkpoint %s for session %s into slot %d\n",
+                    meta.name.c_str(),
+                    inst->params.slot_checkpoint_preload_name.c_str(),
+                    inst->params.slot_checkpoint_preload_session.c_str(),
+                    inst->params.slot_checkpoint_preload_slot);
+        } else if (!inst->routes.warmup_system_prompt(inst->params.server_warmup_system_prompt)) {
+            throw std::runtime_error("failed to warm up system prompt");
+        }
         {
             std::lock_guard<std::mutex> lock(mutex);
             inst->meta.status = SERVER_MODEL_STATUS_LOADED;
@@ -287,6 +333,7 @@ server_http_res_ptr threaded_models::get_props(const server_http_req & req) {
     if (!ui_config.empty()) {
         ui_settings = json::parse(ui_config);
     }
+    const auto arbiter_stats = device_arbiter->stats();
     response_ok(res, {
         // The Web UI intentionally performs an exact role comparison. Keep the
         // standard router role while exposing the implementation separately.
@@ -294,6 +341,13 @@ server_http_res_ptr threaded_models::get_props(const server_http_req & req) {
         {"router_implementation", "threaded"},
         {"max_instances", base_params.models_max},
         {"models_autoload", base_params.models_autoload},
+        {"device_arbiter", {
+            {"enabled", true},
+            {"busy", arbiter_stats.busy},
+            {"waiting", arbiter_stats.waiting},
+            {"acquisitions", arbiter_stats.acquisitions},
+            {"wait_ms_total", arbiter_stats.wait_us_total / 1000.0},
+        }},
         {"model_alias", "llama-threaded-server"},
         {"model_path", "none"},
         {"default_generation_settings", {

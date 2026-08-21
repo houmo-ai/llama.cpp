@@ -8,6 +8,10 @@
 #include <memory>
 #include <mutex>
 
+namespace postmo {
+class device_arbiter;
+}
+
 struct threaded_models {
     explicit threaded_models(const common_params & params, int argc, char ** argv);
     ~threaded_models();
@@ -28,6 +32,7 @@ private:
     std::mutex mutex;
     std::condition_variable cv;
     std::map<std::string, std::shared_ptr<instance>> instances;
+    std::shared_ptr<postmo::device_arbiter> device_arbiter;
 
     std::string resolve_name(const std::string & requested);
     std::shared_ptr<instance> ensure_ready(const std::string & name, bool autoload);

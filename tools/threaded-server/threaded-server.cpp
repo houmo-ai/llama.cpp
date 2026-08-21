@@ -80,6 +80,7 @@ int main(int argc, char ** argv) {
     http.get("/v1/models", safe_handler([&models](const server_http_req & req) { return models.get_models(req); }));
     http.get("/lora-adapters", safe_handler(proxy_get));
     http.get("/slots", safe_handler(proxy_get));
+    http.get("/slots/:id_slot/checkpoints", safe_handler(proxy_get));
 
     http.post("/models/load", safe_handler([&models](const server_http_req & req) { return models.load_model(req); }));
     http.post("/models/unload", safe_handler([&models](const server_http_req & req) { return models.unload_model(req); }));

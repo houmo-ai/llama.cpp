@@ -647,6 +647,12 @@ struct common_params {
     bool log_json = false;
 
     std::string slot_save_path;
+    int32_t slot_checkpoint_max_count = 0;
+    int32_t slot_checkpoint_every_nt = 0;
+    std::string slot_checkpoint_triggers = "explicit";
+    std::string slot_checkpoint_preload_session;
+    std::string slot_checkpoint_preload_name = "system_prompt_end";
+    int32_t slot_checkpoint_preload_slot = 0;
     std::string media_path; // path to directory for loading media files
 
     float slot_prompt_similarity = 0.1f;

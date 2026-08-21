@@ -3111,6 +3111,57 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--slot-checkpoint-max-count"}, "N",
+        string_format("maximum named business checkpoints per session (default: %d, 0 = disabled)", params.slot_checkpoint_max_count),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("slot checkpoint max count must be >= 0");
+            }
+            params.slot_checkpoint_max_count = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SLOT_CHECKPOINT_MAX_COUNT"));
+    add_opt(common_arg(
+        {"--slot-checkpoint-every-n-tokens"}, "N",
+        string_format("reserved token interval for automatic named checkpoints (default: %d, currently must be 0)", params.slot_checkpoint_every_nt),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("slot checkpoint interval must be >= 0");
+            }
+            params.slot_checkpoint_every_nt = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SLOT_CHECKPOINT_EVERY_NT"));
+    add_opt(common_arg(
+        {"--slot-checkpoint-triggers"}, "LIST",
+        "named checkpoint triggers (currently supported: explicit)",
+        [](common_params & params, const std::string & value) {
+            params.slot_checkpoint_triggers = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SLOT_CHECKPOINT_TRIGGERS"));
+    add_opt(common_arg(
+        {"--slot-checkpoint-preload-session"}, "ID",
+        "named checkpoint session to restore after model loading (default: disabled)",
+        [](common_params & params, const std::string & value) {
+            params.slot_checkpoint_preload_session = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SLOT_CHECKPOINT_PRELOAD_SESSION"));
+    add_opt(common_arg(
+        {"--slot-checkpoint-preload-name"}, "NAME",
+        "named checkpoint to restore after model loading (default: system_prompt_end)",
+        [](common_params & params, const std::string & value) {
+            params.slot_checkpoint_preload_name = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SLOT_CHECKPOINT_PRELOAD_NAME"));
+    add_opt(common_arg(
+        {"--slot-checkpoint-preload-slot"}, "N",
+        string_format("slot receiving the startup checkpoint (default: %d)", params.slot_checkpoint_preload_slot),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("slot checkpoint preload slot must be >= 0");
+            }
+            params.slot_checkpoint_preload_slot = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SLOT_CHECKPOINT_PRELOAD_SLOT"));
+    add_opt(common_arg(
         {"--media-path"}, "PATH",
         "directory for loading local media files; files can be accessed via file:// URLs using relative paths (default: disabled)",
         [](common_params & params, const std::string & value) {

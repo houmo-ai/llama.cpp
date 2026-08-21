@@ -13,6 +13,8 @@
 #include "server-http.h"
 #include "server-task.h"
 #include "server-queue.h"
+#include "postmo-checkpoint-store.h"
+#include "postmo-device-arbiter.h"
 
 #include "build-info.h"
 #include "arg.h"
@@ -40,6 +42,41 @@
 using json = nlohmann::ordered_json;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+
+static postmo::checkpoint_scope checkpoint_scope_from_meta(
+        const server_context_meta & meta,
+        const common_params & params) {
+    return {
+        meta.model_name,
+        meta.model_path,
+        meta.model_desc,
+        meta.model_size,
+        meta.slot_n_ctx,
+        meta.has_mtmd,
+        params.mmproj.path,
+        meta.vision_width,
+        meta.vision_height,
+    };
+}
+
+static json checkpoint_record_to_json(const postmo::checkpoint_record & record) {
+    return {
+        {"format_version", record.format_version},
+        {"name", record.checkpoint_name},
+        {"session_id", record.session_id},
+        {"model", record.model_name},
+        {"model_fingerprint", record.model_fingerprint},
+        {"context_length", record.context_length},
+        {"id_slot", record.id_slot},
+        {"token_count", record.token_count},
+        {"state_size", record.state_size},
+        {"checksum", record.state_checksum},
+        {"created_at", record.created_at},
+        {"updated_at", record.updated_at},
+        {"valid", record.valid},
+        {"error", record.error},
+    };
+}
 
 static std::vector<int32_t> fix_asr_force_align_timestamps(const std::vector<int32_t> & data) {
     std::vector<int32_t> res = data;
@@ -796,6 +833,8 @@ private:
     // use server_context methods instead
 
     common_params params_base;
+
+    std::shared_ptr<postmo::device_arbiter> device_arbiter;
 
     // note: keep these alive - they determine the lifetime of the model, context, etc.
     common_init_result_ptr llama_init;
@@ -3138,6 +3177,10 @@ private:
                         // process the image
                         size_t n_tokens_out = 0;
                         const int64_t t_image_start = ggml_time_us();
+                        postmo::device_arbiter::permit device_permit;
+                        if (device_arbiter) {
+                            device_permit = device_arbiter->acquire(slot.task->params.priority);
+                        }
                         int32_t res = input_tokens.process_chunk(ctx_tgt, mctx, slot.prompt.n_tokens(), is_hmm ? slot.prompt.tokens.idx_next() : slot.prompt.tokens.pos_next(), slot.id, n_tokens_out);
                         const int64_t t_image_end = ggml_time_us();
                         if (res != 0) {
@@ -3156,6 +3199,7 @@ private:
                                 GGML_ABORT("failed to process multi-modal data on draft context\n");
                             }
                         }
+                        device_permit = {};
 
                         slot.n_prompt_tokens_processed += n_tokens_out;
                         slot.n_image_tokens += n_tokens_out;
@@ -3345,6 +3389,29 @@ private:
                 batch.logits   + i,
             };
 
+            int32_t batch_priority = 100;
+            bool has_task_priority = false;
+            for (int32_t token_index = 0; token_index < batch_view.n_tokens; ++token_index) {
+                for (int32_t seq_index = 0; seq_index < batch_view.n_seq_id[token_index]; ++seq_index) {
+                    const auto id_slot = batch_view.seq_id[token_index][seq_index];
+                    const auto * slot = get_slot_by_id(id_slot);
+                    if (slot != nullptr && slot->task) {
+                        batch_priority = has_task_priority
+                            ? std::min(batch_priority, slot->task->params.priority)
+                            : slot->task->params.priority;
+                        has_task_priority = true;
+                    }
+                }
+            }
+
+            postmo::device_arbiter::permit device_permit;
+            if (device_arbiter) {
+                device_permit = device_arbiter->acquire(batch_priority);
+                if (device_permit.wait_us() >= 1000) {
+                    SRV_DBG("PostMo device permit acquired, priority = %d, wait = %.3f ms\n",
+                            batch_priority, device_permit.wait_us() / 1000.0);
+                }
+            }
             const int ret = llama_decode(ctx_tgt, batch_view);
 
             metrics.on_decoded(slots);
@@ -3449,6 +3516,7 @@ private:
                 // TODO: handle error
                 break;
             }
+            device_permit = {};
 
             // move the head of the batch forward with the number of tokens we just processed
             i_next = i + n_tokens;
@@ -4143,9 +4211,21 @@ server_routes::server_routes(const common_params & params, server_context & ctx_
         : params(params),
           ctx_server(*ctx_server.impl),
           queue_tasks(ctx_server.impl->queue_tasks),
-          queue_results(ctx_server.impl->queue_results) {
+          queue_results(ctx_server.impl->queue_results),
+          checkpoint_store(std::make_unique<postmo::checkpoint_store>(
+              params.slot_save_path,
+              postmo::checkpoint_policy::parse(
+                  params.slot_checkpoint_max_count,
+                  params.slot_checkpoint_every_nt,
+                  params.slot_checkpoint_triggers))) {
     init_routes();
 }
+
+void server_context::set_device_arbiter(std::shared_ptr<postmo::device_arbiter> arbiter) {
+    impl->device_arbiter = std::move(arbiter);
+}
+
+server_routes::~server_routes() = default;
 
 void server_routes::init_routes() {
     // IMPORTANT: all lambda functions must start with create_response()
@@ -4312,6 +4392,48 @@ void server_routes::init_routes() {
         return res;
     };
 
+    this->get_slot_checkpoints = [this](const server_http_req & req) {
+        auto res = create_response(true);
+        if (!checkpoint_store->enabled()) {
+            res->error(format_error_response(
+                "Named slot checkpoints are disabled. Set --slot-checkpoint-max-count and --slot-save-path",
+                ERROR_TYPE_NOT_SUPPORTED));
+            return res;
+        }
+        if (!meta) {
+            res->error(format_error_response("Model metadata is unavailable", ERROR_TYPE_SERVER));
+            return res;
+        }
+
+        int id_slot = -1;
+        try {
+            id_slot = std::stoi(req.get_param("id_slot"));
+        } catch (const std::exception &) {
+            res->error(format_error_response("Invalid slot ID", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        const std::string session_id = req.get_param("session_id");
+        try {
+            const auto records = checkpoint_store->list(
+                checkpoint_scope_from_meta(*meta, params), session_id);
+            json items = json::array();
+            for (const auto & record : records) {
+                items.push_back(checkpoint_record_to_json(record));
+            }
+            res->ok({
+                {"id_slot", id_slot},
+                {"session_id", session_id},
+                {"max_count", checkpoint_store->policy().max_count},
+                {"data", std::move(items)},
+            });
+        } catch (const std::invalid_argument & error) {
+            res->error(format_error_response(error.what(), ERROR_TYPE_INVALID_REQUEST));
+        } catch (const std::exception & error) {
+            res->error(format_error_response(error.what(), ERROR_TYPE_SERVER));
+        }
+        return res;
+    };
+
     this->post_slots = [this](const server_http_req & req) {
         auto res = create_response();
         std::string action = req.get_param("action");
@@ -4344,6 +4466,12 @@ void server_routes::init_routes() {
         }
         if (action == "resume") {
             return handle_slots_resume(req, id_slot);
+        }
+        if (action == "checkpoint") {
+            return handle_slots_checkpoint(req, id_slot);
+        }
+        if (action == "checkpoint_restore") {
+            return handle_slots_checkpoint_restore(req, id_slot);
         }
 
         res->error(format_error_response("Invalid action", ERROR_TYPE_INVALID_REQUEST));
@@ -4991,6 +5119,136 @@ std::unique_ptr<server_res_generator> server_routes::handle_slots_restore(const 
 
     GGML_ASSERT(dynamic_cast<server_task_result_slot_save_load*>(result.get()) != nullptr);
     res->ok(result->to_json());
+    return res;
+}
+
+std::unique_ptr<server_res_generator> server_routes::handle_slots_checkpoint(
+        const server_http_req & req,
+        int id_slot) {
+    auto res = create_response();
+    if (!checkpoint_store->enabled()) {
+        res->error(format_error_response(
+            "Named slot checkpoints are disabled. Set --slot-checkpoint-max-count and --slot-save-path",
+            ERROR_TYPE_NOT_SUPPORTED));
+        return res;
+    }
+    if (!meta) {
+        res->error(format_error_response("Model metadata is unavailable", ERROR_TYPE_SERVER));
+        return res;
+    }
+
+    postmo::checkpoint_write write;
+    bool prepared = false;
+    try {
+        const json request_data = json::parse(req.body);
+        const std::string session_id = request_data.at("session_id").get<std::string>();
+        const std::string checkpoint_name = request_data.at("name").get<std::string>();
+        const auto scope = checkpoint_scope_from_meta(*meta, params);
+        write = checkpoint_store->prepare(scope, session_id, checkpoint_name);
+        prepared = true;
+
+        auto & rd = res->rd;
+        server_task task(SERVER_TASK_TYPE_SLOT_SAVE);
+        task.id = rd.get_new_id();
+        task.slot_action.id_slot = id_slot;
+        task.slot_action.filename = checkpoint_name;
+        task.slot_action.filepath = write.temporary_state_path;
+        rd.post_task(std::move(task));
+
+        auto result = rd.next(req.should_stop);
+        if (!result) {
+            checkpoint_store->abort(write);
+            GGML_ASSERT(req.should_stop());
+            return res;
+        }
+        if (result->is_error()) {
+            checkpoint_store->abort(write);
+            res->error(result->to_json());
+            return res;
+        }
+
+        auto * save_result = dynamic_cast<server_task_result_slot_save_load *>(result.get());
+        GGML_ASSERT(save_result != nullptr && save_result->is_save);
+        auto record = checkpoint_store->commit(
+            write,
+            scope,
+            id_slot,
+            save_result->n_tokens,
+            save_result->n_bytes);
+        prepared = false;
+        res->ok({
+            {"checkpoint", checkpoint_record_to_json(record)},
+            {"operation", result->to_json()},
+        });
+    } catch (const nlohmann::json::exception & error) {
+        if (prepared) {
+            checkpoint_store->abort(write);
+        }
+        res->error(format_error_response(error.what(), ERROR_TYPE_INVALID_REQUEST));
+    } catch (const std::invalid_argument & error) {
+        if (prepared) {
+            checkpoint_store->abort(write);
+        }
+        res->error(format_error_response(error.what(), ERROR_TYPE_INVALID_REQUEST));
+    } catch (const std::exception & error) {
+        if (prepared) {
+            checkpoint_store->abort(write);
+        }
+        res->error(format_error_response(error.what(), ERROR_TYPE_SERVER));
+    }
+    return res;
+}
+
+std::unique_ptr<server_res_generator> server_routes::handle_slots_checkpoint_restore(
+        const server_http_req & req,
+        int id_slot) {
+    auto res = create_response();
+    if (!checkpoint_store->enabled()) {
+        res->error(format_error_response(
+            "Named slot checkpoints are disabled. Set --slot-checkpoint-max-count and --slot-save-path",
+            ERROR_TYPE_NOT_SUPPORTED));
+        return res;
+    }
+    if (!meta) {
+        res->error(format_error_response("Model metadata is unavailable", ERROR_TYPE_SERVER));
+        return res;
+    }
+
+    try {
+        const json request_data = json::parse(req.body);
+        const std::string session_id = request_data.at("session_id").get<std::string>();
+        const std::string checkpoint_name = request_data.at("name").get<std::string>();
+        const auto record = checkpoint_store->resolve(
+            checkpoint_scope_from_meta(*meta, params), session_id, checkpoint_name);
+
+        auto & rd = res->rd;
+        server_task task(SERVER_TASK_TYPE_SLOT_RESTORE);
+        task.id = rd.get_new_id();
+        task.slot_action.id_slot = id_slot;
+        task.slot_action.filename = checkpoint_name;
+        task.slot_action.filepath = record.state_path;
+        rd.post_task(std::move(task));
+
+        auto result = rd.next(req.should_stop);
+        if (!result) {
+            GGML_ASSERT(req.should_stop());
+            return res;
+        }
+        if (result->is_error()) {
+            res->error(result->to_json());
+            return res;
+        }
+        res->ok({
+            {"checkpoint", checkpoint_record_to_json(record)},
+            {"operation", result->to_json()},
+        });
+    } catch (const nlohmann::json::exception & error) {
+        res->error(format_error_response(error.what(), ERROR_TYPE_INVALID_REQUEST));
+    } catch (const std::invalid_argument & error) {
+        res->error(format_error_response(error.what(), ERROR_TYPE_INVALID_REQUEST));
+    } catch (const std::exception & error) {
+        res->error(format_error_response(error.what(), ERROR_TYPE_SERVER));
+    }
     return res;
 }
 

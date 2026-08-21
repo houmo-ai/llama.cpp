@@ -11,6 +11,12 @@ add_library(${TARGET} STATIC
     server-task.h
     server-queue.cpp
     server-queue.h
+    postmo-device-arbiter.cpp
+    postmo-device-arbiter.h
+    postmo-checkpoint-policy.cpp
+    postmo-checkpoint-policy.h
+    postmo-checkpoint-store.cpp
+    postmo-checkpoint-store.h
     server-common.cpp
     server-common.h
     server-context.cpp
@@ -48,3 +54,12 @@ target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(${TARGET} PRIVATE server-context llama-ui PUBLIC llama-common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
 
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
+if (LLAMA_BUILD_TESTS)
+    add_executable(postmo-test-server-extensions
+        tests/unit/postmo-test-server-extensions.cpp
+    )
+    target_link_libraries(postmo-test-server-extensions PRIVATE server-context)
+    target_compile_features(postmo-test-server-extensions PRIVATE cxx_std_17)
+    add_test(NAME postmo-test-server-extensions COMMAND postmo-test-server-extensions)
+endif()

@@ -72,6 +72,9 @@ class ServerProcess:
     n_predict: int | None = None
     n_prompts: int | None = 0
     slot_save_path: str | None = None
+    slot_checkpoint_max_count: int | None = None
+    slot_checkpoint_every_n_tokens: int | None = None
+    slot_checkpoint_triggers: str | None = None
     id_slot: int | None = None
     cache_prompt: bool | None = None
     n_slots: int | None = None
@@ -208,6 +211,12 @@ class ServerProcess:
             server_args.extend(["--n-predict", self.n_predict])
         if self.slot_save_path:
             server_args.extend(["--slot-save-path", self.slot_save_path])
+        if self.slot_checkpoint_max_count is not None:
+            server_args.extend(["--slot-checkpoint-max-count", self.slot_checkpoint_max_count])
+        if self.slot_checkpoint_every_n_tokens is not None:
+            server_args.extend(["--slot-checkpoint-every-n-tokens", self.slot_checkpoint_every_n_tokens])
+        if self.slot_checkpoint_triggers:
+            server_args.extend(["--slot-checkpoint-triggers", self.slot_checkpoint_triggers])
         if self.n_ga:
             server_args.extend(["--grp-attn-n", self.n_ga])
         if self.n_ga_w:

@@ -162,3 +162,7 @@ AGENTS.local.md
 .pi/SYSTEM.md
 
 third_party/houmo
+vendor/boringssl
+artifacts
+*.patch
+.codex

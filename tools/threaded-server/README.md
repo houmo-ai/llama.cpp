@@ -20,3 +20,6 @@ cmake --build build --target llama-threaded-server -j
 This executable is router-only. Use `--models-dir` or `--models-preset`; direct
 single-model `-m` mode remains provided by `llama-server`.
 
+An editable preset is available at:
+
+`tools/threaded-server/postmo-models-preset.example.ini`
