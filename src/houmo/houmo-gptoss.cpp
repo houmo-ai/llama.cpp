@@ -2,9 +2,24 @@
 #include "ggml.h"
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
 #include "llama-impl.h"
 static constexpr int ALIGN_NUM = 16; // 对齐值
 static constexpr uint16_t F16_NEG_INF_UINT = 0xFBFF; // torch.finfo(torch.float16).min == -65504
+
+namespace {
+constexpr uint32_t GPTOSS_STATE_VERSION = 1;
+
+template <typename T>
+void write_value(llama_io_write_i &io, const T &value) {
+    io.write(&value, sizeof(value));
+}
+
+template <typename T>
+void read_value(llama_io_read_i &io, T &value) {
+    io.read(&value, sizeof(value));
+}
+} // namespace
 // 辅助函数：内存对齐
 inline int aligned(int size, int align) {
     return ((size + align - 1) / align) * align;
@@ -126,6 +141,184 @@ void HouMoGPTOSS::update_device_kv_range(int seq_id, int64_t abs_end) {
 void HouMoGPTOSS::clear_device_kv_range(int seq_id) {
     device_kv_abs_start_.erase(seq_id);
     device_kv_abs_end_.erase(seq_id);
+}
+
+void HouMoGPTOSS::state_write(llama_io_write_i &io, int seq_id,
+                              llama_state_seq_flags flags) const {
+    if ((flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) != 0) {
+        throw std::runtime_error("GPT-OSS Houmo state does not support ON_DEVICE");
+    }
+    if ((flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) != 0) {
+        throw std::runtime_error("GPT-OSS partial Houmo state is not implemented yet");
+    }
+
+    auto kv_it = kv_cache_.find(seq_id);
+    if (kv_it == kv_cache_.end()) {
+        throw std::runtime_error("GPT-OSS sequence KV cache not found");
+    }
+
+    const uint32_t version = GPTOSS_STATE_VERSION;
+    const int32_t position = memory_->seq_pos_min(seq_id);
+    const int32_t decode_valid = decode_valid_length_.count(seq_id)
+                                     ? decode_valid_length_.at(seq_id)
+                                     : position;
+    const int64_t range_start = device_kv_abs_start_.count(seq_id)
+                                    ? device_kv_abs_start_.at(seq_id)
+                                    : 0;
+    const int64_t range_end = device_kv_abs_end_.count(seq_id)
+                                  ? device_kv_abs_end_.at(seq_id)
+                                  : 0;
+    const auto history_it = input_history_.find(seq_id);
+    const uint64_t history_size = history_it == input_history_.end()
+                                      ? 0
+                                      : history_it->second.size();
+
+    write_value(io, version);
+    write_value(io, position);
+    write_value(io, decode_valid);
+    write_value(io, range_start);
+    write_value(io, range_end);
+    write_value(io, history_size);
+    if (history_size > 0) {
+        io.write(history_it->second.data(), history_size * sizeof(llama_token));
+    }
+
+    const auto &item = kv_it->second;
+    if (item.names.size() != item.tensors.size()) {
+        throw std::runtime_error("GPT-OSS KV tensor metadata mismatch");
+    }
+    const uint32_t tensor_count = static_cast<uint32_t>(item.tensors.size());
+    write_value(io, tensor_count);
+    for (size_t i = 0; i < item.tensors.size(); ++i) {
+        io.write_string(item.names[i]);
+        const auto &info = item.tensors[i].Info();
+        const auto &shape = info.Shape();
+        const auto &stride = info.Stride();
+        const uint32_t rank = static_cast<uint32_t>(shape.size());
+        const uint32_t stride_count = static_cast<uint32_t>(stride.size());
+        const int32_t dtype = static_cast<int32_t>(info.DataType());
+        const uint64_t byte_size = item.tensors[i].MemSize();
+        write_value(io, rank);
+        if (rank > 0) {
+            io.write(shape.data(), rank * sizeof(shape[0]));
+        }
+        write_value(io, stride_count);
+        if (stride_count > 0) {
+            io.write(stride.data(), stride_count * sizeof(stride[0]));
+        }
+        write_value(io, dtype);
+        write_value(io, byte_size);
+
+        auto host = item.tensors[i].ToHost(false);
+        if (host.GetInitStatus() != tcim::Status::OK || host.MemSize() != byte_size) {
+            throw std::runtime_error("failed to copy GPT-OSS KV tensor to host");
+        }
+        io.write(host.Data(), byte_size);
+    }
+}
+
+void HouMoGPTOSS::state_read(llama_io_read_i &io, int seq_id,
+                             llama_state_seq_flags flags) {
+    if ((flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) != 0) {
+        throw std::runtime_error("GPT-OSS Houmo state does not support ON_DEVICE");
+    }
+    if ((flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) != 0) {
+        throw std::runtime_error("GPT-OSS partial Houmo state is not implemented yet");
+    }
+
+    uint32_t version = 0;
+    int32_t position = 0;
+    int32_t decode_valid = 0;
+    int64_t range_start = 0;
+    int64_t range_end = 0;
+    uint64_t history_size = 0;
+    read_value(io, version);
+    if (version != GPTOSS_STATE_VERSION) {
+        throw std::runtime_error("unsupported GPT-OSS state version");
+    }
+    read_value(io, position);
+    read_value(io, decode_valid);
+    read_value(io, range_start);
+    read_value(io, range_end);
+    read_value(io, history_size);
+    if (position < 0 || decode_valid != position || history_size != static_cast<uint64_t>(position)) {
+        throw std::runtime_error("invalid GPT-OSS state position metadata");
+    }
+    std::vector<llama_token> history(history_size);
+    if (history_size > 0) {
+        io.read(history.data(), history_size * sizeof(llama_token));
+    }
+
+    auto kv_it = kv_cache_.find(seq_id);
+    if (kv_it == kv_cache_.end()) {
+        throw std::runtime_error("GPT-OSS destination KV cache not found");
+    }
+    auto &item = kv_it->second;
+    uint32_t tensor_count = 0;
+    read_value(io, tensor_count);
+    if (tensor_count != item.tensors.size() || item.names.size() != item.tensors.size()) {
+        throw std::runtime_error("GPT-OSS KV tensor count mismatch");
+    }
+
+    struct pending_tensor {
+        tcim::Tensor host;
+        size_t index;
+    };
+    std::vector<pending_tensor> pending;
+    pending.reserve(tensor_count);
+    for (uint32_t i = 0; i < tensor_count; ++i) {
+        std::string name;
+        io.read_string(name);
+        uint32_t rank = 0;
+        uint32_t stride_count = 0;
+        int32_t dtype = 0;
+        uint64_t byte_size = 0;
+        read_value(io, rank);
+        std::vector<int64_t> shape(rank);
+        if (rank > 0) {
+            io.read(shape.data(), rank * sizeof(shape[0]));
+        }
+        read_value(io, stride_count);
+        std::vector<int64_t> stride(stride_count);
+        if (stride_count > 0) {
+            io.read(stride.data(), stride_count * sizeof(stride[0]));
+        }
+        read_value(io, dtype);
+        read_value(io, byte_size);
+
+        const auto &dst = item.tensors[i];
+        const auto &info = dst.Info();
+        if (name != item.names[i] || shape != info.Shape() ||
+            stride != info.Stride() || dtype != static_cast<int32_t>(info.DataType()) ||
+            byte_size != dst.MemSize()) {
+            throw std::runtime_error("GPT-OSS KV tensor schema mismatch");
+        }
+        auto host = tcim::Tensor::CreateHostTensor(info, byte_size);
+        if (host.GetInitStatus() != tcim::Status::OK) {
+            throw std::runtime_error("failed to allocate GPT-OSS host restore tensor");
+        }
+        io.read(host.Data(), byte_size);
+        pending.push_back({std::move(host), i});
+    }
+
+    for (auto &entry : pending) {
+        if (entry.host.CopyTo(item.tensors[entry.index]) != tcim::Status::OK) {
+            clear_device_kv_range(seq_id);
+            kv_reuse_cache_.clear_seq(seq_id);
+            throw std::runtime_error("failed to restore GPT-OSS KV tensor");
+        }
+    }
+
+    input_history_[seq_id] = std::move(history);
+    decode_valid_length_[seq_id] = decode_valid;
+    device_kv_abs_start_[seq_id] = range_start;
+    device_kv_abs_end_[seq_id] = range_end;
+    kv_reuse_cache_.clear_seq(seq_id);
+}
+
+int HouMoGPTOSS::state_position(int seq_id) const {
+    auto it = decode_valid_length_.find(seq_id);
+    return it == decode_valid_length_.end() ? -1 : it->second;
 }
 
 int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,

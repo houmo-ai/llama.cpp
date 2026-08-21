@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -11,7 +12,9 @@
 #include "houmo-embedding_layer.h"
 #include "houmo-memory.h"
 #include "llama-model-loader.h"
+#include "llama-io.h"
 #include "ggml.h"
+#include "houmo-weight-manager-pool.h"
 // houmo llm model defination
 //
 // @guoxing.xu 2025-05-23
@@ -29,7 +32,7 @@ class HouMoLLModel {
     bool houmo_load(llama_model_loader & ml, std::vector<int> device_ids);
     // is_mtp: true → 本 ctx 是 MTP 草稿 context (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP)，
     //         false → target context。由上层 llama_context::houmo_init 根据 cparams.ctx_type 传入。
-    void houmo_init(houmo_memory_i *memory, int seq_max = 8,
+    bool houmo_init(houmo_memory_i *memory, int seq_max = 8,
           ggml_abort_callback abort_callback = nullptr,
           void *abort_callback_data = nullptr,
           bool is_mtp = false);
@@ -63,6 +66,11 @@ class HouMoLLModel {
     int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
                      std::vector<float *> &logits_out);
     int houmo_verify_accept(int seq_id, uint16_t n_accepted);
+
+    void state_write(llama_io_write_i & io, llama_seq_id seq_id,
+             llama_state_seq_flags flags, bool is_mtp) const;
+    void state_read(llama_io_read_i & io, llama_seq_id seq_id,
+            llama_state_seq_flags flags, bool is_mtp);
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings);
     bool is_embedding();
@@ -117,13 +125,34 @@ class HouMoLLModel {
     int n_decode_batch();
     int n_prefill_batch();
     uint32_t n_context_length();
+    uint32_t n_context_length(int seq_id) const;
     void lora_init(std::string file_name, void *adapter);
     void lora_set_scale(void *adapter, float scale);
     void lora_clear();
     class Impl;  // Forward declaration of the implementation class
   private:
-    Impl *impl_;     // target/current ctx implementation
-    Impl *impl_mtp_; // MTP implementation for single-GGUF MTP
+    struct SeqRoute {
+        int group_index = -1;
+        int group_id = -1;
+        int local_seq_id = -1;
+        Impl *impl = nullptr;
+    };
+
+    bool route_seq(int global_seq_id, bool is_mtp, SeqRoute &route) const;
+
+    bool target_initialized_ = false;
+    bool mtp_initialized_ = false;
+    int target_seq_max_ = 0;
+    int mtp_seq_max_ = 0;
+    std::vector<Impl *> impls_;
+    std::vector<Impl *> impls_mtp_;
+    std::vector<int> group_ids_;
+    std::vector<int> mtp_group_ids_;
+    std::vector<int> local_seq_max_;
+    std::vector<int> local_seq_max_mtp_;
+    std::vector<std::unique_ptr<houmo_memory_i>> memories_;
+    std::vector<std::unique_ptr<houmo_memory_i>> memories_mtp_;
+    houmo_memory_i * memory_ = nullptr;
 };
 
 struct kv_cache_item {
@@ -214,6 +243,12 @@ public:
   virtual int houmo_verify_accept(int /*seq_id*/, uint16_t /*n_accepted*/) {
     return -1;
   }
+
+  virtual void state_write(llama_io_write_i & io, int local_seq_id,
+                           llama_state_seq_flags flags) const;
+  virtual void state_read(llama_io_read_i & io, int local_seq_id,
+                          llama_state_seq_flags flags);
+  virtual int state_position(int /*local_seq_id*/) const { return -1; }
   virtual bool is_embedding() {
     return false;
   }
@@ -247,6 +282,7 @@ public:
   int n_decode_batch() const { return n_decode_batch_; }
   int n_prefill_batch() const { return n_prefill_batch_; }
   uint32_t n_context_length() const { return context_length_;}
+  bool supports_seq_max(int seq_max, std::string &reason) const;
   void lora_init(std::string file_name, void *adapter);
   void lora_set_scale(void *adapter, float scale);
   void lora_clear();
@@ -256,6 +292,17 @@ public:
   void set_embedding_layer(std::shared_ptr<HoumoEmbeddingLayer> layer) {
       embedding_layer_ = layer;
   }
+  tcim::Module::WeightManager weight_manager() const { return wm_; }
+  void set_weight_manager(const tcim::Module::WeightManager &wm) {
+      wm_ = wm;
+      wm_configured_ = true;
+  }
+  void set_weight_manager_handle(std::shared_ptr<houmo_weight_manager_handle> handle) {
+      wm_handle_ = std::move(handle);
+      wm_ = wm_handle_->manager;
+      wm_configured_ = true;
+  }
+  void set_load_group_id(int group_id) { load_group_id_ = group_id; }
 protected:
   /**
    * @brief Initialize the model input and output.
@@ -347,6 +394,15 @@ protected:
   std::shared_ptr<tcim::Module>
   create_infer_engine(const std::string &file_name, size_t offset, size_t size,
                       std::vector<std::string> dummy_tensor_names = {});
+  void zero_tensor(tcim::Tensor &tensor) const {
+      if (tensor.Device() == tcim::Device::COMPND) {
+          for (const auto &sub_tensor : tcim::CompTensor(tensor).SubTensors()) {
+              sub_tensor.Buffer().MemSet(0);
+          }
+      } else {
+          tensor.Buffer().MemSet(0);
+      }
+  }
 
 protected:
   int prefill_length_ = 256;
@@ -359,6 +415,13 @@ protected:
   int n_decode_batch_ = 1;
   int n_split_count_ = 1;
 
+  // Keep the shared manager handle declared before Module objects so C++
+  // destroys Modules first. This prevents the pool entry from expiring while
+  // TCIM Modules are still releasing their device allocations.
+  tcim::Module::WeightManager wm_;
+  std::shared_ptr<houmo_weight_manager_handle> wm_handle_;
+  bool wm_configured_ = false;
+
   std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_ = nullptr;
   std::shared_ptr<tcim::Module> prefill_model_ = nullptr;
   std::shared_ptr<tcim::Module> decode_model_ = nullptr;
@@ -370,10 +433,7 @@ protected:
   //                      空指针表示本次调用无需写出。
   float *pre_norm_hidden_dst_     = nullptr;
   int    pre_norm_hidden_dst_rows_ = 0;
-  tcim::Module::WeightManager wm_;
-
   bool embed_npu_ = false;  // --embed-npu 标志
-
   std::map<std::string, tcim::Tensor> prefill_input_map_;
   std::map<std::string, tcim::Tensor> prefill_output_map_;
   std::map<std::string, tcim::Tensor> decode_input_map_;
@@ -395,6 +455,7 @@ protected:
   std::vector<int> device_ids_ = {0};
   bool enable_lazy_mode_ = false;
   bool asr_force_aligner_ = false;
+  int load_group_id_ = 0;
   houmo_memory_i *memory_ = nullptr;
   std::map<std::string, lora_item> lora_map;
   tcim::Tensor lora_mask_float_;

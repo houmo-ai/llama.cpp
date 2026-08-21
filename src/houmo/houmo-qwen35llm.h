@@ -11,6 +11,7 @@
  * @brief HoumoQwen35LLM is the derived class for Qwen3.5 HouMo model.
  */
 class HoumoQwen35LLM : public HouMoLLModel::Impl {
+  friend class HoumoQwen35SeqState;
   public:
     HoumoQwen35LLM() = default;
     ~HoumoQwen35LLM() override = default;
@@ -31,6 +32,11 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings) override;
     bool is_embedding() override;
+    void state_write(llama_io_write_i & io, int local_seq_id,
+             llama_state_seq_flags flags) const override;
+    void state_read(llama_io_read_i & io, int local_seq_id,
+            llama_state_seq_flags flags) override;
+    int state_position(int local_seq_id) const override;
 
   protected:
     void resolve_input_names();
@@ -79,6 +85,8 @@ class HoumoQwen35LLM : public HouMoLLModel::Impl {
                                        int32_t valid_length,
                                        bool is_prompt_final_prefill);
     int copy_prefill_logits(float *logits, int32_t current_length);
+    int set_lora_inputs(tcim::Module &model,
+                        std::map<std::string, tcim::Tensor> &input_map);
     bool update_text_prefill_snapshot(
         int seq_id, int32_t effective_kv_offset, int32_t valid_length,
       const std::vector<PrefillChunk> &effective_chunks);

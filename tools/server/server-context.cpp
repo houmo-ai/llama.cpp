@@ -129,6 +129,7 @@ enum slot_state {
     SLOT_STATE_PROCESSING_PROMPT,
     SLOT_STATE_DONE_PROMPT,
     SLOT_STATE_GENERATING,
+    SLOT_STATE_PAUSED,
 };
 
 enum server_state {
@@ -196,6 +197,7 @@ struct server_slot {
 
     // state
     slot_state state = SLOT_STATE_IDLE;
+    slot_state state_before_pause = SLOT_STATE_IDLE;
 
     server_prompt prompt;
 
@@ -301,6 +303,7 @@ struct server_slot {
 
         task_prev = std::move(task);
         task.reset();
+        state_before_pause = SLOT_STATE_IDLE;
 
         llama_set_sampler(ctx_tgt, id, nullptr);
 
@@ -639,6 +642,7 @@ struct server_slot {
             {"n_ctx",         n_ctx},
             {"speculative",   can_speculate()},
             {"is_processing", is_processing()},
+            {"is_paused",     state == SLOT_STATE_PAUSED},
         };
 
         const auto & ptask = task ? task : task_prev;
@@ -968,8 +972,11 @@ private:
                 SRV_ERR("failed to create draft context for '%s'\n", params_dft.model.path.c_str());
                 return false;
             }
+            // Houmo currently cannot physically remove arbitrary token ranges.
+            // Treat it as full-sequence removal only until the backend exposes
+            // an explicit rollback capability.
             if (is_hmm)
-                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
             else
                 ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
 
@@ -990,7 +997,7 @@ private:
                 return false;
             }
             if (is_hmm)
-                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+                ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
             else
                 ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
 
@@ -1072,7 +1079,7 @@ private:
 
         slots.clear();
         if (is_hmm)
-            ctx_tgt_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+            ctx_tgt_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
         else
             ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
         if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
@@ -1110,7 +1117,11 @@ private:
             slot.ctx_tgt = ctx_tgt;
             slot.ctx_dft = ctx_dft.get();
             slot.spec    = spec.get();
-            slot.n_ctx   = n_ctx_slot;
+            slot.n_ctx   = is_hmm ? (int) llama_n_ctx_seq_id(ctx_tgt, i) : n_ctx_slot;
+            if (slot.n_ctx <= 0) {
+                SRV_ERR("failed to determine context size for HMM slot %d\n", i);
+                return false;
+            }
             slot.is_hmm  = is_hmm;
 
             slot.mctx                   = mctx;
@@ -2314,10 +2325,6 @@ private:
                 } break;
             case SERVER_TASK_TYPE_SLOT_SAVE:
                 {
-                    if (!check_no_mtmd(task.id)) {
-                        break;
-                    }
-
                     const int id_slot = task.slot_action.id_slot;
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
@@ -2337,8 +2344,12 @@ private:
                     std::string filename = task.slot_action.filename;
                     std::string filepath = task.slot_action.filepath;
 
-                    const llama_tokens & tokens = slot->prompt.tokens.get_tokens();
+                    const llama_tokens & tokens = slot->prompt.tokens.get_all_tokens();
                     const size_t nwrite = llama_state_seq_save_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), token_count);
+                    if (nwrite == 0) {
+                        send_error(task, "Unable to save slot state", ERROR_TYPE_SERVER);
+                        break;
+                    }
 
                     const int64_t t_end = ggml_time_us();
                     const double t_save_ms = (t_end - t_start) / 1000.0;
@@ -2355,7 +2366,6 @@ private:
                 } break;
             case SERVER_TASK_TYPE_SLOT_RESTORE:
                 {
-                    if (!check_no_mtmd(task.id)) break;
                     const int id_slot = task.slot_action.id_slot;
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
@@ -2386,6 +2396,10 @@ private:
                     tokens.resize(token_count);
                     slot->prompt.tokens.clear();
                     slot->prompt.tokens.insert(tokens);
+                    // Keep the restored server-side token view linear. Media
+                    // embeddings and mixed chunk history are already restored
+                    // by the model sequence state; no mtmd chunk object is
+                    // needed unless a later request introduces new media.
 
                     const int64_t t_end = ggml_time_us();
                     const double t_restore_ms = (t_end - t_start) / 1000.0;
@@ -2402,9 +2416,6 @@ private:
                 } break;
             case SERVER_TASK_TYPE_SLOT_ERASE:
                 {
-                    if (!check_no_mtmd(task.id)) {
-                        break;
-                    }
                     const int id_slot = task.slot_action.id_slot;
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
@@ -2427,6 +2438,42 @@ private:
                     res->id       = task.id;
                     res->id_slot  = id_slot;
                     res->n_erased = n_erased;
+                    queue_results.send(std::move(res));
+                } break;
+            case SERVER_TASK_TYPE_SLOT_PAUSE:
+            case SERVER_TASK_TYPE_SLOT_RESUME:
+                {
+                    const int id_slot = task.slot_action.id_slot;
+                    server_slot * slot = get_slot_by_id(id_slot);
+                    if (slot == nullptr) {
+                        send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
+
+                    const bool pause = task.type == SERVER_TASK_TYPE_SLOT_PAUSE;
+                    if (pause) {
+                        if (!slot->is_processing()) {
+                            send_error(task, "Slot is idle", ERROR_TYPE_INVALID_REQUEST);
+                            break;
+                        }
+                        if (slot->state == SLOT_STATE_PAUSED) {
+                            send_error(task, "Slot is already paused", ERROR_TYPE_INVALID_REQUEST);
+                            break;
+                        }
+                        slot->state_before_pause = slot->state;
+                        slot->state = SLOT_STATE_PAUSED;
+                    } else {
+                        if (slot->state != SLOT_STATE_PAUSED) {
+                            send_error(task, "Slot is not paused", ERROR_TYPE_INVALID_REQUEST);
+                            break;
+                        }
+                        slot->state = slot->state_before_pause;
+                    }
+
+                    auto res = std::make_unique<server_task_result_slot_state>();
+                    res->id = task.id;
+                    res->id_slot = id_slot;
+                    res->paused = pause;
                     queue_results.send(std::move(res));
                 } break;
             case SERVER_TASK_TYPE_GET_LORA:
@@ -2573,9 +2620,29 @@ private:
         std::vector<server_slot *> generating;
         std::vector<server_slot *> drafting;
 
+        // HMM uses one-slot-at-a-time decode.  If a higher-priority request is
+        // waiting, do not submit lower-priority slots to the next NPU decode.
+        // Slot state (KV/recurrent/sampler) remains in place; this is a
+        // cross-slot scheduling pause, not a context snapshot.
+        int32_t selected_hmm_priority = INT32_MAX;
+        if (is_hmm) {
+            for (auto & slot : slots) {
+                if (slot.is_processing() && slot.state != SLOT_STATE_WAIT_OTHER && slot.task &&
+                    slot.task->params.priority < selected_hmm_priority) {
+                    selected_hmm_priority = std::min(selected_hmm_priority, slot.task->params.priority);
+                }
+            }
+        }
+
         // determine which slots are generating and drafting
         for (auto & slot : slots) {
             if (slot.state != SLOT_STATE_GENERATING) {
+                continue;
+            }
+
+            if (is_hmm && slot.task->params.priority != selected_hmm_priority) {
+                SLT_DBG(slot, "paused by higher-priority HMM slot/task (slot_prio=%d, selected_prio=%d)\n",
+                        slot.task->params.priority, selected_hmm_priority);
                 continue;
             }
 
@@ -2591,8 +2658,8 @@ private:
             if (spec) {
                 common_speculative_get_draft_params(spec.get(), slot.id).drafting = false;
 
-                const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-                const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+                const bool use_ckpt_tgt = !is_hmm && ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+                const bool use_ckpt_dft = !is_hmm && ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
                 int n_draft_max = slot.get_n_draft_max();
 
@@ -2648,7 +2715,7 @@ private:
             slot.n_draft_total += draft.size();
 
             // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
-            const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+            const bool use_ckpt_dft = !is_hmm && ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
             if (ctx_dft) {
                 if (use_ckpt_dft) {
@@ -2659,12 +2726,12 @@ private:
             }
 
             if (!draft.empty()) {
-                const bool use_ckpt_tgt =
+                const bool use_ckpt_tgt = !is_hmm && (
                     ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                   (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_tgt));
+                    (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_tgt)));
 
-                const bool use_ckpt_dft =
-                   (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_dft.get()));
+                const bool use_ckpt_dft = !is_hmm &&
+                    (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_dft.get()));
 
                 if (use_ckpt_tgt) {
                     //const int64_t t_start = ggml_time_us();
@@ -2704,6 +2771,10 @@ private:
         if (params_base.cont_batching || batch.n_tokens == 0) {
             for (auto & slot : slots) {
                 if (!slot.is_processing()) {
+                    continue;
+                }
+
+                if (is_hmm && slot.task->params.priority != selected_hmm_priority) {
                     continue;
                 }
 
@@ -3527,9 +3598,9 @@ private:
 
                     const uint32_t n_rollback = slot.spec_draft.size() + 1 - accepted.size();
 
-                    const bool use_ckpt_tgt =
+                    const bool use_ckpt_tgt = !is_hmm && (
                         ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                       (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_rollback > llama_n_rs_seq(ctx_tgt));
+                              (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_rollback > llama_n_rs_seq(ctx_tgt)));
 
                     // check for partial draft acceptance
                     if (n_rollback > 0) {
@@ -4243,7 +4314,8 @@ void server_routes::init_routes() {
 
     this->post_slots = [this](const server_http_req & req) {
         auto res = create_response();
-        if (params.slot_save_path.empty()) {
+        std::string action = req.get_param("action");
+        if (params.slot_save_path.empty() && action != "pause" && action != "resume") {
             res->error(format_error_response("This server does not support slots action. Start it with `--slot-save-path`", ERROR_TYPE_NOT_SUPPORTED));
             return res;
         }
@@ -4258,8 +4330,6 @@ void server_routes::init_routes() {
             return res;
         }
 
-        std::string action = req.get_param("action");
-
         if (action == "save") {
             return handle_slots_save(req, id_slot);
         }
@@ -4268,6 +4338,12 @@ void server_routes::init_routes() {
         }
         if (action == "erase") {
             return handle_slots_erase(req, id_slot);
+        }
+        if (action == "pause") {
+            return handle_slots_pause(req, id_slot);
+        }
+        if (action == "resume") {
+            return handle_slots_resume(req, id_slot);
         }
 
         res->error(format_error_response("Invalid action", ERROR_TYPE_INVALID_REQUEST));
@@ -4941,6 +5017,46 @@ std::unique_ptr<server_res_generator> server_routes::handle_slots_erase(const se
     }
 
     GGML_ASSERT(dynamic_cast<server_task_result_slot_erase*>(result.get()) != nullptr);
+    res->ok(result->to_json());
+    return res;
+}
+
+std::unique_ptr<server_res_generator> server_routes::handle_slots_pause(const server_http_req & req, int id_slot) {
+    auto res = create_response();
+    auto & rd = res->rd;
+    server_task task(SERVER_TASK_TYPE_SLOT_PAUSE);
+    task.id = rd.get_new_id();
+    task.slot_action.id_slot = id_slot;
+    rd.post_task(std::move(task));
+    auto result = rd.next(req.should_stop);
+    if (!result) {
+        GGML_ASSERT(req.should_stop());
+        return res;
+    }
+    if (result->is_error()) {
+        res->error(result->to_json());
+        return res;
+    }
+    res->ok(result->to_json());
+    return res;
+}
+
+std::unique_ptr<server_res_generator> server_routes::handle_slots_resume(const server_http_req & req, int id_slot) {
+    auto res = create_response();
+    auto & rd = res->rd;
+    server_task task(SERVER_TASK_TYPE_SLOT_RESUME);
+    task.id = rd.get_new_id();
+    task.slot_action.id_slot = id_slot;
+    rd.post_task(std::move(task));
+    auto result = rd.next(req.should_stop);
+    if (!result) {
+        GGML_ASSERT(req.should_stop());
+        return res;
+    }
+    if (result->is_error()) {
+        res->error(result->to_json());
+        return res;
+    }
     res->ok(result->to_json());
     return res;
 }

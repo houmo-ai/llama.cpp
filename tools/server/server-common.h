@@ -203,6 +203,11 @@ public:
     // for compatibility with speculative decoding, ctx shift, slot save/load
     const llama_tokens & get_tokens() const;
 
+    // Return the full linear token stream, including LLAMA_TOKEN_NULL media
+    // placeholders. Sequence state owns the durable media embeddings/history;
+    // slot save/load only needs this stream to rebuild server-side accounting.
+    const llama_tokens & get_all_tokens() const { return tokens; }
+
     llama_tokens get_text_tokens() const;
 
     // for compatibility with speculative decoding

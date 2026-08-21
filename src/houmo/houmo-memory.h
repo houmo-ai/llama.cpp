@@ -1,6 +1,10 @@
 #pragma once
 #include "llama-memory.h"
 
+#include <stdexcept>
+
+class HouMoLLModel;
+
 /**
  * @brief A memory interface for Houmo
  * 当前不支持管理，空实现防止应用调用失败。
@@ -9,6 +13,11 @@ class houmo_memory_i : public llama_memory_i {
   public:
     houmo_memory_i() = default;
     virtual ~houmo_memory_i() = default;
+
+    void bind(HouMoLLModel * model, bool is_mtp) {
+            model_ = model;
+            is_mtp_ = is_mtp;
+    }
 
     // split the input batch into a set of ubatches and verify that they can fit
     // into the cache return a context object containing the ubatches and memory
@@ -116,18 +125,27 @@ class houmo_memory_i : public llama_memory_i {
 
     virtual void state_write(llama_io_write_i &io, llama_seq_id seq_id = -1,
                              llama_state_seq_flags flags = 0) const override {
-        (void)io;
-        (void)seq_id;
-        (void)flags;
-        return;
+        if (model_ == nullptr) {
+            throw std::runtime_error("Houmo memory is not bound to a model");
+        }
+        state_write_impl(io, seq_id, flags);
     }
     virtual void state_read(llama_io_read_i &io, llama_seq_id seq_id = -1,
                             llama_state_seq_flags flags = 0) override {
-        (void)io;
-        (void)seq_id;
-        (void)flags;
-        return;
+        if (model_ == nullptr) {
+            throw std::runtime_error("Houmo memory is not bound to a model");
+        }
+        state_read_impl(io, seq_id, flags);
     }
+
+  protected:
+    void state_write_impl(llama_io_write_i &io, llama_seq_id seq_id,
+                          llama_state_seq_flags flags) const;
+    void state_read_impl(llama_io_read_i &io, llama_seq_id seq_id,
+                         llama_state_seq_flags flags);
+
   private:
     std::map<llama_seq_id, llama_pos> seq_pos_map;
+    HouMoLLModel * model_ = nullptr;
+    bool is_mtp_ = false;
 };

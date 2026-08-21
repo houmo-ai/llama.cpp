@@ -20,10 +20,165 @@
 #include <fstream>
 #include <map>
 #include <regex>
+#include <stdexcept>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 using json = nlohmann::ordered_json;
+
+namespace {
+
+int hmm_group_id(const std::string &name) {
+    static const std::regex suffix("_([0-9]+)\\.hmm$");
+    std::smatch match;
+    return std::regex_search(name, match, suffix) ? std::stoi(match[1]) : 0;
+}
+
+int embedding_npu_device_id() {
+    const char *env = std::getenv("HOUMO_DEVICE_ID");
+    return env ? std::stoi(env) : 0;
+}
+
+std::vector<int> collect_hmm_groups(const llama_model_loader &loader, bool mtp) {
+    std::set<int> prefill_groups;
+    std::set<int> decode_groups;
+    gguf_context *ctx = loader.metadata_ptr.get();
+    const std::regex prefill(mtp ? "^prefill_mtp(_\\d+)?\\.hmm$"
+                                 : "^prefill(_\\d+)?\\.hmm$");
+    const std::regex decode(mtp ? "^decode(r)?_mtp(_\\d+)?\\.hmm$"
+                                : "^decode(r)?(_\\d+)?\\.hmm$");
+    const std::regex assistant("^assistant\\.hmm(s)?$");
+    for (int i = 0; i < gguf_get_n_tensors(ctx); ++i) {
+        const char *raw_name = gguf_get_tensor_name(ctx, i);
+        if (!raw_name) {
+            continue;
+        }
+        const std::string name(raw_name);
+        if (std::regex_match(name, prefill)) {
+            prefill_groups.insert(hmm_group_id(name));
+        } else if (std::regex_match(name, decode) ||
+                   (mtp && std::regex_match(name, assistant))) {
+            decode_groups.insert(hmm_group_id(name));
+        }
+    }
+    if (mtp && prefill_groups.empty()) {
+        prefill_groups = decode_groups;
+    }
+    if (!decode_groups.empty() && prefill_groups != decode_groups) {
+        LLAMA_LOG_ERROR("prefill/decode HMM group sets do not match\n");
+        return {};
+    }
+    for (int group_id : prefill_groups) {
+        if (!decode_groups.empty() && decode_groups.count(group_id) == 0) {
+            LLAMA_LOG_ERROR("missing decode HMM for group %d\n", group_id);
+            return {};
+        }
+    }
+    return {prefill_groups.begin(), prefill_groups.end()};
+}
+
+class GroupMemory final : public houmo_memory_i {
+  public:
+    GroupMemory(houmo_memory_i *memory, int group_index, int group_count)
+        : memory_(memory), group_index_(group_index), group_count_(group_count) {}
+
+    bool seq_rm(llama_seq_id id, llama_pos p0, llama_pos p1) override {
+        return memory_->seq_rm(global(id), p0, p1);
+    }
+    void seq_cp(llama_seq_id src, llama_seq_id dst, llama_pos p0, llama_pos p1) override {
+        memory_->seq_cp(global(src), global(dst), p0, p1);
+    }
+    void seq_keep(llama_seq_id id) override { memory_->seq_keep(global(id)); }
+    void seq_add(llama_seq_id id, llama_pos p0, llama_pos p1, llama_pos shift) override {
+        memory_->seq_add(global(id), p0, p1, shift);
+    }
+    void seq_div(llama_seq_id id, llama_pos p0, llama_pos p1, int d) override {
+        memory_->seq_div(global(id), p0, p1, d);
+    }
+    llama_pos seq_pos_min(llama_seq_id id) const override {
+        return memory_->seq_pos_min(global(id));
+    }
+    llama_pos seq_pos_max(llama_seq_id id) const override {
+        return memory_->seq_pos_max(global(id));
+    }
+
+    void state_write(llama_io_write_i &io, llama_seq_id id = -1,
+                     llama_state_seq_flags flags = 0) const override {
+        memory_->state_write(io, global(id), flags);
+    }
+    void state_read(llama_io_read_i &io, llama_seq_id id = -1,
+                    llama_state_seq_flags flags = 0) override {
+        memory_->state_read(io, global(id), flags);
+    }
+
+  private:
+    llama_seq_id global(llama_seq_id local) const {
+        return local * group_count_ + group_index_;
+    }
+    houmo_memory_i *memory_;
+    int group_index_;
+    int group_count_;
+};
+
+HouMoLLModel::Impl *create_impl(const std::string &arch, bool mtp,
+                               HouMoLLModel::Impl *target = nullptr) {
+    if (arch.find("gemma4") != std::string::npos) {
+        return mtp ? static_cast<HouMoLLModel::Impl *>(
+                         new HouMoGemma4MTP(static_cast<HouMoGemma4 *>(target)))
+                   : static_cast<HouMoLLModel::Impl *>(new HouMoGemma4());
+    }
+    if (mtp) {
+        return new HoumoQwen35MTP();
+    }
+    if (arch.find("glm4") != std::string::npos) return new HouMoGLMOCRModel();
+    if (arch.find("vl") != std::string::npos) return new HouMoVLLModel();
+    if (arch.find("gpt-oss") != std::string::npos) return new HouMoGPTOSS();
+    if (arch.find("bert") != std::string::npos) return new HouMoEmbed();
+    if (arch.find("qwen35") != std::string::npos ||
+        arch.find("qwen3next") != std::string::npos) return new HoumoQwen35LLM();
+    if (arch.find("qwen") != std::string::npos) return new HoumoQwenLLM();
+    return nullptr;
+}
+
+} // namespace
+
+namespace {
+constexpr uint32_t HOUMO_STATE_MAGIC = 0x484d5354; // HMST
+constexpr uint32_t HOUMO_STATE_VERSION = 1;
+
+struct houmo_state_header {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t flags;
+    int32_t source_seq_id;
+    int32_t group_id;
+    int32_t local_seq_id;
+};
+} // namespace
+
+void houmo_memory_i::state_write_impl(llama_io_write_i &io,
+                                      llama_seq_id seq_id,
+                                      llama_state_seq_flags flags) const {
+    model_->state_write(io, seq_id, flags, is_mtp_);
+}
+
+void houmo_memory_i::state_read_impl(llama_io_read_i &io,
+                                     llama_seq_id seq_id,
+                                     llama_state_seq_flags flags) {
+    model_->state_read(io, seq_id, flags, is_mtp_);
+}
+
+void HouMoLLModel::Impl::state_write(llama_io_write_i &, int,
+                                     llama_state_seq_flags) const {
+    throw std::runtime_error("Houmo state serialization is not supported by this model");
+}
+
+void HouMoLLModel::Impl::state_read(llama_io_read_i &, int,
+                                    llama_state_seq_flags) {
+    throw std::runtime_error("Houmo state restore is not supported by this model");
+}
+
 static bool string_replace_once(std::string &str, const std::string &from,
                                 const std::string &to) {
     if (from.empty())
@@ -74,12 +229,11 @@ static bool is_kv_cache_io_name(const std::string &name) {
 std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     bool prefill, void *raw_data, int64_t size, bool load_from_file,
     std::vector<std::string> dummy_tensor_names) {
-    if (wm_.GetInitStatus() != tcim::Status::OK) {
-        std::string backend = "";
-        backend = "Xh2HalBackend";
-        tcim::DevManager dev_manager =
-            tcim::DevManager::Create(device_ids_, backend);
+    if (!wm_configured_) {
+        const std::string backend = "Xh2HalBackend";
+        tcim::DevManager dev_manager = tcim::DevManager::Create(device_ids_, backend);
         wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
+        wm_configured_ = true;
     }
     tcim::Status status;
     auto infer_model = std::make_shared<tcim::Module>();
@@ -117,12 +271,10 @@ std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
 std::shared_ptr<tcim::Module> HouMoLLModel::Impl::create_infer_engine(
     const std::string &file_name, size_t offset, size_t size,
     std::vector<std::string> dummy_tensor_names) {
-    if (wm_.GetInitStatus() != tcim::Status::OK) {
-        std::string backend = "";
-        backend = "Xh2HalBackend";
-        tcim::DevManager dev_manager =
-            tcim::DevManager::Create(device_ids_, backend);
-        wm_ = tcim::Module::WeightManager::CreateWeightManager(dev_manager);
+    if (!wm_configured_) {
+        const std::string backend = "Xh2HalBackend";
+        set_weight_manager_handle(houmo_weight_manager_acquire(
+                file_name, device_ids_, backend, {}));
     }
     tcim::Status status;
     auto infer_model = std::make_shared<tcim::Module>();
@@ -162,6 +314,8 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         const char *env = std::getenv("LLAMA_ARG_EMBED_NPU");
         embed_npu_ = (env && std::string(env) == "1");
     }
+    const int embedding_npu_device =
+        embed_npu_ ? embedding_npu_device_id() : -1;
     std::vector<std::string> dummy_tensor_names;
     // 防止更高效使用内存，这个将prefill 设置为dummy_tensor_names
     for (int idx = 0; idx < n_blocks_; idx++) {
@@ -173,8 +327,30 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         dummy_tensor_names.push_back(v_cache_name);
     }
     parse_deviceids();
-    // 1. 加载 embedding
+    std::vector<houmo_content_range> embedding_ranges;
     const int n_tensors = gguf_get_n_tensors(ctx);
+    for (int i = 0; i < n_tensors; ++i) {
+        const char *raw_name = gguf_get_tensor_name(ctx, i);
+        if (raw_name == nullptr) {
+            continue;
+        }
+        const std::string name(raw_name);
+        const int64_t tensor_size = static_cast<int64_t>(gguf_get_tensor_size(ctx, i));
+        const int64_t tensor_offset = static_cast<int64_t>(
+                gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx));
+        houmo_content_range range{name, tensor_offset, tensor_size};
+        if (name.compare(0, strlen("quant_embedding.bin"),
+                         "quant_embedding.bin") == 0) {
+            embedding_ranges.push_back(range);
+        }
+    }
+    const std::string embedding_identity = houmo_content_identity(file_name, embedding_ranges);
+    if (!wm_configured_) {
+        set_weight_manager_handle(houmo_weight_manager_acquire(
+                file_name, device_ids_, "Xh2HalBackend",
+                embedding_identity));
+    }
+    // 1. 加载 embedding
     for (int i = 0; i < n_tensors; ++i) {
         const char *name = gguf_get_tensor_name(ctx, i);
         LLAMA_LOG_INFO("tensor[%d]: name = %s\n", i, name);
@@ -183,14 +359,12 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
             gguf_get_tensor_offset(ctx, i) + gguf_get_meta_size(ctx);
         if (strncmp(name, "quant_embedding.bin",
                     strlen("quant_embedding.bin")) == 0) {
-            if (embedding_layer_ == nullptr) {
-                embedding_layer_ =
-                    std::make_shared<HoumoEmbeddingLayer>(file_name, offset, size);
-                if (embed_npu_) {
-                    embedding_layer_->init_npu();
-                }
-            }
+            if (embedding_layer_ == nullptr)
+                embedding_layer_ = houmo_embedding_layer_acquire(
+                        file_name, offset, size, embedding_identity,
+                        embedding_npu_device);
         } else if (std::regex_match(name, kPrefillMtpPattern)) {
+            if (hmm_group_id(name) != load_group_id_) continue;
             if (!load_mtp_modules) {
                 LLAMA_LOG_INFO("%s: skip prefill_mtp.hmm for target impl\n", __func__);
                 continue;
@@ -207,6 +381,7 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
             LLAMA_LOG_INFO("%s: succeed to load prefill_mtp.hmm (MTP draft module)\n",
                            __func__);
         } else if (std::regex_match(name, kPrefillPattern)) {
+            if (hmm_group_id(name) != load_group_id_) continue;
             if (load_mtp_modules) {
                 LLAMA_LOG_INFO("%s: skip prefill.hmm for MTP impl\n", __func__);
                 continue;
@@ -225,6 +400,7 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
             LLAMA_LOG_INFO("%s: succeed to load prefill.hmm\n", __func__);
         } else if (std::regex_match(name, kDecodeMtpPattern) ||
                    std::regex_match(name, kAssistantPattern)) {
+            if (hmm_group_id(name) != load_group_id_) continue;
             if (!load_mtp_modules) {
                 LLAMA_LOG_INFO("%s: skip decode_mtp.hmm for target impl\n", __func__);
                 continue;
@@ -247,6 +423,7 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
             LLAMA_LOG_INFO("%s: succeed to load decode_mtp.hmm (MTP draft module)\n",
                            __func__);
         } else if (std::regex_match(name, kDecodePattern)) {
+            if (hmm_group_id(name) != load_group_id_) continue;
             if (load_mtp_modules) {
                 LLAMA_LOG_INFO("%s: skip decode.hmm for MTP impl\n", __func__);
                 continue;
@@ -298,6 +475,24 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
     return true;
 }
 
+bool HouMoLLModel::Impl::supports_seq_max(int seq_max, std::string &reason) const {
+    if (seq_max <= 0) {
+        reason = "seq_max must be positive";
+        return false;
+    }
+    if (seq_max > kSeqMax) {
+        reason = "seq_max exceeds backend kSeqMax=" + std::to_string(kSeqMax);
+        return false;
+    }
+    if (decode_model_ != nullptr && n_decode_batch_ > 1 &&
+        seq_max > n_decode_batch_) {
+        reason = "logical local sequence count exceeds physical decode batch slots=" +
+                 std::to_string(n_decode_batch_);
+        return false;
+    }
+    return true;
+}
+
 void HouMoLLModel::Impl::model_inout_init(int seq_max) {
     n_vocab_ = embedding_layer_->get_vocab_size();
     // init prefill
@@ -309,11 +504,9 @@ void HouMoLLModel::Impl::model_inout_init(int seq_max) {
     // 填充decode 的output
     decode_output_init();
     // init kv cache
-    if (seq_max > kSeqMax) {
-        LLAMA_LOG_ERROR("%s: seq_max > %d not supported, set seq_max to %d\n",
-                        __func__, seq_max, kSeqMax);
-        seq_max = kSeqMax;
-    }
+    GGML_ASSERT(seq_max > 0 && seq_max <= kSeqMax);
+    GGML_ASSERT(decode_model_ == nullptr || n_decode_batch_ == 1 ||
+                seq_max <= n_decode_batch_);
     int size = (seq_max + n_prefill_batch_ - 1) / n_prefill_batch_;
     size = std::max(size, n_decode_batch_);
     if (is_mtp_model()) {
@@ -726,8 +919,8 @@ void HouMoLLModel::Impl::initialize_kv_cache(int size) {
                               ? prefill_model_->GetDevInput(v_cache_name)
                               : decode_model_->GetDevInput(v_cache_name);
             if (prefill_owned_gemma4_cache) {
-                kcache.Buffer().MemSet(0);
-                vcache.Buffer().MemSet(0);
+                zero_tensor(kcache);
+                zero_tensor(vcache);
             }
             if (n_decode_batch_ > 1 || size == 1) {
                 item.tensors.push_back(kcache);
@@ -910,159 +1103,381 @@ void HouMoLLModel::Impl::lora_clear() {
 }
 
 // HouMoLLModel constructor and destructor
-HouMoLLModel::HouMoLLModel() : impl_(nullptr), impl_mtp_(nullptr) {}
+HouMoLLModel::HouMoLLModel() = default;
 
 HouMoLLModel::~HouMoLLModel() {
-    if (impl_mtp_) {
-        delete impl_mtp_;
+    for (auto *impl : impls_mtp_) delete impl;
+    for (auto *impl : impls_) delete impl;
+}
+
+bool HouMoLLModel::route_seq(int global_seq_id, bool is_mtp,
+                             SeqRoute &route) const {
+    const auto &impls = is_mtp ? impls_mtp_ : impls_;
+    const auto &group_ids = is_mtp ? mtp_group_ids_ : group_ids_;
+    const auto &local_limits = is_mtp ? local_seq_max_mtp_ : local_seq_max_;
+    const bool initialized = is_mtp ? mtp_initialized_ : target_initialized_;
+    const int global_limit = is_mtp ? mtp_seq_max_ : target_seq_max_;
+
+    if (!initialized || impls.empty() || global_seq_id < 0 ||
+        global_seq_id >= global_limit || local_limits.size() != impls.size() ||
+        group_ids.size() != impls.size()) {
+        return false;
     }
-    if (impl_ && impl_ != impl_mtp_) {
-        delete impl_;
+
+    const int group_count = static_cast<int>(impls.size());
+    const int group_index = global_seq_id % group_count;
+    const int local_seq_id = global_seq_id / group_count;
+    if (impls[group_index] == nullptr || local_seq_id < 0 ||
+        local_seq_id >= local_limits[group_index]) {
+        return false;
+    }
+
+    route = {group_index, group_ids[group_index], local_seq_id,
+             impls[group_index]};
+    return true;
+}
+
+void HouMoLLModel::state_write(llama_io_write_i &io, llama_seq_id seq_id,
+                               llama_state_seq_flags flags, bool is_mtp) const {
+    if (seq_id < 0) {
+        throw std::runtime_error("Houmo full-context state is not supported; save a sequence instead");
+    }
+    SeqRoute route;
+    if (!route_seq(seq_id, is_mtp, route)) {
+        throw std::runtime_error("invalid Houmo sequence id");
+    }
+    const houmo_state_header header = {
+        HOUMO_STATE_MAGIC,
+        HOUMO_STATE_VERSION,
+        flags,
+        seq_id,
+        route.group_id,
+        route.local_seq_id,
+    };
+    io.write(&header, sizeof(header));
+    route.impl->state_write(io, route.local_seq_id, flags);
+}
+
+void HouMoLLModel::state_read(llama_io_read_i &io, llama_seq_id seq_id,
+                              llama_state_seq_flags flags, bool is_mtp) {
+    if (seq_id < 0) {
+        throw std::runtime_error("Houmo full-context state is not supported; restore a sequence instead");
+    }
+    SeqRoute route;
+    if (!route_seq(seq_id, is_mtp, route)) {
+        throw std::runtime_error("invalid Houmo sequence id");
+    }
+    houmo_state_header header = {};
+    io.read(&header, sizeof(header));
+    if (header.magic != HOUMO_STATE_MAGIC) {
+        throw std::runtime_error("wrong Houmo state magic");
+    }
+    if (header.version != HOUMO_STATE_VERSION) {
+        throw std::runtime_error("unsupported Houmo state version");
+    }
+    if (header.flags != flags) {
+        throw std::runtime_error("Houmo state flags mismatch");
+    }
+    // Source and destination slots may be routed to different physical model
+    // groups. The model payload validates tensor names, shapes, strides and
+    // dtypes against the destination group before committing any data.
+    route.impl->state_read(io, route.local_seq_id, flags);
+    if ((flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == 0) {
+        const llama_pos restored_pos = static_cast<llama_pos>(route.impl->state_position(route.local_seq_id));
+        if (restored_pos < 0) {
+            throw std::runtime_error("invalid restored Houmo sequence position");
+        }
+        memory_->seq_rm(seq_id, 0, -1);
+        memory_->seq_add(seq_id, 0, 0, restored_pos);
     }
 }
 
 // Forward method calls to the implementation
 bool HouMoLLModel::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
-
+    if (!impls_.empty() || !impls_mtp_.empty()) {
+        LLAMA_LOG_ERROR("%s: model is already loaded\n", __func__);
+        return false;
+    }
     LLAMA_LOG_INFO("%s: model arch name: %s\n", __func__, ml.arch_name.c_str());
-    if (impl_ == nullptr) {
-        if (ml.arch_name.find("gemma4") != std::string::npos) {
-            if (gguf_has_mtp_tensors(ml)) {
-                impl_ = new HouMoGemma4();
-                impl_mtp_ = new HouMoGemma4MTP(static_cast<HouMoGemma4 *>(impl_));
-                LLAMA_LOG_INFO("%s: gemma4 gguf has MTP tensors, loading target + MTP impl\n",
-                               __func__);
-                if (!impl_->houmo_load(ml, device_ids)) {
-                    LLAMA_LOG_ERROR("%s: failed to load gemma4 target impl\n", __func__);
-                    return false;
-                }
-                impl_mtp_->set_embedding_layer(impl_->embedding_layer());
-                if (!impl_mtp_->houmo_load(ml, device_ids)) {
-                    LLAMA_LOG_ERROR("%s: failed to load gemma4 MTP impl\n", __func__);
-                    return false;
-                }
-                return true;
-            } else {
-                impl_ = new HouMoGemma4();
-            }
-        } else if (ml.arch_name.find("glm4") != std::string::npos) {
-            impl_ = new HouMoGLMOCRModel();
-        } else if (ml.arch_name.find("vl") != std::string::npos) {
-            impl_ = new HouMoVLLModel();
-        } else if (ml.arch_name.find("gpt-oss") != std::string::npos) {
-            impl_ = new HouMoGPTOSS();
-        } else if (ml.arch_name.find("bert") != std::string::npos) {
-            impl_ = new HouMoEmbed();
-        } else if (ml.arch_name.find("qwen35") != std::string::npos ||
-                   ml.arch_name.find("qwen3next") != std::string::npos) {
-            if (gguf_has_mtp_tensors(ml)) {
-                impl_ = new HoumoQwen35LLM();
-                impl_mtp_ = new HoumoQwen35MTP();
-                LLAMA_LOG_INFO("%s: qwen3.5 gguf has MTP tensors, loading target + MTP impl\n",
-                               __func__);
-
-                if (!impl_->houmo_load(ml, device_ids)) {
-                    LLAMA_LOG_WARN("%s: failed to load qwen3.5 target impl\n", __func__);
-                    delete impl_;
-                    impl_ = nullptr;
-                }
-                if (impl_ != nullptr) {
-                    impl_mtp_->set_embedding_layer(impl_->embedding_layer());
-                }
-                if (!impl_mtp_->houmo_load(ml, device_ids)) {
-                    LLAMA_LOG_ERROR("%s: failed to load qwen3.5 MTP impl\n", __func__);
-                    return false;
-                }
-                if (impl_ == nullptr) impl_ = impl_mtp_;
-                return true;
-            } else {
-                impl_ = new HoumoQwen35LLM();
-                LLAMA_LOG_INFO("%s: qwen3.5 gguf has no MTP tensors, using HoumoQwen35LLM\n",
-                               __func__);
-            }
-        } else if (ml.arch_name.find("qwen") != std::string::npos) {
-            impl_ = new HoumoQwenLLM();
-        } else {
-            LLAMA_LOG_ERROR("%s: unknown architecture %s\n", __func__,
-                            ml.arch_name.c_str());
-            exit(1);
-            return false;
+    auto fail_load = [this]() {
+        for (auto *impl : impls_mtp_) delete impl;
+        for (auto *impl : impls_) delete impl;
+        impls_mtp_.clear();
+        impls_.clear();
+        mtp_group_ids_.clear();
+        group_ids_.clear();
+        local_seq_max_mtp_.clear();
+        local_seq_max_.clear();
+        memories_mtp_.clear();
+        memories_.clear();
+        mtp_seq_max_ = 0;
+        target_seq_max_ = 0;
+        mtp_initialized_ = false;
+        target_initialized_ = false;
+        return false;
+    };
+    const bool embedding_model = ml.arch_name.find("bert") != std::string::npos;
+    group_ids_ = embedding_model ? std::vector<int>{0} : collect_hmm_groups(ml, false);
+    if (group_ids_.empty()) {
+        LLAMA_LOG_ERROR("%s: no complete target HMM group found\n", __func__);
+        return false;
+    }
+    tcim::Module::WeightManager shared_wm;
+    std::shared_ptr<HoumoEmbeddingLayer> shared_embedding;
+    for (int group_id : group_ids_) {
+        Impl *impl = create_impl(ml.arch_name, false);
+        if (!impl) return fail_load();
+        impl->set_load_group_id(group_id);
+        if (shared_wm.GetInitStatus() == tcim::Status::OK) impl->set_weight_manager(shared_wm);
+        if (shared_embedding) impl->set_embedding_layer(shared_embedding);
+        if (!impl->houmo_load(ml, device_ids)) {
+            delete impl;
+            return fail_load();
         }
+        if (impls_.empty()) {
+            shared_wm = impl->weight_manager();
+            shared_embedding = impl->embedding_layer();
+        }
+        impls_.push_back(impl);
+        LLAMA_LOG_INFO("%s: loaded target HMM group %d\n", __func__, group_id);
     }
 
-    return impl_->houmo_load(ml, device_ids);
+    if (gguf_has_mtp_tensors(ml)) {
+        mtp_group_ids_ = collect_hmm_groups(ml, true);
+        if (mtp_group_ids_.size() != 1 || mtp_group_ids_.front() != 0) {
+            LLAMA_LOG_ERROR("%s: only MTP group 0 is supported\n", __func__);
+            return fail_load();
+        }
+        Impl *impl = create_impl(ml.arch_name, true, impls_.front());
+        if (!impl) return fail_load();
+        impl->set_load_group_id(0);
+        impl->set_weight_manager(shared_wm);
+        impl->set_embedding_layer(shared_embedding);
+        if (!impl->houmo_load(ml, device_ids)) {
+            delete impl;
+            return fail_load();
+        }
+        impls_mtp_.push_back(impl);
+    }
+    return true;
 }
 
-void HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
+bool HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
                               ggml_abort_callback abort_callback,
                               void *abort_callback_data,
                               bool is_mtp) {
-    if (is_mtp) {
-        if (impl_mtp_ == nullptr) {
-            LLAMA_LOG_ERROR("%s: requested MTP ctx but no MTP impl loaded\n", __func__);
-            return;
-        }
-        impl_mtp_->houmo_init(memory, seq_max, abort_callback, abort_callback_data);
-    } else {
-        impl_->houmo_init(memory, seq_max, abort_callback, abort_callback_data);
+    if (memory_ == nullptr) {
+        memory_ = memory;
+    } else if (memory_ != memory) {
+        LLAMA_LOG_ERROR("%s: target and draft contexts must share Houmo memory\n", __func__);
+        return false;
     }
+
+    if (is_mtp) {
+        if (mtp_initialized_) {
+            LLAMA_LOG_ERROR("%s: MTP runtime is already initialized\n", __func__);
+            return false;
+        }
+        if (impls_mtp_.empty()) {
+            LLAMA_LOG_ERROR("%s: requested MTP ctx but no MTP impl loaded\n", __func__);
+            return false;
+        }
+        if (seq_max != 1 || impls_mtp_.size() != 1) {
+            LLAMA_LOG_ERROR("%s: MTP only supports np=1 and one HMM group, got seq_max=%d group_count=%zu\n",
+                            __func__, seq_max, impls_mtp_.size());
+            return false;
+        }
+        std::string reason;
+        if (!impls_mtp_.front()->supports_seq_max(1, reason)) {
+            LLAMA_LOG_ERROR("%s: MTP group 0 cannot initialize seq_max=1: %s\n",
+                            __func__, reason.c_str());
+            return false;
+        }
+        memory->bind(this, true);
+        memories_mtp_.push_back(std::make_unique<GroupMemory>(memory, 0, 1));
+        impls_mtp_.front()->houmo_init(memories_mtp_.back().get(), 1,
+                                       abort_callback, abort_callback_data);
+        local_seq_max_mtp_ = {1};
+        mtp_seq_max_ = 1;
+        mtp_initialized_ = true;
+    } else {
+        if (target_initialized_) {
+            LLAMA_LOG_ERROR("%s: target runtime is already initialized\n", __func__);
+            return false;
+        }
+        const int count = static_cast<int>(impls_.size());
+        if (count == 0 || seq_max < count) {
+            LLAMA_LOG_ERROR("%s: seq_max=%d is smaller than group_count=%d\n",
+                            __func__, seq_max, count);
+            return false;
+        }
+        std::vector<int> new_local_seq_max;
+        new_local_seq_max.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            const int local_seq_max = (seq_max + count - 1 - i) / count;
+            std::string reason;
+            if (!impls_[i]->supports_seq_max(local_seq_max, reason)) {
+                LLAMA_LOG_ERROR("%s: target group %d cannot initialize local_seq_max=%d: %s\n",
+                                __func__, group_ids_[i], local_seq_max,
+                                reason.c_str());
+                return false;
+            }
+            new_local_seq_max.push_back(local_seq_max);
+        }
+        for (int i = 0; i < count; ++i) {
+            if (i == 0) {
+                memory->bind(this, false);
+            }
+            memories_.push_back(std::make_unique<GroupMemory>(memory, i, count));
+            impls_[i]->houmo_init(memories_.back().get(), new_local_seq_max[i],
+                                  abort_callback, abort_callback_data);
+        }
+        local_seq_max_ = std::move(new_local_seq_max);
+        target_seq_max_ = seq_max;
+        target_initialized_ = true;
+    }
+    return true;
 }
 
 int HouMoLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                                 float *logits) {
-    return impl_->houmo_prefill(tokens, seq_id, logits);
+    SeqRoute route;
+    if (!route_seq(seq_id, false, route)) {
+        LLAMA_LOG_ERROR("%s: invalid target seq_id=%d (seq_max=%d)\n",
+                        __func__, seq_id, target_seq_max_);
+        return -1;
+    }
+    return route.impl->houmo_prefill(tokens, route.local_seq_id, logits);
 }
 
 int HouMoLLModel::houmo_decode(std::vector<llama_token> &batches,
                                std::vector<int> &seq_ids,
                                std::vector<float *> logits) {
-    return impl_->houmo_decode(batches, seq_ids, logits);
+    if (!target_initialized_ || impls_.empty() ||
+        batches.size() != seq_ids.size() || logits.size() != seq_ids.size()) {
+        LLAMA_LOG_ERROR("%s: target runtime is not initialized or input sizes do not match\n", __func__);
+        return -1;
+    }
+    std::map<int, std::vector<size_t>> groups;
+    std::vector<SeqRoute> routes(seq_ids.size());
+    for (size_t i = 0; i < seq_ids.size(); ++i) {
+        if (!route_seq(seq_ids[i], false, routes[i])) {
+            LLAMA_LOG_ERROR("%s: invalid target seq_id=%d (seq_max=%d)\n",
+                            __func__, seq_ids[i], target_seq_max_);
+            return -1;
+        }
+        groups[routes[i].group_index].push_back(i);
+    }
+    for (const auto &[group, indices] : groups) {
+        std::vector<llama_token> local_tokens;
+        std::vector<int> local_ids;
+        std::vector<float *> local_logits;
+        for (size_t i : indices) {
+            local_tokens.push_back(batches[i]);
+            local_ids.push_back(routes[i].local_seq_id);
+            local_logits.push_back(logits[i]);
+        }
+        int ret = routes[indices.front()].impl->houmo_decode(
+            local_tokens, local_ids, local_logits);
+        if (ret != 0) return ret;
+    }
+    return 0;
 }
 
 int HouMoLLModel::houmo_asr_force_align(std::vector<llama_token> &tokens, int seq_id,
                                         std::vector<float *> &logits_out) {
-    return impl_->houmo_asr_force_align(tokens, seq_id, logits_out);
+    SeqRoute route;
+    if (!route_seq(seq_id, false, route)) {
+        LLAMA_LOG_ERROR("%s: invalid target seq_id=%d (seq_max=%d)\n",
+                        __func__, seq_id, target_seq_max_);
+        return -1;
+    }
+    return route.impl->houmo_asr_force_align(tokens, route.local_seq_id,
+                                             logits_out);
 }
 
 int HouMoLLModel::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
                                std::vector<float *> &logits_out) {
-    return impl_->houmo_verify(tokens, seq_id, logits_out);
+    SeqRoute route;
+    if (!route_seq(seq_id, false, route)) {
+        LLAMA_LOG_ERROR("%s: invalid target seq_id=%d (seq_max=%d)\n",
+                        __func__, seq_id, target_seq_max_);
+        return -1;
+    }
+    return route.impl->houmo_verify(tokens, route.local_seq_id, logits_out);
 }
 
 int HouMoLLModel::houmo_verify_accept(int seq_id, uint16_t n_accepted) {
-    return impl_->houmo_verify_accept(seq_id, n_accepted);
+    SeqRoute route;
+    if (!route_seq(seq_id, false, route)) {
+        LLAMA_LOG_ERROR("%s: invalid target seq_id=%d (seq_max=%d)\n",
+                        __func__, seq_id, target_seq_max_);
+        return -1;
+    }
+    return route.impl->houmo_verify_accept(route.local_seq_id, n_accepted);
 }
 
-int HouMoLLModel::n_decode_batch() { return impl_->n_decode_batch(); }
+int HouMoLLModel::n_decode_batch() {
+    if (impls_.empty()) return 0;
+    int result = impls_.front()->n_decode_batch();
+    for (auto *impl : impls_) result = std::min(result, impl->n_decode_batch());
+    return result;
+}
 
-int HouMoLLModel::n_prefill_batch() { return impl_->n_prefill_batch(); }
+int HouMoLLModel::n_prefill_batch() {
+    if (impls_.empty()) return 0;
+    int result = impls_.front()->n_prefill_batch();
+    for (auto *impl : impls_) result = std::min(result, impl->n_prefill_batch());
+    return result;
+}
 
-uint32_t HouMoLLModel::n_context_length() { return impl_->n_context_length(); }
+uint32_t HouMoLLModel::n_context_length() {
+    if (impls_.empty()) return 0;
+    uint32_t result = impls_.front()->n_context_length();
+    for (auto *impl : impls_) result = std::max(result, impl->n_context_length());
+    return result;
+}
+
+uint32_t HouMoLLModel::n_context_length(int seq_id) const {
+    SeqRoute route;
+    return route_seq(seq_id, false, route) ? route.impl->n_context_length() : 0;
+}
 
 int HouMoLLModel::houmo_prefill(const float *embeddings, int n_tokens,
                                 int seq_id, float *logits) {
-    return impl_->houmo_prefill(embeddings, n_tokens, seq_id, logits);
+    SeqRoute route;
+    if (!route_seq(seq_id, false, route)) {
+        LLAMA_LOG_ERROR("%s: invalid target seq_id=%d (seq_max=%d)\n",
+                        __func__, seq_id, target_seq_max_);
+        return -1;
+    }
+    return route.impl->houmo_prefill(embeddings, n_tokens,
+                                     route.local_seq_id, logits);
 }
 
 int HouMoLLModel::houmo_embedding(
     const std::map<int32_t, std::vector<llama_token>> &batches,
     std::map<int, float *> &embeddings) {
-    return impl_->houmo_embedding(batches, embeddings);
+    if (!target_initialized_ || impls_.empty()) return -1;
+    return impls_.front()->houmo_embedding(batches, embeddings);
 }
-bool HouMoLLModel::is_embedding() { return impl_->is_embedding(); }
+bool HouMoLLModel::is_embedding() { return !impls_.empty() && impls_.front()->is_embedding(); }
+bool HouMoLLModel::is_asr_force_aligner() { return !impls_.empty() && impls_.front()->is_asr_force_aligner(); }
+bool HouMoLLModel::has_decode_model() {
+    return !impls_.empty() &&
+           std::all_of(impls_.begin(), impls_.end(), [](Impl *impl) { return impl->has_decode_model(); });
+}
 int HouMoLLModel::max_parallel_sequences() const {
-    return impl_ ? impl_->max_parallel_sequences() : 0;
+    return impls_.empty() ? 0 : impls_.front()->max_parallel_sequences();
 }
-bool HouMoLLModel::is_asr_force_aligner() { return impl_->is_asr_force_aligner(); }
-bool HouMoLLModel::has_decode_model() { return impl_->has_decode_model(); }
 
 // ---- MTP forwarders ----
 bool HouMoLLModel::is_mtp_model() const {
-    return impl_ ? impl_->is_mtp_model() : false;
+    return !impls_.empty() && impls_.front()->is_mtp_model();
 }
 
 bool HouMoLLModel::has_mtp_modules() const {
-    return impl_mtp_ != nullptr || (impl_ && impl_->has_mtp_modules());
+    return !impls_mtp_.empty();
 }
 
 int HouMoLLModel::houmo_decode_mtp(const float *h_in,
@@ -1071,20 +1486,26 @@ int HouMoLLModel::houmo_decode_mtp(const float *h_in,
                                    std::vector<float *> &logits_out,
                                    float *h_out,
                                    int32_t start_pos) {
-    return impl_mtp_ ? impl_mtp_->houmo_decode_mtp(h_in, tokens, seq_id, logits_out, h_out,
-                                   start_pos) : -1;
+    SeqRoute route;
+    if (!route_seq(seq_id, true, route)) {
+        LLAMA_LOG_ERROR("%s: invalid MTP seq_id=%d (seq_max=%d)\n",
+                        __func__, seq_id, mtp_seq_max_);
+        return -1;
+    }
+    return route.impl->houmo_decode_mtp(h_in, tokens, route.local_seq_id,
+        logits_out, h_out, start_pos);
 }
 
 void HouMoLLModel::set_pre_norm_hidden_dst(float *dst, int n_rows) {
-    if (impl_) {
-        impl_->set_pre_norm_hidden_dst(dst, n_rows);
-    }
+    for (auto *impl : impls_) impl->set_pre_norm_hidden_dst(dst, n_rows);
 }
 
 void HouMoLLModel::lora_init(std::string file_name, void *adapter) {
-    impl_->lora_init(file_name, adapter);
+    for (auto *impl : impls_) impl->lora_init(file_name, adapter);
 }
 void HouMoLLModel::lora_set_scale(void *adapter, float scale) {
-    impl_->lora_set_scale(adapter, scale);
+    for (auto *impl : impls_) impl->lora_set_scale(adapter, scale);
 }
-void HouMoLLModel::lora_clear() { impl_->lora_clear(); }
+void HouMoLLModel::lora_clear() {
+    for (auto *impl : impls_) impl->lora_clear();
+}

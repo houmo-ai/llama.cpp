@@ -59,7 +59,9 @@ int top_token_id(const float *logits, size_t n) {
 } // namespace
 
 bool HouMoGemma4::houmo_load(llama_model_loader &ml, std::vector<int> device_ids) {
-    HouMoLLModel::Impl::houmo_load(ml, device_ids);
+    if (!HouMoLLModel::Impl::houmo_load(ml, device_ids)) {
+        return false;
+    }
     std::string file_name = ml.fname_;
 
     // 加载 per_layer_embedding.bin

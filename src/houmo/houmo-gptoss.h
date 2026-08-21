@@ -19,6 +19,11 @@ class HouMoGPTOSS : public HouMoLLModel::Impl {
     virtual int houmo_decode(std::vector<llama_token> &batches,
                              std::vector<int> &seq_ids,
                              std::vector<float *> logits) override;
+    void state_write(llama_io_write_i & io, int local_seq_id,
+             llama_state_seq_flags flags) const override;
+    void state_read(llama_io_read_i & io, int local_seq_id,
+            llama_state_seq_flags flags) override;
+    int state_position(int local_seq_id) const override;
 
   private:
     int set_attentions_for_prefill(int current_length, int valid_length);

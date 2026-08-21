@@ -61,6 +61,7 @@ json task_params::to_json(bool only_metrics) const {
 
     if (only_metrics) {
         return json {
+            {"priority",                  priority},
             {"seed",                      sampling.seed},
             {"temperature",               sampling.temp},
             {"dynatemp_range",            sampling.dynatemp_range},
@@ -111,6 +112,7 @@ json task_params::to_json(bool only_metrics) const {
     }
 
     return json {
+        {"priority",                  priority},
         {"seed",                      sampling.seed},
         {"temperature",               sampling.temp},
         {"dynatemp_range",            sampling.dynatemp_range},
@@ -352,6 +354,10 @@ task_params server_task::params_from_json_cmpl(
     params.timings_per_token = json_value(data, "timings_per_token", false);
 
     params.stream           = json_value(data,       "stream",             false);
+    params.priority         = json_value_i32_or_string(data, "priority", 100);
+    if (params.priority < 0) {
+        throw std::runtime_error("priority must be >= 0");
+    }
     auto stream_opt         = json_value(data,       "stream_options",     json::object());
     params.include_usage    = json_value(stream_opt, "include_usage",      false);
     params.cache_prompt     = json_value(data,       "cache_prompt",       defaults.cache_prompt);
@@ -2087,6 +2093,13 @@ json server_task_result_slot_erase::to_json() {
     return json {
         { "id_slot",  id_slot },
         { "n_erased", n_erased },
+    };
+}
+
+json server_task_result_slot_state::to_json() {
+    return json {
+        { "id_slot", id_slot },
+        { "paused",  paused },
     };
 }
 

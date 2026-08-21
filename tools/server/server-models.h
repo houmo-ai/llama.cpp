@@ -112,6 +112,7 @@ private:
     std::string bin_path;
     std::vector<std::string> base_env;
     common_preset base_preset; // base preset from llama-server CLI args
+    bool metadata_only = false;
 
     void update_meta(const std::string & name, const server_model_meta & meta);
 
@@ -122,7 +123,7 @@ private:
     void add_model(server_model_meta && meta);
 
 public:
-    server_models(const common_params & params, int argc, char ** argv);
+    server_models(const common_params & params, int argc, char ** argv, bool metadata_only = false);
 
     // (re-)load the list of models from various sources and prepare the metadata mapping
     // - if this is called the first time, simply populate the metadata

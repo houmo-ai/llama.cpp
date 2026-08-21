@@ -1362,7 +1362,11 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
         }
     }
 
-    if (!params.lora_init_without_apply) {
+    if (params.lora_init_without_apply) {
+        for (auto & la : params.lora_adapters) {
+            la.scale = 0.0f;
+        }
+    } else {
         common_set_adapter_lora(lctx, params.lora_adapters);
     }
 

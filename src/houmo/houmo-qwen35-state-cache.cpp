@@ -34,6 +34,13 @@ size_t chunk_token_count(const std::vector<PrefillChunk> &chunks) {
 
 std::string make_state_output_name(const std::string &input_name) {
     std::string output_name = input_name;
+    //FIXME:  @guoxing.xu This is a temporary hack to handle temp model.
+    constexpr const char *hmcc_suffix = ".hmcc.format";
+    if (output_name.size() >= std::strlen(hmcc_suffix) &&
+        output_name.compare(output_name.size() - std::strlen(hmcc_suffix),
+                            std::strlen(hmcc_suffix), hmcc_suffix) == 0) {
+        output_name.erase(output_name.size() - std::strlen(hmcc_suffix));
+    }
     auto pos = output_name.find("past_conv_cache_");
     if (pos != std::string::npos) {
         output_name.replace(pos, std::strlen("past_conv_cache_"),
@@ -71,9 +78,9 @@ void HoumoQwen35StateCache::configure_state_cache(
 void HoumoQwen35StateCache::reset_state_cache_metadata() {
     state_cache_names_.clear();
     state_cache_prefill_output_names_.clear();
-    state_cache_output_names_.clear();
-    state_cache_split_output_names_.clear();
+    state_decode_split_output_names_.clear();
     checkpoint_tensor_indices_.clear();
+    state_decode_batch_count_ = 1;
     decode_verify_seq_ = 1;
     state_cache_.clear();
     state_cache_initialized_.clear();
@@ -134,6 +141,7 @@ void HoumoQwen35StateCache::initialize_state_cache(
     if (state_decode_model_ == nullptr) {
         return;
     }
+    state_decode_batch_count_ = std::max(1, n_decode_batch);
 
     const auto all_output_names = collect_decode_output_names();
     discover_state_cache_bindings(all_output_names);
@@ -225,29 +233,14 @@ void HoumoQwen35StateCache::discover_state_cache_bindings(
 
     size_t prefill_output_count = 0;
     size_t prefill_in_place_count = 0;
-    auto add_name = [&](const std::string &name,
-                        const std::string &prefill_output_name,
-                        const std::string &output_name,
-                        std::vector<std::string> &&split_outputs) {
-        auto iter = std::find(state_cache_names_.begin(), state_cache_names_.end(), name);
-        if (iter == state_cache_names_.end()) {
-            state_cache_names_.push_back(name);
-            state_cache_prefill_output_names_.push_back(prefill_output_name);
-            state_cache_output_names_.push_back(output_name);
-            state_cache_split_output_names_.push_back(std::move(split_outputs));
-            if (prefill_output_name.empty()) {
-                ++prefill_in_place_count;
-            } else {
-                ++prefill_output_count;
-            }
-        }
-    };
     for (size_t idx = 0; idx < state_decode_model_->GetInputNum(); ++idx) {
-        auto input_name = state_decode_model_->GetInputName(idx);
-        if (!is_state_cache_name(input_name)) {
+        const std::string input_name = state_decode_model_->GetInputName(idx);
+        if (!is_state_cache_name(input_name) ||
+            input_name.find("_batch") != std::string::npos) {
             continue;
         }
 
+        state_cache_names_.push_back(input_name);
         const std::string output_name = make_state_output_name(input_name);
         const bool has_prefill_output =
             std::find(prefill_output_names.begin(), prefill_output_names.end(),
@@ -261,17 +254,21 @@ void HoumoQwen35StateCache::discover_state_cache_bindings(
                 "using in-place state update\n",
                 __func__, output_name.c_str(), input_name.c_str());
         }
-        // 优先看 bare 名是否真的存在于 decode 输出里 (普通 1-token decode);
-        // 否则按 verify 形态尝试 <bare>_<pos> 收集 split 输出。
-        std::vector<std::string> split_outs;
-        const bool has_bare =
+        state_cache_prefill_output_names_.push_back(
+            has_prefill_output ? output_name : "");
+        if (has_prefill_output) {
+            ++prefill_output_count;
+        } else {
+            ++prefill_in_place_count;
+        }
+
+        const bool has_decode_output =
             std::find(all_output_names.begin(), all_output_names.end(),
                       output_name) != all_output_names.end();
-        if (!has_bare) {
-            split_outs = collect_state_split_outputs(all_output_names, output_name);
-        }
-        add_name(input_name, has_prefill_output ? output_name : "", output_name,
-                 std::move(split_outs));
+        state_decode_split_output_names_.push_back(
+            has_decode_output
+                ? std::vector<std::string>{}
+                : collect_state_split_outputs(all_output_names, output_name));
     }
 
     LLAMA_LOG_INFO(
@@ -290,14 +287,22 @@ void HoumoQwen35StateCache::init_checkpoint_tensor_indices() {
 
 void HoumoQwen35StateCache::allocate_state_cache_entries(
     int seq_max, int n_prefill_batch, int n_decode_batch) {
-    int size = (seq_max + n_prefill_batch - 1) / n_prefill_batch;
-    size = std::max(size, n_decode_batch);
+    // Multi-batch uses a fixed one-to-one mapping:
+    // seq_id 0..N-1 owns physical decode batch lane 0..N-1.
+    const int size = n_decode_batch > 1
+                         ? seq_max
+                         : (seq_max + n_prefill_batch - 1) / n_prefill_batch;
     for (int i = 0; i < size; ++i) {
         StateCacheEntry entry;
         entry.tensors.reserve(state_cache_names_.size());
-        for (const auto &name : state_cache_names_) {
+        for (size_t idx = 0; idx < state_cache_names_.size(); ++idx) {
+            const int batch_id = n_decode_batch > 1 ? i : 0;
+            const std::string name = state_input_name(idx, batch_id);
             auto cache = state_decode_model_->GetDevInput(name);
-            if (i > 0) {
+            if (n_decode_batch == 1 && i > 0) {
+                // Preserve the original, tested single-batch allocation:
+                // additional sequence entries are independent copies selected
+                // together with the KV cache at decode sequence switches.
                 cache = cache.Clone();
             }
             entry.tensors.push_back(cache);
@@ -392,6 +397,7 @@ void HoumoQwen35StateCache::set_state_cache_for_prefill(int seq_id) {
     // compiled graph actually exposes it. Newer graphs update recurrent state
     // in-place and omit recurrent_state_out_* from their output interface.
     for (size_t idx = 0; idx < tensors.size(); ++idx) {
+        // Prefill and decode batch 0 use the same bare state input name.
         state_prefill_model_->SetDevInput(state_cache_names_[idx], tensors[idx]);
         if (idx < state_cache_prefill_output_names_.size() &&
             !state_cache_prefill_output_names_[idx].empty()) {
@@ -406,39 +412,58 @@ void HoumoQwen35StateCache::set_state_cache_for_decode(
     if (state_decode_model_ == nullptr) {
         return;
     }
-    for (auto seq_id : seq_ids) {
+    for (int seq_id : seq_ids) {
         auto iter = state_cache_.find(seq_id);
         if (iter == state_cache_.end()) {
             continue;
         }
+        const int batch_id = state_decode_batch_count_ > 1 ? seq_id : 0;
+        if (batch_id < 0 || batch_id >= state_decode_batch_count_) {
+            LLAMA_LOG_ERROR(
+                "%s: invalid seq_id=%d mapped batch_id=%d, decode_batch_count=%d\n",
+                __func__, seq_id, batch_id, state_decode_batch_count_);
+            continue;
+        }
         auto &tensors = iter->second.tensors;
         for (size_t idx = 0; idx < tensors.size(); ++idx) {
-            state_decode_model_->SetDevInput(state_cache_names_[idx], tensors[idx]);
-            const std::string out_name = state_output_name(idx, accept_pos);
-            if (bind_outputs && !out_name.empty()) {
-                state_decode_model_->SetDevOutput(out_name, tensors[idx]);
+            const std::string input_name = state_input_name(idx, batch_id);
+            const std::string output_name =
+                state_output_name(idx, batch_id, accept_pos);
+            state_decode_model_->SetDevInput(input_name, tensors[idx]);
+            if (bind_outputs && !output_name.empty()) {
+                state_decode_model_->SetDevOutput(output_name, tensors[idx]);
             }
         }
     }
 }
 
-std::string HoumoQwen35StateCache::state_output_name(size_t idx, int accept_pos) const {
-    if (idx < state_cache_split_output_names_.size() &&
-        !state_cache_split_output_names_[idx].empty()) {
-        const auto &split = state_cache_split_output_names_[idx];
+std::string HoumoQwen35StateCache::state_input_name(size_t idx,
+                                                    int batch_id) const {
+    if (idx >= state_cache_names_.size() || batch_id < 0) {
+        return "";
+    }
+    return batch_id == 0
+               ? state_cache_names_[idx]
+               : state_cache_names_[idx] + "_batch" +
+                     std::to_string(batch_id);
+}
+
+std::string HoumoQwen35StateCache::state_output_name(
+    size_t idx, int batch_id, int accept_pos) const {
+    if (batch_id == 0 && idx < state_decode_split_output_names_.size() &&
+        !state_decode_split_output_names_[idx].empty()) {
+        const auto &split = state_decode_split_output_names_[idx];
         const int last = static_cast<int>(split.size()) - 1;
         int sel = accept_pos;
         if (sel < 0) sel = 0;
         if (sel > last) sel = last;
         return split[static_cast<size_t>(sel)];
     }
-    if (idx < state_cache_output_names_.size()) {
-        return state_cache_output_names_[idx];
-    }
-    return "";
+    return make_state_output_name(state_input_name(idx, batch_id));
 }
 
-int HoumoQwen35StateCache::bind_verify_state_to_cache(int seq_id, int accept_pos) {
+int HoumoQwen35StateCache::bind_verify_state_to_cache(int seq_id,
+                                                       int accept_pos) {
     if (state_decode_model_ == nullptr) {
         return -1;
     }
@@ -446,23 +471,25 @@ int HoumoQwen35StateCache::bind_verify_state_to_cache(int seq_id, int accept_pos
     if (iter == state_cache_.end()) {
         return -1;
     }
-
+    // MTP target verify only supports physical batch 0.
     auto &tensors = iter->second.tensors;
     for (size_t idx = 0; idx < tensors.size(); ++idx) {
-        const std::string out_name = state_output_name(idx, accept_pos);
+        const std::string input_name = state_input_name(idx, /*batch_id=*/0);
+        const std::string out_name =
+            state_output_name(idx, /*batch_id=*/0, accept_pos);
         if (out_name.empty()) {
             continue;
         }
-
-        auto out = state_decode_model_->GetDevOutput(out_name);
-        if (state_decode_model_->SetDevInput(state_cache_names_[idx], out) != tcim::Status::OK) {
-            LLAMA_LOG_ERROR("%s: failed to bind verify state output '%s' to input '%s'\n",
-                            __func__, out_name.c_str(), state_cache_names_[idx].c_str());
+        auto output = state_decode_model_->GetDevOutput(out_name);
+        if (state_decode_model_->SetDevInput(input_name, output) !=
+            tcim::Status::OK) {
+            LLAMA_LOG_ERROR(
+                "%s: failed to bind verify state output '%s' to input '%s'\n",
+                __func__, out_name.c_str(), input_name.c_str());
             return -1;
         }
-        tensors[idx] = out;
+        tensors[idx] = output;
     }
-
     state_cache_initialized_[seq_id] = true;
     return 0;
 }

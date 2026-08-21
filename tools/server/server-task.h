@@ -24,6 +24,8 @@ enum server_task_type {
     SERVER_TASK_TYPE_SLOT_SAVE,
     SERVER_TASK_TYPE_SLOT_RESTORE,
     SERVER_TASK_TYPE_SLOT_ERASE,
+    SERVER_TASK_TYPE_SLOT_PAUSE,
+    SERVER_TASK_TYPE_SLOT_RESUME,
     SERVER_TASK_TYPE_GET_LORA,
     SERVER_TASK_TYPE_SET_LORA,
 };
@@ -47,6 +49,9 @@ enum stop_type {
 };
 
 struct task_params {
+    // Lower value means higher scheduling priority. 0 is highest.
+    int32_t priority = 100;
+
     bool stream          = true;
     bool include_usage   = false;
     bool cache_prompt    = true; // remember the prompt to avoid reprocessing all prompt
@@ -571,6 +576,12 @@ struct server_task_result_slot_save_load : server_task_result {
 struct server_task_result_slot_erase : server_task_result {
     size_t n_erased;
 
+    virtual json to_json() override;
+};
+
+struct server_task_result_slot_state : server_task_result {
+    int id_slot = -1;
+    bool paused = false;
     virtual json to_json() override;
 };
 
