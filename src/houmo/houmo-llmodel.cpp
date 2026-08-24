@@ -327,6 +327,7 @@ bool HouMoLLModel::Impl::houmo_load(llama_model_loader &ml, std::vector<int> dev
         dummy_tensor_names.push_back(v_cache_name);
     }
     parse_deviceids();
+    recovery_handle_ = houmo_runtime_recovery_acquire(device_ids_);
     std::vector<houmo_content_range> embedding_ranges;
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {

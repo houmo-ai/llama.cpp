@@ -192,14 +192,14 @@ int HouMoGLMOCRModel::houmo_prefill(std::vector<llama_token> &tokens,
             set_kv_cache_for_prefill(seq_id);
         }
 
-        const auto status = prefill_model_->Run();
+        const auto status = houmo_run_with_retry(
+            *prefill_model_, recovery_handle_, "HoumoGLMOCRModel prefill Run");
         if (status != tcim::Status::OK) {
             LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
                             __func__, static_cast<int>(status));
             reset_cached_inputs(seq_id);
             return -1;
         }
-        prefill_model_->Sync();
 
         if (abort_callback_ != nullptr && abort_callback_(abort_callback_data_)) {
             LLAMA_LOG_INFO("%s: abort_callback_ is called. seq_id = %d\n",
@@ -406,14 +406,14 @@ int HouMoGLMOCRModel::houmo_decode(std::vector<llama_token> &batches,
     PERF_STOP(DECODE_SETINPUT);
 
     PERF_START(DECODE_RUN);
-    const auto status = decode_model_->Run();
+    const auto status = houmo_run_with_retry(
+        *decode_model_, recovery_handle_, "HoumoGLMOCRModel decode Run");
     if (status != tcim::Status::OK) {
         PERF_STOP(DECODE_RUN);
         LLAMA_LOG_ERROR("%s: decode_model_->Run() failed, result = %d\n",
                         __func__, static_cast<int>(status));
         return -1;
     }
-    decode_model_->Sync();
     PERF_STOP(DECODE_RUN);
 
     PERF_START(DECODE_GETOUTPUT);

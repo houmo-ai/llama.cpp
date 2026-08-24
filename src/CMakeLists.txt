@@ -38,6 +38,7 @@ add_library(llama
             unicode-data.cpp
             unicode.cpp
             unicode.h
+            houmo/houmo-runtime-recovery.cpp
             houmo/houmo-llmodel.cpp
             houmo/houmo-weight-manager-pool.cpp
             houmo/houmo-state-io.cpp
@@ -70,6 +71,7 @@ target_include_directories(llama PUBLIC ../include ../vendor ../common ${HOUMO_T
 target_compile_features   (llama PUBLIC cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml ${HOUMO_RUNTIME_LIBRARIES})
+target_compile_definitions(llama PRIVATE HOUMO_RUNTIME_RECOVERY_BUILD)
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)

@@ -169,13 +169,13 @@ int HouMoVLLModel::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             set_kv_cache_for_prefill(seq_id);
         PERF_STOP(PREFILL_SETINPUT_ONCE);
         PERF_START(PREFILL_RUN_ONCE);
-        auto status = prefill_model_->Run();
+        auto status = houmo_run_with_retry(
+            *prefill_model_, recovery_handle_, "HoumoVLLModel prefill Run");
         if (status != tcim::Status::OK) {
             LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
                             __func__, static_cast<int>(status));
             return -1;
         }
-        prefill_model_->Sync();
         if (abort_callback_ != nullptr && abort_callback_(abort_callback_data_)) {
             LLAMA_LOG_INFO("%s: abort_callback_ is called. seq_id = %d\n", __func__, seq_id);
             reset_position_ids(seq_id);
@@ -355,9 +355,15 @@ int HouMoVLLModel::houmo_decode(std::vector<llama_token> &batches,
     set_kv_cache_for_decode(seq_ids);
     PERF_STOP(DECODE_SETINPUT);
     PERF_START(DECODE_RUN);
-    // 5. run & sync
-    decode_model_->Run();
-    decode_model_->Sync();
+    // 5. synchronous run
+    const auto status = houmo_run_with_retry(
+        *decode_model_, recovery_handle_, "HoumoVLLModel decode Run");
+    if (status != tcim::Status::OK) {
+        PERF_STOP(DECODE_RUN);
+        LLAMA_LOG_ERROR("%s: decode Run failed, result=%d\n", __func__,
+                        static_cast<int>(status));
+        return -1;
+    }
     PERF_STOP(DECODE_RUN);
 
     // 6. get output to logits

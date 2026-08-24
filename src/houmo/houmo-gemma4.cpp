@@ -757,7 +757,8 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
         PERF_STOP(PREFILL_SETINPUT_ONCE);
 
         PERF_START(PREFILL_RUN_ONCE);
-        auto status = prefill_model_->Run();
+        auto status = houmo_run_with_retry(
+            *prefill_model_, recovery_handle_, "HouMoGemma4 prefill Run");
         if (status != tcim::Status::OK) {
             PERF_STOP(PREFILL_RUN_ONCE);
             LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
@@ -765,7 +766,6 @@ int HouMoGemma4::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             clear_cached_inputs(seq_id);
             return -1;
         }
-        prefill_model_->Sync();
         PERF_STOP(PREFILL_RUN_ONCE);
 
         if (pre_norm_hidden_dst_ != nullptr && pre_norm_hidden_dst_rows_ > 0) {
@@ -927,8 +927,14 @@ int HouMoGemma4::houmo_decode(std::vector<llama_token> &batches,
     PERF_STOP(DECODE_SETINPUT);
 
     PERF_START(DECODE_RUN);
-    decode_model_->Run();
-    decode_model_->Sync();
+    const auto status = houmo_run_with_retry(
+        *decode_model_, recovery_handle_, "HouMoGemma4 decode Run");
+    if (status != tcim::Status::OK) {
+        PERF_STOP(DECODE_RUN);
+        LLAMA_LOG_ERROR("%s: decode Run failed, result=%d\n", __func__,
+                        static_cast<int>(status));
+        return -1;
+    }
     PERF_STOP(DECODE_RUN);
 
     PERF_START(DECODE_GETOUTPUT);
@@ -1086,14 +1092,14 @@ int HouMoGemma4::houmo_verify(std::vector<llama_token> &tokens, int seq_id,
     PERF_STOP(VERIFY_SETINPUT);
 
     PERF_START(VERIFY_RUN);
-    auto status = decode_model_->Run();
+    auto status = houmo_run_with_retry(
+        *decode_model_, recovery_handle_, "HouMoGemma4 verify Run");
     if (status != tcim::Status::OK) {
         PERF_STOP(VERIFY_RUN);
         LLAMA_LOG_ERROR("%s: decode verify Run() failed, result=%d\n",
                         __func__, static_cast<int>(status));
         return -1;
     }
-    decode_model_->Sync();
     PERF_STOP(VERIFY_RUN);
 
     PERF_START(VERIFY_GETOUTPUT);

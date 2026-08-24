@@ -438,13 +438,13 @@ int HouMoGPTOSS::houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
             return -1;
         }
         set_kv_cache_for_prefill(seq_id);
-        auto status = prefill_model_->Run();
+        auto status = houmo_run_with_retry(
+            *prefill_model_, recovery_handle_, "HoumoGPTOss prefill Run");
         if (status != tcim::Status::OK) {
             LLAMA_LOG_ERROR("%s: prefill_model_->Run() failed, result = %d\n",
                             __func__, static_cast<int>(status));
             return -1;
         }
-        prefill_model_->Sync();
         valid_length += current_length;
         update_device_kv_range(seq_id, valid_length);
         const bool final_round = round == prefill_loop_round - 1;
@@ -511,9 +511,14 @@ int HouMoGPTOSS::houmo_decode(std::vector<llama_token> &batches,
     // 4. set kv_cache
     set_kv_cache_for_decode(seq_ids);
 
-    // 5. run & sync
-    decode_model_->Run();
-    decode_model_->Sync();
+    // 5. synchronous run
+    const auto status = houmo_run_with_retry(
+        *decode_model_, recovery_handle_, "HoumoGPTOss decode Run");
+    if (status != tcim::Status::OK) {
+        LLAMA_LOG_ERROR("%s: decode Run failed, result=%d\n", __func__,
+                        static_cast<int>(status));
+        return -1;
+    }
 
     // 6. get output to logits
     tcim::Tensor decode_data =

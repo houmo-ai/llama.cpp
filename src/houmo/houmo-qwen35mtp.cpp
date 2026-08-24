@@ -435,15 +435,15 @@ int HoumoQwen35MTP::run_mtp_prefill(const float *h_in,
             }
         }
 
-        // 4. Run + Sync
-        auto status = m->Run();
+        // 4. Synchronous run
+        auto status = houmo_run_with_retry(
+            *m, recovery_handle_, "HoumoQwen35MTP prefill Run");
         if (status != tcim::Status::OK) {
             LLAMA_LOG_ERROR("[MTP-PREFILL] Run failed status=%d at cursor=%zu "
                             "mtp_valid=%zu\n",
                             (int)status, cursor, mtp_valid);
             return -1;
         }
-        m->Sync();
 
         // 5. Read logits (mtp_valid entries, matching the pre-aligned input pairs)
         auto dev = m->GetOutput(ns.mtp_logits_out);
@@ -611,13 +611,13 @@ int HoumoQwen35MTP::run_mtp_decode(const float *h_in,
     }
     PERF_STOP(mtp_set_inputs);
     PERF_START(mtp_run_once);
-    // 4. Run + Sync
-    auto status = m->Run();
+    // 4. Synchronous run
+    auto status = houmo_run_with_retry(
+        *m, recovery_handle_, "HoumoQwen35MTP decode Run");
     if (status != tcim::Status::OK) {
         LLAMA_LOG_ERROR("[MTP-DECODE] Run failed status=%d\n", (int)status);
         return -1;
     }
-    m->Sync();
     PERF_STOP(mtp_run_once);
     PERF_START(mtp_read_outputs);
     // 5. Read logits

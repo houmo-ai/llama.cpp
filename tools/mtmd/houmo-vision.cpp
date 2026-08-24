@@ -100,6 +100,7 @@ bool HoumoVision::houmo_load(const std::string &file_name, std::vector<int> devi
     }
     std::string backend = "Xh2HalBackend";
     parse_deviceids();
+    recovery_handle_ = houmo_runtime_recovery_acquire(device_ids_);
     // 从gguf文件中加载hmmodels
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
@@ -565,8 +566,12 @@ bool HoumoQwenVision::encoding(const std::vector<float> &input_data,
     }
     // fixed resolution. index & mask already set in init()
     module_->SetInput(input_name_, input_tensor);
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: vision Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
     fill_header(output_data);
     int offset = sizeof(CompactHeader);
     output_data.resize(output_data.size() * output_names_.size());
@@ -783,8 +788,12 @@ bool HoumoGLMOCRVision::encoding(const std::vector<float> & input_data,
     input_fp32_tensor.Buffer().CopyFromHost(pixel_values.data(), input_fp32_tensor.MemSize());
     input_fp32_tensor.CastTo(input_tensor);
     module_->SetInput(input_name_, input_tensor);
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: vision Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
 
     fill_header(output_data);
     int    offset          = sizeof(CompactHeader);
@@ -1000,8 +1009,12 @@ bool HoumoMinicpmVision::encoding(const std::vector<float> &input_data,
                                             input_fp32_tensor.MemSize());
     input_fp32_tensor.CastTo(input_tensor);
     module_->SetInput(module_->GetInputName(0), input_tensor);
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: vision Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
     for (auto &name : output_names_) {
         tcim::Tensor output_tensor = module_->GetOutput(name);
         memcpy(output_data.data() + out_offset, output_tensor.Buffer().Data(),
@@ -1257,8 +1270,12 @@ bool HoumoGemmaVision::encoding(const std::vector<float> &input_data, std::vecto
     if (!set_padded_visual_inputs(nchw_data_, valid_patches)) {
         return false;
     }
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: vision Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
     fill_header(output_data);
     int offset = sizeof(CompactHeader);
     int8_t * output_data_ptr = reinterpret_cast<int8_t *>(output_data.data());

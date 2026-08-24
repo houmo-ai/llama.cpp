@@ -217,11 +217,12 @@ int HouMoEmbed::houmo_embedding(const std::map<int32_t, std::vector<llama_token>
     embed_model_->SetInput(embed_model_->GetInputName(0), input);
     embed_model_->SetInput(embed_model_->GetInputName(1), token_type_ids);
     embed_model_->SetInput(embed_model_->GetInputName(2), attention_mask);
-    if (auto status = embed_model_->Run(); status != tcim::Status::OK) {
+    if (auto status = houmo_run_with_retry(
+            *embed_model_, recovery_handle_, "HoumoEmbed::Run");
+        status != tcim::Status::OK) {
         LLAMA_LOG_ERROR("%s: embed_model_->Run() failed, result = %d\n", __func__, static_cast<int>(status));
         return -1;
     }
-    embed_model_->Sync();
 
     auto output       = embed_model_->GetOutput(embed_model_->GetOutputName(0));
     auto output_float = output_map_.at(embed_model_->GetOutputName(0));

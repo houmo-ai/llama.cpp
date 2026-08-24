@@ -394,14 +394,14 @@ int HouMoGemma4MTP::houmo_decode_mtp_one(const float *h_in,
     PERF_STOP(MTP_PRERUN);
 
     PERF_START(MTP_RUN);
-    auto status = decode_model_->Run();
+    auto status = houmo_run_with_retry(
+        *decode_model_, recovery_handle_, "HouMoGemma4MTP decode Run");
     if (status != tcim::Status::OK) {
         LLAMA_LOG_ERROR("%s: MTP Run failed status=%d\n", __func__,
                         (int)status);
         PERF_STOP(MTP_RUN);
         return -1;
     }
-    decode_model_->Sync();
     PERF_STOP(MTP_RUN);
     PERF_START(MTP_OUTPUT);
     auto logits = decode_model_->GetOutput(mtp_names_.logits_out);

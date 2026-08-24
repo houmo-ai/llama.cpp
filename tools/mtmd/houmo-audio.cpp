@@ -46,6 +46,7 @@ bool HoumoAudio::houmo_load(const std::string &file_name, std::vector<int> devic
 
     std::string backend = "Xh2HalBackend";
     parse_deviceids();
+    recovery_handle_ = houmo_runtime_recovery_acquire(device_ids_);
 
     const int general_name_key = gguf_find_key(ctx, "general.name");
     if (general_name_key >= 0) {
@@ -225,8 +226,12 @@ bool HoumoQwen3Audio::encoding(const std::vector<float> &input_data,
         module_->SetInput(audio_feature_lens_name_, feature_lens_tensor);
     }
 
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: audio Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
     for (auto &name : output_names_) {
         tcim::Tensor output_tensor = module_->GetOutput(name);
         const size_t offset = (size_t) std::max(out_offset, 0);
@@ -359,8 +364,12 @@ bool HoumoGLMAsrAudio::encoding(const std::vector<float> &input_data,
         module_->SetInput(audio_feature_lens_name_, feature_lens_tensor);
     }
 
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: audio Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
     for (auto &name : output_names_) {
         tcim::Tensor output_tensor = module_->GetOutput(name);
         const auto output_info = output_tensor.Info().AsContiguous();
@@ -645,8 +654,12 @@ bool HoumoGemmaAudio::encoding(const std::vector<float> &input_data,
     LOG_INF("%s: valid_frames=%d, padded_frames=%d, n_mel=%d\n",
             __func__, valid_frames, n_frames, n_mel);
 
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: audio Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
 
     tcim::Tensor output_tensor = module_->GetOutput(audio_output_embeds_name_);
     const auto output_info = output_tensor.Info().AsContiguous();

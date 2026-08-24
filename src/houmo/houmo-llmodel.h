@@ -15,6 +15,7 @@
 #include "llama-io.h"
 #include "ggml.h"
 #include "houmo-weight-manager-pool.h"
+#include "houmo-runtime-recovery.h"
 // houmo llm model defination
 //
 // @guoxing.xu 2025-05-23
@@ -420,6 +421,7 @@ protected:
   // TCIM Modules are still releasing their device allocations.
   tcim::Module::WeightManager wm_;
   std::shared_ptr<houmo_weight_manager_handle> wm_handle_;
+  houmo_runtime_recovery_handle_ptr recovery_handle_;
   bool wm_configured_ = false;
 
   std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_ = nullptr;

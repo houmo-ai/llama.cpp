@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include "mtmd-image.h"
+#include "houmo-runtime-recovery.h"
 class HoumoVision {
   public:
     HoumoVision() = default;
@@ -47,6 +48,7 @@ class HoumoVision {
     void parse_deviceids();
   protected:
     std::shared_ptr<tcim::Module> module_;
+    houmo_runtime_recovery_handle_ptr recovery_handle_;
     std::map<std::string, tcim::Tensor> input_tensors_;
     std::vector<std::string> output_names_;
     std::string kPatchSizeKey = "clip.vision.patch_size";

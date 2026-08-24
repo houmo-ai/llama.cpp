@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tcim/tcim_runtime.h"
+#include "houmo-runtime-recovery.h"
 
 #include <cstdint>
 #include <map>
@@ -38,6 +39,7 @@ class HoumoAudio {
 
   protected:
     std::shared_ptr<tcim::Module> module_;
+    houmo_runtime_recovery_handle_ptr recovery_handle_;
     std::map<std::string, tcim::Tensor> input_tensors_;
     std::vector<std::string> output_names_;
     std::vector<int> device_ids_;
