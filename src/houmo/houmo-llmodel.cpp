@@ -1267,11 +1267,20 @@ bool HouMoLLModel::houmo_init(houmo_memory_i *memory, int seq_max,
                               ggml_abort_callback abort_callback,
                               void *abort_callback_data,
                               bool is_mtp) {
-    if (memory_ == nullptr) {
-        memory_ = memory;
-    } else if (memory_ != memory) {
-        LLAMA_LOG_ERROR("%s: target and draft contexts must share Houmo memory\n", __func__);
-        return false;
+    // Target and MTP contexts are created by llama.cpp as separate
+    // llama_context objects, therefore they also receive separate memory
+    // wrappers.  The MTP runtime keeps its own draft position/cache state and
+    // is synchronized by the speculative layer; it must not be rejected just
+    // because its wrapper address differs from the target wrapper.  Keep the
+    // model-level memory_ bound to the target context for state I/O.
+    if (!is_mtp) {
+        if (memory_ == nullptr) {
+            memory_ = memory;
+        } else if (memory_ != memory) {
+            LLAMA_LOG_ERROR("%s: multiple target contexts cannot use different Houmo memories\n",
+                            __func__);
+            return false;
+        }
     }
 
     if (is_mtp) {
