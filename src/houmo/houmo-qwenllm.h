@@ -1,4 +1,7 @@
 #include "houmo-llmodel.h"
+
+#include <functional>
+
 /**
  * @brief HoumoQwenLLM is the derived class for single-card HouMo model.
  */
@@ -7,8 +10,8 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
     HoumoQwenLLM() = default;
     ~HoumoQwenLLM() override = default;
     virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4,
-              ggml_abort_callback abort_callback = nullptr,
-              void *abort_callback_data = nullptr) override;
+                            ggml_abort_callback abort_callback = nullptr,
+                            void *abort_callback_data = nullptr) override;
     virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                               float *logits) override;
     virtual int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
@@ -16,9 +19,16 @@ class HoumoQwenLLM : public HouMoLLModel::Impl {
     virtual int houmo_decode(std::vector<llama_token> &batches,
                              std::vector<int> &seq_ids,
                              std::vector<float *> logits) override;
+    virtual int houmo_asr_force_align(std::vector<llama_token> &tokens, int seq_id,
+                                      std::vector<float *> &logits_out) override;
+    virtual int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+                             std::vector<float *> &logits_out) override;
     virtual int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings) override;
     virtual bool is_embedding() override;
   private:
-    std::map<int32_t, std::vector<uint16_t>> input_embedding_ids_;
+    using prefill_round_callback = std::function<void(size_t, int32_t, const float *, size_t)>;
+    int houmo_prefill_impl(std::vector<llama_token> &tokens, int seq_id, float *logits,
+                 const prefill_round_callback &on_round_output);
+    std::map<int32_t, std::vector<PrefillChunk>> chunk_history_;
 };

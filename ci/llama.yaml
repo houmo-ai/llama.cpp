@@ -1,0 +1,19 @@
+name: llama
+version: llama_v1.0.0
+path: modules/llama
+is_real_path: true
+is_structure: false
+os_type:
+  linux_x86_64_xh1:
+    release:
+      - release/xh1/x86_64/
+  linux_aarch64_xh1:
+    release:
+      - release/xh1/aarch64/
+  linux_x86_64_xh2:
+    release:
+      - release/xh2/x86_64/
+  linux_aarch64_xh2:
+    release:
+      - release/xh2/aarch64/
+

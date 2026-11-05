@@ -31,7 +31,10 @@ int server_queue::post(server_task && task, bool front) {
     if (front) {
         queue_tasks.push_front(std::move(task));
     } else {
-        queue_tasks.push_back(std::move(task));
+        auto it = std::find_if(queue_tasks.begin(), queue_tasks.end(), [&](const server_task & queued) {
+            return task.params.priority < queued.params.priority;
+        });
+        queue_tasks.insert(it, std::move(task));
     }
     time_last_task = ggml_time_ms();
     condition_tasks.notify_one();
@@ -52,7 +55,10 @@ int server_queue::post(std::vector<server_task> && tasks, bool front) {
         if (front) {
             queue_tasks.push_front(std::move(task));
         } else {
-            queue_tasks.push_back(std::move(task));
+            auto it = std::find_if(queue_tasks.begin(), queue_tasks.end(), [&](const server_task & queued) {
+                return task.params.priority < queued.params.priority;
+            });
+            queue_tasks.insert(it, std::move(task));
         }
     }
     time_last_task = ggml_time_ms();
@@ -63,7 +69,10 @@ int server_queue::post(std::vector<server_task> && tasks, bool front) {
 void server_queue::defer(server_task && task) {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     QUE_DBG("defer task, id = %d\n", task.id);
-    queue_tasks_deferred.push_back(std::move(task));
+    auto it = std::find_if(queue_tasks_deferred.begin(), queue_tasks_deferred.end(), [&](const server_task & queued) {
+        return task.params.priority < queued.params.priority;
+    });
+    queue_tasks_deferred.insert(it, std::move(task));
     time_last_task = ggml_time_ms();
     condition_tasks.notify_one();
 }
@@ -381,7 +390,8 @@ server_task_result_ptr server_response_reader::next(const std::function<bool()> 
         if (result == nullptr) {
             // timeout, check stop condition
             if (should_stop()) {
-                SRV_DBG("%s", "stopping wait for next result due to should_stop condition\n");
+                SRV_WRN("%s", "stopping wait for next result due to should_stop condition (adjust the --timeout argument if needed)\n");
+                SRV_WRN("%s", "ref: https://github.com/ggml-org/llama.cpp/pull/22907\n");
                 return nullptr;
             }
         } else {

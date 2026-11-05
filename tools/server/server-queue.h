@@ -81,6 +81,20 @@ public:
         return queue_tasks_deferred.size();
     }
 
+    // Returns the highest priority waiting task (lower number is higher priority).
+    // Returns INT32_MAX when no task is waiting.
+    int32_t highest_priority() {
+        std::unique_lock<std::mutex> lock(mutex_tasks);
+        int32_t result = INT32_MAX;
+        for (const auto & task : queue_tasks) {
+            result = std::min(result, task.params.priority);
+        }
+        for (const auto & task : queue_tasks_deferred) {
+            result = std::min(result, task.params.priority);
+        }
+        return result;
+    }
+
     //
     // Functions below are not thread-safe, must only be used before start_loop() is called
     //
@@ -95,11 +109,19 @@ public:
         callback_update_slots = std::move(callback);
     }
 
-    // Register callback for sleeping state change
+    // Register callback for sleeping state change; multiple callbacks are allowed
     // note: when entering sleeping state, the callback is called AFTER sleeping is set to true
     //       when leaving sleeping state, the callback is called BEFORE sleeping is set to false
     void on_sleeping_state(std::function<void(bool)> callback) {
-        callback_sleeping_state = std::move(callback);
+        if (callback_sleeping_state) {
+            auto prev_callback = std::move(callback_sleeping_state);
+            callback_sleeping_state = [prev_callback, callback](bool sleeping) {
+                prev_callback(sleeping);
+                callback(sleeping);
+            };
+        } else {
+            callback_sleeping_state = std::move(callback);
+        }
     }
 
 private:

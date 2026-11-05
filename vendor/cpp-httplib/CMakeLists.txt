@@ -5,6 +5,8 @@ find_package(Threads REQUIRED)
 
 llama_add_compile_flags()
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 add_library(${TARGET} STATIC httplib.cpp httplib.h)
 
 # disable warnings in 3rd party code
@@ -38,21 +40,9 @@ set(OPENSSL_NO_ASM ON CACHE BOOL "Disable OpenSSL ASM code when building BoringS
 if (LLAMA_BUILD_BORINGSSL)
     set(FIPS OFF CACHE BOOL "Enable FIPS (BoringSSL)")
 
+    set(BORINGSSL_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../boringssl" CACHE PATH "Existing BoringSSL source directory")
     set(BORINGSSL_GIT "https://boringssl.googlesource.com/boringssl" CACHE STRING "BoringSSL git repository")
-    set(BORINGSSL_VERSION "0.20260211.0" CACHE STRING "BoringSSL version")
-
-    message(STATUS "Fetching BoringSSL version ${BORINGSSL_VERSION}")
-
-    set(BORINGSSL_ARGS
-        GIT_REPOSITORY ${BORINGSSL_GIT}
-        GIT_TAG        ${BORINGSSL_VERSION}
-    )
-    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
-        list(APPEND BORINGSSL_ARGS EXCLUDE_FROM_ALL)
-    endif()
-
-    include(FetchContent)
-    FetchContent_Declare(boringssl ${BORINGSSL_ARGS})
+    set(BORINGSSL_VERSION "0.20260508.0" CACHE STRING "BoringSSL version")
 
     set(SAVED_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
     set(SAVED_BUILD_TESTING ${BUILD_TESTING})
@@ -60,13 +50,32 @@ if (LLAMA_BUILD_BORINGSSL)
     set(BUILD_SHARED_LIBS OFF)
     set(BUILD_TESTING OFF)
 
-    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
-        FetchContent_MakeAvailable(boringssl)
+    if(EXISTS "${BORINGSSL_SOURCE_DIR}/CMakeLists.txt")
+        message(STATUS "Using existing BoringSSL source: ${BORINGSSL_SOURCE_DIR}")
+        set(boringssl_SOURCE_DIR "${BORINGSSL_SOURCE_DIR}")
+        add_subdirectory(${boringssl_SOURCE_DIR} ${CMAKE_BINARY_DIR}/boringssl EXCLUDE_FROM_ALL)
     else()
-        FetchContent_GetProperties(boringssl)
-        if(NOT boringssl_POPULATED)
-            FetchContent_Populate(boringssl)
-            add_subdirectory(${boringssl_SOURCE_DIR} ${boringssl_BINARY_DIR} EXCLUDE_FROM_ALL)
+        message(STATUS "Fetching BoringSSL version ${BORINGSSL_VERSION}")
+
+        set(BORINGSSL_ARGS
+            GIT_REPOSITORY ${BORINGSSL_GIT}
+            GIT_TAG        ${BORINGSSL_VERSION}
+        )
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+            list(APPEND BORINGSSL_ARGS EXCLUDE_FROM_ALL)
+        endif()
+
+        include(FetchContent)
+        FetchContent_Declare(boringssl ${BORINGSSL_ARGS})
+
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+            FetchContent_MakeAvailable(boringssl)
+        else()
+            FetchContent_GetProperties(boringssl)
+            if(NOT boringssl_POPULATED)
+                FetchContent_Populate(boringssl)
+                add_subdirectory(${boringssl_SOURCE_DIR} ${boringssl_BINARY_DIR} EXCLUDE_FROM_ALL)
+            endif()
         endif()
     endif()
 
@@ -79,7 +88,7 @@ if (LLAMA_BUILD_BORINGSSL)
     target_link_libraries(${TARGET} PUBLIC ssl crypto)
 
 elseif (LLAMA_BUILD_LIBRESSL)
-    set(LIBRESSL_VERSION "4.2.1" CACHE STRING "LibreSSL version")
+    set(LIBRESSL_VERSION "4.3.1" CACHE STRING "LibreSSL version")
 
     message(STATUS "Fetching LibreSSL version ${LIBRESSL_VERSION}")
 
@@ -159,11 +168,23 @@ if(LLAMA_BUILD_BORINGSSL OR LLAMA_BUILD_LIBRESSL)
         if(LLAMA_BUILD_BORINGSSL)
             target_compile_options(fipsmodule PRIVATE /w)
         endif()
+        if(LLAMA_BUILD_LIBRESSL)
+            target_compile_options(ssl_obj PRIVATE /w)
+            target_compile_options(bs_obj PRIVATE /w)
+            target_compile_options(compat_obj PRIVATE /w)
+            target_compile_options(crypto_obj PRIVATE /w)
+        endif()
     else()
         target_compile_options(ssl PRIVATE -w)
         target_compile_options(crypto PRIVATE -w)
         if(LLAMA_BUILD_BORINGSSL)
             target_compile_options(fipsmodule PRIVATE -w)
+        endif()
+        if(LLAMA_BUILD_LIBRESSL)
+            target_compile_options(ssl_obj PRIVATE -w)
+            target_compile_options(bs_obj PRIVATE -w)
+            target_compile_options(compat_obj PRIVATE -w)
+            target_compile_options(crypto_obj PRIVATE -w)
         endif()
     endif()
 endif()

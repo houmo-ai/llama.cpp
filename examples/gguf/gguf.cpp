@@ -7,10 +7,9 @@
 #include <sstream>
 #include <vector>
 
-#undef MIN
-#undef MAX
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
+// 截断阈值
+static const size_t MAX_STRING_LEN = 88;    // 字符串最大显示长度
+static const size_t MAX_ARRAY_ITEMS = 6;     // 数组最大显示元素数
 
 template <typename T>
 static std::string to_string(const T & val) {
@@ -19,75 +18,105 @@ static std::string to_string(const T & val) {
     return ss.str();
 }
 
-static bool gguf_ex_write(const std::string & fname) {
-    struct gguf_context * ctx = gguf_init_empty();
-
-    gguf_set_val_u8  (ctx, "some.parameter.uint8",    0x12);
-    gguf_set_val_i8  (ctx, "some.parameter.int8",    -0x13);
-    gguf_set_val_u16 (ctx, "some.parameter.uint16",   0x1234);
-    gguf_set_val_i16 (ctx, "some.parameter.int16",   -0x1235);
-    gguf_set_val_u32 (ctx, "some.parameter.uint32",   0x12345678);
-    gguf_set_val_i32 (ctx, "some.parameter.int32",   -0x12345679);
-    gguf_set_val_f32 (ctx, "some.parameter.float32",  0.123456789f);
-    gguf_set_val_u64 (ctx, "some.parameter.uint64",   0x123456789abcdef0ull);
-    gguf_set_val_i64 (ctx, "some.parameter.int64",   -0x123456789abcdef1ll);
-    gguf_set_val_f64 (ctx, "some.parameter.float64",  0.1234567890123456789);
-    gguf_set_val_bool(ctx, "some.parameter.bool",     true);
-    gguf_set_val_str (ctx, "some.parameter.string",   "hello world");
-
-    gguf_set_arr_data(ctx, "some.parameter.arr.i16", GGUF_TYPE_INT16,   std::vector<int16_t>{ 1, 2, 3, 4, }.data(), 4);
-    gguf_set_arr_data(ctx, "some.parameter.arr.f32", GGUF_TYPE_FLOAT32, std::vector<float>{ 3.145f, 2.718f, 1.414f, }.data(), 3);
-    gguf_set_arr_str (ctx, "some.parameter.arr.str",                    std::vector<const char *>{ "hello", "world", "!" }.data(), 3);
-
-    struct ggml_init_params params = {
-        /*.mem_size   =*/ 128ull*1024ull*1024ull,
-        /*.mem_buffer =*/ NULL,
-        /*.no_alloc   =*/ false,
-    };
-
-    struct ggml_context * ctx_data = ggml_init(params);
-
-    const int n_tensors = 10;
-
-    // tensor infos
-    for (int i = 0; i < n_tensors; ++i) {
-        const std::string name = "tensor_" + to_string(i);
-
-        int64_t ne[GGML_MAX_DIMS] = { 1 };
-        int32_t n_dims = rand() % GGML_MAX_DIMS + 1;
-
-        for (int j = 0; j < n_dims; ++j) {
-            ne[j] = rand() % 10 + 1;
-        }
-
-        struct ggml_tensor * cur = ggml_new_tensor(ctx_data, GGML_TYPE_F32, n_dims, ne);
-        ggml_set_name(cur, name.c_str());
-
-        {
-            float * data = (float *) cur->data;
-            for (int j = 0; j < ggml_nelements(cur); ++j) {
-                data[j] = 100 + i;
-            }
-        }
-
-        gguf_add_tensor(ctx, cur);
+// 截断字符串显示
+static std::string truncate_str(const std::string & s, size_t max_len = MAX_STRING_LEN) {
+    if (s.size() <= max_len) {
+        return "'" + s + "'";
     }
-
-    gguf_write_to_file(ctx, fname.c_str(), false);
-
-    printf("%s: wrote file '%s;\n", __func__, fname.c_str());
-
-    ggml_free(ctx_data);
-    gguf_free(ctx);
-
-    return true;
+    return "'" + s.substr(0, max_len) + "...'";
 }
 
-// just read tensor info
+// 截断数组显示
+static std::string truncate_arr_str(const std::string & s, size_t max_len = MAX_STRING_LEN) {
+    if (s.size() <= max_len) {
+        return s;
+    }
+    return s.substr(0, max_len) + "...";
+}
+
+static std::string gguf_kv_to_str(const struct gguf_context * ctx, int64_t i, bool truncate = true) {
+    const enum gguf_type type = gguf_get_kv_type(ctx, i);
+    switch (type) {
+    case GGUF_TYPE_UINT8:   return to_string(gguf_get_val_u8(ctx, i));
+    case GGUF_TYPE_INT8:    return to_string(gguf_get_val_i8(ctx, i));
+    case GGUF_TYPE_UINT16:  return to_string(gguf_get_val_u16(ctx, i));
+    case GGUF_TYPE_INT16:  return to_string(gguf_get_val_i16(ctx, i));
+    case GGUF_TYPE_UINT32: return to_string(gguf_get_val_u32(ctx, i));
+    case GGUF_TYPE_INT32:  return to_string(gguf_get_val_i32(ctx, i));
+    case GGUF_TYPE_FLOAT32: return to_string(gguf_get_val_f32(ctx, i));
+    case GGUF_TYPE_UINT64: return to_string(gguf_get_val_u64(ctx, i));
+    case GGUF_TYPE_INT64:  return to_string(gguf_get_val_i64(ctx, i));
+    case GGUF_TYPE_FLOAT64: return to_string(gguf_get_val_f64(ctx, i));
+    case GGUF_TYPE_BOOL:   return gguf_get_val_bool(ctx, i) ? "true" : "false";
+    case GGUF_TYPE_STRING: {
+        const std::string s(gguf_get_val_str(ctx, i));
+        return truncate ? truncate_str(s) : "'" + s + "'";
+    }
+    case GGUF_TYPE_ARRAY:
+    {
+        const enum gguf_type arr_type = gguf_get_arr_type(ctx, i);
+        const size_t arr_n = gguf_get_arr_n(ctx, i);
+        std::string result = "[";
+        const size_t show_n = truncate ? std::min(arr_n, MAX_ARRAY_ITEMS) : arr_n;
+        for (size_t j = 0; j < show_n; ++j) {
+            if (j > 0) result += ", ";
+            if (arr_type == GGUF_TYPE_STRING) {
+                std::string item(gguf_get_arr_str(ctx, i, j));
+                result += truncate ? truncate_str(item, 16) : "'" + item + "'";
+            } else {
+                const void * data = gguf_get_arr_data(ctx, i);
+                switch (arr_type) {
+                case GGUF_TYPE_UINT8:   result += to_string(((const uint8_t *)data)[j]); break;
+                case GGUF_TYPE_INT8:    result += to_string(((const int8_t *)data)[j]); break;
+                case GGUF_TYPE_UINT16:  result += to_string(((const uint16_t *)data)[j]); break;
+                case GGUF_TYPE_INT16:   result += to_string(((const int16_t *)data)[j]); break;
+                case GGUF_TYPE_UINT32:  result += to_string(((const uint32_t *)data)[j]); break;
+                case GGUF_TYPE_INT32:   result += to_string(((const int32_t *)data)[j]); break;
+                case GGUF_TYPE_FLOAT32: result += to_string(((const float *)data)[j]); break;
+                case GGUF_TYPE_UINT64:  result += to_string(((const uint64_t *)data)[j]); break;
+                case GGUF_TYPE_INT64:   result += to_string(((const int64_t *)data)[j]); break;
+                case GGUF_TYPE_FLOAT64: result += to_string(((const double *)data)[j]); break;
+                case GGUF_TYPE_BOOL:    result += ((const int8_t *)data)[j] ? "true" : "false"; break;
+                default: result += "?"; break;
+                }
+            }
+        }
+        if (arr_n > show_n) {
+            result += ", ...";
+        }
+        result += "]";
+        return result;
+    }
+    default:
+        return "?";
+    }
+}
+
+// 类型名称映射（用于打印）
+static const char * gguf_type_name_short(enum gguf_type type) {
+    switch (type) {
+    case GGUF_TYPE_UINT8:   return "UINT8";
+    case GGUF_TYPE_INT8:    return "INT8";
+    case GGUF_TYPE_UINT16:  return "UINT16";
+    case GGUF_TYPE_INT16:  return "INT16";
+    case GGUF_TYPE_UINT32: return "UINT32";
+    case GGUF_TYPE_INT32:  return "INT32";
+    case GGUF_TYPE_FLOAT32: return "FLOAT32";
+    case GGUF_TYPE_UINT64: return "UINT64";
+    case GGUF_TYPE_INT64:  return "INT64";
+    case GGUF_TYPE_FLOAT64: return "FLOAT64";
+    case GGUF_TYPE_BOOL:   return "BOOL";
+    case GGUF_TYPE_STRING: return "STRING";
+    case GGUF_TYPE_ARRAY:  return "ARRAY";
+    default: return "UNKNOWN";
+    }
+}
+
+// 读取并按照 gguf-dump 风格打印
 static bool gguf_ex_read_0(const std::string & fname) {
     struct gguf_init_params params = {
         /*.no_alloc = */ false,
-        /*.ctx      = */ NULL,
+        /*.ctx = */ NULL,
     };
 
     struct gguf_context * ctx = gguf_init_from_file(fname.c_str(), params);
@@ -97,48 +126,51 @@ static bool gguf_ex_read_0(const std::string & fname) {
         return false;
     }
 
-    printf("%s: version:      %d\n", __func__, gguf_get_version(ctx));
-    printf("%s: alignment:   %zu\n", __func__, gguf_get_alignment(ctx));
-    printf("%s: data offset: %zu\n", __func__, gguf_get_data_offset(ctx));
+    printf("File is LITTLE endian, script is running on a LITTLE endian host.\n");
+    printf("* Dumping %ld key/value pair(s)\n", gguf_get_n_kv(ctx));
 
-    // kv
+    // kv pairs
     {
         const int n_kv = gguf_get_n_kv(ctx);
 
-        printf("%s: n_kv: %d\n", __func__, n_kv);
-
         for (int i = 0; i < n_kv; ++i) {
             const char * key = gguf_get_key(ctx, i);
+            const enum gguf_type type = gguf_get_kv_type(ctx, i);
+            const std::string val = gguf_kv_to_str(ctx, i, true);  // 截断模式
 
-            printf("%s: kv[%d]: key = %s\n", __func__, i, key);
-        }
-    }
+            // 获取元素数量
+            uint64_t count = 1;
+            if (type == GGUF_TYPE_ARRAY) {
+                count = gguf_get_arr_n(ctx, i);
+            }
 
-    // find kv string
-    {
-        const char * findkey = "some.parameter.string";
+            // 格式化类型名称
+            char type_str[32];
+            if (type == GGUF_TYPE_ARRAY) {
+                const enum gguf_type arr_type = gguf_get_arr_type(ctx, i);
+                snprintf(type_str, sizeof(type_str), "[%s]", gguf_type_name_short(arr_type));
+            } else {
+                snprintf(type_str, sizeof(type_str), "%s", gguf_type_name_short(type));
+            }
 
-        const int keyidx = gguf_find_key(ctx, findkey);
-        if (keyidx == -1) {
-            printf("%s: find key: %s not found.\n", __func__, findkey);
-        } else {
-            const char * key_value = gguf_get_val_str(ctx, keyidx);
-            printf("%s: find key: %s found, kv[%d] value = %s\n", __func__, findkey, keyidx, key_value);
+            printf("%4d: %12s | %zu | %s = %s\n",
+                   i + 1, type_str, (size_t)count, key, val.c_str());
         }
     }
 
     // tensor info
     {
         const int n_tensors = gguf_get_n_tensors(ctx);
-
-        printf("%s: n_tensors: %d\n", __func__, n_tensors);
+        printf("* Dumping %d tensor(s)\n", n_tensors);
 
         for (int i = 0; i < n_tensors; ++i) {
-            const char * name   = gguf_get_tensor_name  (ctx, i);
-            const size_t size   = gguf_get_tensor_size  (ctx, i);
-            const size_t offset = gguf_get_tensor_offset(ctx, i);
+            const char * name = gguf_get_tensor_name(ctx, i);
+            const size_t size = gguf_get_tensor_size(ctx, i);
+            // const size_t offset = gguf_get_tensor_offset(ctx, i);
+            const enum ggml_type type = gguf_get_tensor_type(ctx, i);
 
-            printf("%s: tensor[%d]: name = %s, size = %zu, offset = %zu\n", __func__, i, name, size, offset);
+            printf("%4d: %12zu | %12zu, 1, 1, 1 | %s | %s\n",
+                   i + 1, size, size, ggml_type_name(type), name);
         }
     }
 
@@ -147,126 +179,80 @@ static bool gguf_ex_read_0(const std::string & fname) {
     return true;
 }
 
-// read and create ggml_context containing the tensors and their data
-static bool gguf_ex_read_1(const std::string & fname, bool check_data) {
-    struct ggml_context * ctx_data = NULL;
-
+// 按 key 读取对应值
+static bool gguf_ex_read_key(const std::string & fname, const std::string & key) {
     struct gguf_init_params params = {
         /*.no_alloc = */ false,
-        /*.ctx      = */ &ctx_data,
+        /*.ctx = */ NULL,
     };
 
     struct gguf_context * ctx = gguf_init_from_file(fname.c_str(), params);
 
-    printf("%s: version:      %d\n", __func__, gguf_get_version(ctx));
-    printf("%s: alignment:   %zu\n", __func__, gguf_get_alignment(ctx));
-    printf("%s: data offset: %zu\n", __func__, gguf_get_data_offset(ctx));
-
-    // kv
-    {
-        const int n_kv = gguf_get_n_kv(ctx);
-
-        printf("%s: n_kv: %d\n", __func__, n_kv);
-
-        for (int i = 0; i < n_kv; ++i) {
-            const char * key = gguf_get_key(ctx, i);
-
-            printf("%s: kv[%d]: key = %s\n", __func__, i, key);
-        }
+    if (!ctx) {
+        fprintf(stderr, "%s: failed to load '%s'\n", __func__, fname.c_str());
+        return false;
     }
 
-    // tensor info
-    {
-        const int n_tensors = gguf_get_n_tensors(ctx);
-
-        printf("%s: n_tensors: %d\n", __func__, n_tensors);
-
-        for (int i = 0; i < n_tensors; ++i) {
-            const char * name   = gguf_get_tensor_name  (ctx, i);
-            const size_t size   = gguf_get_tensor_size  (ctx, i);
-            const size_t offset = gguf_get_tensor_offset(ctx, i);
-            const auto   type   = gguf_get_tensor_type  (ctx, i);
-
-            const char * type_name  = ggml_type_name(type);
-            const size_t type_size  = ggml_type_size(type);
-            const size_t n_elements = size / type_size;
-
-            printf("%s: tensor[%d]: name = %s, size = %zu, offset = %zu, type = %s, n_elts = %zu\n", __func__, i, name, size, offset, type_name, n_elements);
-        }
+    const int64_t key_id = gguf_find_key(ctx, key.c_str());
+    if (key_id < 0) {
+        fprintf(stderr, "%s: key not found: %s\n", __func__, key.c_str());
+        gguf_free(ctx);
+        return false;
     }
 
-    // data
-    {
-        const int n_tensors = gguf_get_n_tensors(ctx);
+    const std::string val = gguf_kv_to_str(ctx, key_id, false);
+    printf("%s\n", val.c_str());
 
-        for (int i = 0; i < n_tensors; ++i) {
-            printf("%s: reading tensor %d data\n", __func__, i);
-
-            const char * name = gguf_get_tensor_name(ctx, i);
-
-            struct ggml_tensor * cur = ggml_get_tensor(ctx_data, name);
-
-            printf("%s: tensor[%d]: n_dims = %d, ne = (%d, %d, %d, %d), name = %s, data = %p\n",
-                __func__, i, ggml_n_dims(cur), int(cur->ne[0]), int(cur->ne[1]), int(cur->ne[2]), int(cur->ne[3]), cur->name, cur->data);
-
-            // print first 10 elements
-            const float * data = (const float *) cur->data;
-
-            printf("%s data[:10] : ", name);
-            for (int j = 0; j < MIN(10, ggml_nelements(cur)); ++j) {
-                printf("%f ", data[j]);
-            }
-            printf("\n\n");
-
-            // check data
-            if (check_data) {
-                const float * data = (const float *) cur->data;
-                for (int j = 0; j < ggml_nelements(cur); ++j) {
-                    if (data[j] != 100 + i) {
-                        fprintf(stderr, "%s: tensor[%d], data[%d]: found %f, expected %f\n", __func__, i, j, data[j], float(100 + i));
-                        gguf_free(ctx);
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-
-    printf("%s: ctx_data size: %zu\n", __func__, ggml_get_mem_size(ctx_data));
-
-    ggml_free(ctx_data);
     gguf_free(ctx);
-
     return true;
 }
 
 int main(int argc, char ** argv) {
     std::setlocale(LC_NUMERIC, "C");
 
-    if (argc < 3) {
-        printf("usage: %s data.gguf r|w [n]\n", argv[0]);
-        printf("r: read data.gguf file\n");
-        printf("w: write data.gguf file\n");
-        printf("n: no check of tensor data\n");
+    if (argc < 2) {
+        printf("usage: %s data.gguf [r] [-k keyword]\n", argv[0]);
+        printf("default mode: r\n");
+        printf("r: read and dump data.gguf file (print key-value pairs and tensor info)\n");
+        printf("r -k keyword: print the value of the specified keyword\n");
         return -1;
     }
-    bool check_data = true;
-    if (argc == 4) {
-        check_data = false;
-    }
-
-    srand(123456);
 
     const std::string fname(argv[1]);
-    const std::string mode (argv[2]);
+    std::string mode = "r";
+    std::string keyword;
 
-    GGML_ASSERT((mode == "r" || mode == "w") && "mode must be r or w");
+    int argi = 2;
+    if (argc > argi && std::string(argv[argi]) == "r") {
+        mode = argv[argi];
+        argi++;
+    } else if (argc > argi && std::string(argv[argi]) == "w") {
+        fprintf(stderr, "error: w mode is not supported\n");
+        return -1;
+    }
 
-    if (mode == "w") {
-        GGML_ASSERT(gguf_ex_write(fname) && "failed to write gguf file");
-    } else if (mode == "r") {
+    while (argi < argc) {
+        const std::string arg = argv[argi];
+        if (arg == "-k") {
+            if (argi + 1 >= argc) {
+                fprintf(stderr, "error: missing value after -k\n");
+                return -1;
+            }
+            keyword = argv[argi + 1];
+            argi += 2;
+            continue;
+        }
+
+        fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
+        return -1;
+    }
+
+    GGML_ASSERT(mode == "r" && "mode must be r");
+
+    if (!keyword.empty()) {
+        GGML_ASSERT(gguf_ex_read_key(fname, keyword) && "failed to read keyword from gguf file");
+    } else {
         GGML_ASSERT(gguf_ex_read_0(fname) && "failed to read gguf file");
-        GGML_ASSERT(gguf_ex_read_1(fname, check_data) && "failed to read gguf file");
     }
 
     return 0;

@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <numeric>
 #include <array>
 #include "nlohmann/json.hpp"
@@ -99,6 +100,7 @@ bool HoumoVision::houmo_load(const std::string &file_name, std::vector<int> devi
     }
     std::string backend = "Xh2HalBackend";
     parse_deviceids();
+    recovery_handle_ = houmo_runtime_recovery_acquire(device_ids_);
     // 从gguf文件中加载hmmodels
     const int n_tensors = gguf_get_n_tensors(ctx);
     for (int i = 0; i < n_tensors; ++i) {
@@ -564,8 +566,12 @@ bool HoumoQwenVision::encoding(const std::vector<float> &input_data,
     }
     // fixed resolution. index & mask already set in init()
     module_->SetInput(input_name_, input_tensor);
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: vision Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
     fill_header(output_data);
     int offset = sizeof(CompactHeader);
     output_data.resize(output_data.size() * output_names_.size());
@@ -579,6 +585,228 @@ bool HoumoQwenVision::encoding(const std::vector<float> &input_data,
     LOG_INF("houmo_vision: run model done\n");
     return true;
 }
+
+bool HoumoGLMOCRVision::init(const std::string& model_path, const std::vector<int> device_ids) {
+    if (!houmo_load(model_path, device_ids)) {
+        LOG_ERR("Failed to load HoumoGLMOCRVision model from %s\n", model_path.c_str());
+        return false;
+    }
+
+    int input_size = module_->GetInputNum();
+    for (int i = 0; i < input_size; ++i) {
+        auto input_name = module_->GetInputName(i);
+        LOG_INF("%s: input_name: %s\n", __func__, input_name.c_str());
+        auto input_info   = module_->GetInputInfo(input_name).AsContiguous();
+        auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
+        input_tensors_.insert(std::pair(input_name, input_tensor));
+        if (i == 0) {
+            input_name_ = input_name;
+            const auto & shape = input_info.Shape();
+            if (shape.size() != 2) {
+                LOG_ERR("%s: GLM-OCR visual input must be rank-2 pixel_values, got %zu\n", __func__, shape.size());
+                return false;
+            }
+
+            const int n_patches     = static_cast<int>(shape[0]);
+            patch_vec_len_          = static_cast<int>(shape[1]);
+            const int patch_vec_den = image_channels_ * temporal_patch_size_;
+            if (n_patches <= 0 || patch_vec_len_ <= 0 || patch_vec_len_ % patch_vec_den != 0) {
+                LOG_ERR("%s: invalid GLM-OCR pixel_values shape=[%d,%d]\n", __func__, n_patches, patch_vec_len_);
+                return false;
+            }
+            const int patch_area = patch_vec_len_ / (image_channels_ * temporal_patch_size_);
+            patch_size_          = static_cast<uint32_t>(std::sqrt(static_cast<float>(patch_area)));
+            if (static_cast<int>(patch_size_ * patch_size_) != patch_area) {
+                LOG_ERR("%s: invalid GLM-OCR patch area %d from vector length %d\n", __func__, patch_area,
+                        patch_vec_len_);
+                return false;
+            }
+            const int grid = static_cast<int>(std::sqrt(static_cast<float>(n_patches)));
+            if (grid * grid != n_patches) {
+                LOG_ERR("%s: invalid GLM-OCR patch grid from n_patches=%d\n", __func__, n_patches);
+                return false;
+            }
+            image_width_  = static_cast<uint16_t>(grid * patch_size_);
+            image_height_ = image_width_;
+            image_frames_ = 1;
+            LOG_INF("%s: GLM-OCR pixel_values shape=[%d,%d], image=%dx%d, patch=%u\n", __func__, n_patches,
+                    patch_vec_len_, image_width_, image_height_, patch_size_);
+        }
+    }
+
+    int out_size = module_->GetOutputNum();
+    for (int i = 0; i < out_size; ++i) {
+        auto output_name = module_->GetOutputName(i);
+        LOG_INF("%s: output_name: %s\n", __func__, output_name.c_str());
+        output_names_.push_back(output_name);
+    }
+    return true;
+}
+
+bool HoumoGLMOCRVision::image_resize(clip_image_u8_ptr & input, clip_image_f32_ptr & output) {
+    const int     target_w = image_width_;
+    const int     target_h = image_height_;
+    clip_image_u8 resized_img;
+    if (input->nx == target_w && input->ny == target_h) {
+        resized_img = *input;
+    } else {
+        const float scale =
+            std::min(static_cast<float>(target_w) / input->nx, static_cast<float>(target_h) / input->ny);
+        const int new_w = static_cast<int>(input->nx * scale);
+        const int new_h = static_cast<int>(input->ny * scale);
+
+        clip_image_u8 scaled_img;
+        bicubic_resize(*input, scaled_img, new_w, new_h);
+
+        resized_img.nx = target_w;
+        resized_img.ny = target_h;
+        resized_img.buf.resize(static_cast<size_t>(target_w) * target_h * image_channels_);
+        for (size_t i = 0; i < resized_img.buf.size(); i += 3) {
+            resized_img.buf[i + 0] = 114;
+            resized_img.buf[i + 1] = 114;
+            resized_img.buf[i + 2] = 114;
+        }
+        for (int y = 0; y < new_h; y++) {
+            for (int x = 0; x < new_w; x++) {
+                for (int c = 0; c < image_channels_; c++) {
+                    resized_img.buf[(static_cast<size_t>(y) * target_w + x) * image_channels_ + c] =
+                        scaled_img.buf[(static_cast<size_t>(y) * new_w + x) * image_channels_ + c];
+                }
+            }
+        }
+    }
+
+    output->nx = image_width_;
+    output->ny = image_height_;
+    output->buf.resize(output->nx * output->ny * image_channels_);
+    for (size_t i = 0; i < resized_img.buf.size(); ++i) {
+        output->buf[i] = static_cast<float>(resized_img.buf[i]);
+    }
+    return true;
+}
+
+bool HoumoGLMOCRVision::patchify(const std::vector<float> & input_data,
+                                 std::vector<float> &       output_data,
+                                 std::string &              err) const {
+    err.clear();
+    const int C              = image_channels_;
+    const int H              = image_height_;
+    const int W              = image_width_;
+    const int P              = static_cast<int>(patch_size_);
+    const int T              = temporal_patch_size_;
+    const int grid_h         = H / P;
+    const int grid_w         = W / P;
+    const int n_patches      = grid_h * grid_w;
+    const int expect_vec_len = T * C * P * P;
+
+    if (P <= 0 || H % P != 0 || W % P != 0) {
+        err = "image size is not divisible by GLM-OCR patch size";
+        return false;
+    }
+    if (static_cast<int>(input_data.size()) != H * W * C) {
+        err = "input_data size mismatch for GLM-OCR image";
+        return false;
+    }
+    if (expect_vec_len != patch_vec_len_) {
+        err = "patch vector length mismatch for GLM-OCR pixel_values";
+        return false;
+    }
+
+    std::vector<float> chw(static_cast<size_t>(C) * H * W);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            for (int c = 0; c < C; c++) {
+                float v = input_data[(static_cast<size_t>(y) * W + x) * C + c];
+                // AutoProcessor rescales resized uint8 RGB pixels by 1/255.
+                // Do not apply mean/std normalization for GLM-OCR.
+                if (v >= -128.0f && v < 0.0f) {
+                    v += 256.0f;
+                }
+                if (v > 1.5f) {
+                    v = std::clamp(v, 0.0f, 255.0f) / 255.0f;
+                }
+                chw[static_cast<size_t>(c) * H * W + static_cast<size_t>(y) * W + x] = v;
+            }
+        }
+    }
+
+    output_data.assign(static_cast<size_t>(n_patches) * patch_vec_len_, 0.0f);
+    constexpr int merge_size = 2;
+    if (grid_h % merge_size != 0 || grid_w % merge_size != 0) {
+        err = "GLM-OCR patch grid is not divisible by spatial merge size";
+        return false;
+    }
+
+    int patch_id = 0;
+    // Match AutoProcessor patch order:
+    // reshape(grid_t, T, C, gh/merge, merge, P, gw/merge, merge, P)
+    // transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
+    // For a single image grid_t=1 and the image is tiled over T.
+    for (int hb = 0; hb < grid_h / merge_size; hb++) {
+        for (int wb = 0; wb < grid_w / merge_size; wb++) {
+            for (int mh = 0; mh < merge_size; mh++) {
+                for (int mw = 0; mw < merge_size; mw++) {
+                    const int    py   = hb * merge_size + mh;
+                    const int    px   = wb * merge_size + mw;
+                    const size_t base = static_cast<size_t>(patch_id++) * patch_vec_len_;
+                    int          k    = 0;
+                    // Per-patch vector layout is [C, T, P, P].
+                    for (int c = 0; c < C; c++) {
+                        for (int t = 0; t < T; t++) {
+                            (void) t;
+                            for (int iy = 0; iy < P; iy++) {
+                                for (int ix = 0; ix < P; ix++) {
+                                    const int y = py * P + iy;
+                                    const int x = px * P + ix;
+                                    output_data[base + k++] =
+                                        chw[static_cast<size_t>(c) * H * W + static_cast<size_t>(y) * W + x];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool HoumoGLMOCRVision::encoding(const std::vector<float> & input_data,
+                                 std::vector<float> &       output_data,
+                                 const int                  out_offset) {
+    (void) out_offset;
+    std::vector<float> pixel_values;
+    std::string        err;
+    if (!patchify(input_data, pixel_values, err)) {
+        LOG_ERR("%s: patchify failed: %s\n", __func__, err.c_str());
+        return false;
+    }
+
+    auto input_tensor = input_tensors_[input_name_];
+    const tcim::Tensor input_fp32_tensor =
+        tcim::Tensor::CreateHostTensor(input_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    input_fp32_tensor.Buffer().CopyFromHost(pixel_values.data(), input_fp32_tensor.MemSize());
+    input_fp32_tensor.CastTo(input_tensor);
+    module_->SetInput(input_name_, input_tensor);
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: vision Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
+
+    fill_header(output_data);
+    int    offset          = sizeof(CompactHeader);
+    auto * output_data_ptr = reinterpret_cast<int8_t *>(output_data.data());
+    for (auto & name : output_names_) {
+        tcim::Tensor output_tensor = module_->GetOutput(name);
+        memcpy(output_data_ptr + offset, output_tensor.Buffer().Data(), output_tensor.MemSize());
+        offset += output_tensor.MemSize();
+    }
+    LOG_INF("houmo_glmocr_vision: run model done\n");
+    return true;
+}
+
 bool HoumoMinicpmVision::init(const std::string &model_path, std::vector<int> device_ids) {
     // TODO: not implemented
     if (!houmo_load(model_path, device_ids)) {
@@ -781,12 +1009,281 @@ bool HoumoMinicpmVision::encoding(const std::vector<float> &input_data,
                                             input_fp32_tensor.MemSize());
     input_fp32_tensor.CastTo(input_tensor);
     module_->SetInput(module_->GetInputName(0), input_tensor);
-    module_->Run();
-    module_->Sync();
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: vision Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
     for (auto &name : output_names_) {
         tcim::Tensor output_tensor = module_->GetOutput(name);
         memcpy(output_data.data() + out_offset, output_tensor.Buffer().Data(),
                output_tensor.MemSize());
+    }
+    return true;
+}
+
+bool HoumoGemmaVision::init(const std::string &model_path, std::vector<int> device_ids) {
+    if (!houmo_load(model_path, device_ids)) {
+        LOG_ERR("Failed to load HoumoGemmaVision model from %s\n",
+                model_path.c_str());
+        return false;
+    }
+    HoumoVision::patch_size_ = patch_size_;
+    int input_size = module_->GetInputNum();
+    for (auto i = 0; i < input_size; ++i) {
+        auto input_name = module_->GetInputName(i);
+        LOG_INF("%s: input_name: %s\n", __func__, input_name.c_str());
+        auto input_info = module_->GetInputInfo(input_name).AsContiguous();
+        auto input_tensor = tcim::Tensor::CreateHostTensor(input_info);
+        input_tensors_.insert(
+            std::pair<std::string, tcim::Tensor>(input_name, input_tensor));
+
+        if (input_name.find("pixel_values") != std::string::npos) {
+            pixel_values_name_ = input_name;
+        } else if (input_name.find("pixel_position_ids") != std::string::npos) {
+            pixel_position_ids_name_ = input_name;
+        } else if (input_name.find("pooling_matrix") != std::string::npos) {
+            pooling_matrix_name_ = input_name;
+        } else if (input_name.find("attention_mask") != std::string::npos) {
+            attention_mask_name_ = input_name;
+        }
+    }
+    int out_size = module_->GetOutputNum();
+    for (auto i = 0; i < out_size; ++i) {
+        auto output_name = module_->GetOutputName(i);
+        LOG_INF("%s: output_name: %s\n", __func__, output_name.c_str());
+        output_names_.push_back(output_name);
+    }
+    if (pixel_values_name_.empty() || pixel_position_ids_name_.empty() ||
+        pooling_matrix_name_.empty() || attention_mask_name_.empty()) {
+        LOG_ERR("%s: Gemma4 visual model must have inputs: pixel_values, pixel_position_ids, pooling_matrix, attention_mask\n",
+                __func__);
+        return false;
+    }
+
+    const auto pixel_shape = input_tensors_[pixel_values_name_].Info().Shape();
+    const auto pooling_shape = input_tensors_[pooling_matrix_name_].Info().Shape();
+    if (pixel_shape.size() != 3 || pooling_shape.size() != 3) {
+        LOG_ERR("%s: invalid Gemma4 visual input ranks: pixel_values rank=%zu pooling_matrix rank=%zu\n",
+                __func__, pixel_shape.size(), pooling_shape.size());
+        return false;
+    }
+    max_patches_ = static_cast<int>(pixel_shape[1]);
+    patch_vec_len_ = static_cast<int>(pixel_shape[2]);
+    image_soft_tokens_ = static_cast<int>(pooling_shape[1]);
+
+    if (image_soft_tokens_ > 0 && max_patches_ % image_soft_tokens_ == 0) {
+        const int kernel_area = max_patches_ / image_soft_tokens_;
+        const int kernel = static_cast<int>(std::sqrt(static_cast<float>(kernel_area)) + 0.5f);
+        if (kernel > 0 && kernel * kernel == kernel_area) {
+            pooling_kernel_size_ = kernel;
+        }
+    }
+
+    choose_patch_grid(1, 1, patch_grid_w_, patch_grid_h_);
+    image_width_ = static_cast<uint16_t>(patch_grid_w_ * patch_size_);
+    image_height_ = static_cast<uint16_t>(patch_grid_h_ * patch_size_);
+    image_frames_ = 1;
+    LOG_INF("%s: Gemma4 vision max_patches=%d soft_tokens=%d pooling=%d default_grid=%dx%d image=%dx%d\n",
+            __func__, max_patches_, image_soft_tokens_, pooling_kernel_size_,
+            patch_grid_w_, patch_grid_h_, image_width_, image_height_);
+    return true;
+}
+
+void HoumoGemmaVision::choose_patch_grid(int src_w, int src_h,
+                                         int &grid_w, int &grid_h) const {
+    const int max_patches = max_patches_ > 0 ? max_patches_ : 2520;
+    const int kernel = pooling_kernel_size_ > 0 ? pooling_kernel_size_ : 3;
+    const float target_aspect = src_h > 0 ? static_cast<float>(src_w) / src_h : 1.0f;
+    float best_score = std::numeric_limits<float>::max();
+    grid_w = kernel;
+    grid_h = max_patches / kernel;
+
+    for (int h = kernel; h <= max_patches; h += kernel) {
+        if (max_patches % h != 0) {
+            continue;
+        }
+        const int w = max_patches / h;
+        if (w % kernel != 0) {
+            continue;
+        }
+        const float aspect = static_cast<float>(w) / h;
+        const float score = std::fabs(std::log(std::max(aspect, 1e-6f) /
+                                               std::max(target_aspect, 1e-6f)));
+        if (score < best_score) {
+            best_score = score;
+            grid_w = w;
+            grid_h = h;
+        }
+    }
+}
+
+bool HoumoGemmaVision::image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output) {
+    // Gemma4Processor uses PIL BICUBIC resize and then rescales pixels from
+    // [0, 255] to [0, 1] before patchify. Keep this path aligned with it.
+    choose_patch_grid(input->nx, input->ny, patch_grid_w_, patch_grid_h_);
+    image_width_ = static_cast<uint16_t>(patch_grid_w_ * patch_size_);
+    image_height_ = static_cast<uint16_t>(patch_grid_h_ * patch_size_);
+
+    clip_image_u8 resized_img;
+    bicubic_resize(*input, resized_img, image_width_, image_height_);
+    output->nx = image_width_;
+    output->ny = image_height_;
+    output->buf.resize(output->nx * output->ny * 3);
+    for (size_t i = 0; i < resized_img.buf.size(); ++i) {
+        output->buf[i] = static_cast<float>(resized_img.buf[i])/255.0f;
+    }
+    return true;
+}
+
+bool HoumoGemmaVision::patchify_inplace(std::vector<float> &input_data,
+                                        std::string &err) {
+    err.clear();
+
+    int C = image_channels_;
+    int H = image_height_;
+    int W = image_width_;
+    int patch_size = patch_size_;
+
+    int num_patches_h = H / patch_size;
+    int num_patches_w = W / patch_size;
+    int num_patches   = num_patches_h * num_patches_w;
+    int patch_vec_len = patch_vec_len_;
+
+    const size_t expect_in = static_cast<size_t>(C) * H * W;
+    if (input_data.size() != expect_in) {
+        err = "input_data.size mismatch for Gemma4 image";
+        return false;
+    }
+    if (max_patches_ > 0 && num_patches > max_patches_) {
+        err = "Gemma4 image patch count exceeds visual graph max_patches";
+        return false;
+    }
+
+    std::vector<float> out(static_cast<size_t>(num_patches) * patch_vec_len, 0.0f);
+
+    auto chw_idx = [=](int c, int y, int x) -> size_t {
+        return static_cast<size_t>(c) * H * W + static_cast<size_t>(y) * W + x;
+    };
+
+    // 顺序与 HF patchify 一致：py, px, iy, ix, c
+    for (int py = 0; py < num_patches_h; ++py) {
+        for (int px = 0; px < num_patches_w; ++px) {
+            const int patch_id = py * num_patches_w + px;
+            const size_t base = static_cast<size_t>(patch_id) * patch_vec_len;
+
+            int k = 0;
+            for (int iy = 0; iy < patch_size; ++iy) {
+                for (int ix = 0; ix < patch_size; ++ix) {
+                    const int y = py * patch_size + iy;
+                    const int x = px * patch_size + ix;
+                    for (int c = 0; c < C; ++c) {
+                        out[base + k++] = input_data[chw_idx(c, y, x)];
+                    }
+                }
+            }
+        }
+    }
+
+    // 回写：input_data 变成 256*768
+    input_data.swap(out);
+    return true;
+}
+
+bool HoumoGemmaVision::set_padded_visual_inputs(const std::vector<float> &patches,
+                                                int valid_patches) {
+    const int kernel = pooling_kernel_size_ > 0 ? pooling_kernel_size_ : 3;
+    const int max_patches = max_patches_ > 0 ? max_patches_ : valid_patches;
+    const int soft_tokens = image_soft_tokens_ > 0 ? image_soft_tokens_ : max_patches / (kernel * kernel);
+
+    for (auto &item : input_tensors_) {
+        auto &tensor = item.second;
+        std::memset(tensor.Data(), 0, tensor.MemSize());
+    }
+
+    auto pixel_tensor = input_tensors_[pixel_values_name_];
+    const auto pixel_shape = pixel_tensor.Info().Shape();
+    const int patch_dim = pixel_shape.size() > 2 ? static_cast<int>(pixel_shape[2]) : patch_vec_len_;
+    const size_t copy_elems = std::min(patches.size(), static_cast<size_t>(valid_patches) * patch_dim);
+    tcim::Tensor pixel_fp32 = tcim::Tensor::CreateHostTensor(
+        pixel_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    std::memset(pixel_fp32.Data(), 0, pixel_fp32.MemSize());
+    std::memcpy(pixel_fp32.Data(), patches.data(), copy_elems * sizeof(float));
+    pixel_fp32.CastTo(pixel_tensor);
+    module_->SetInput(pixel_values_name_, pixel_tensor);
+
+    auto position_tensor = input_tensors_[pixel_position_ids_name_];
+    std::vector<int32_t> pos(static_cast<size_t>(max_patches) * 2, 0);
+    for (int p = 0; p < valid_patches; ++p) {
+        pos[static_cast<size_t>(p) * 2 + 0] = p % patch_grid_w_;
+        pos[static_cast<size_t>(p) * 2 + 1] = p / patch_grid_w_;
+    }
+    tcim::Tensor position_i32 = tcim::Tensor::CreateHostTensor(
+        position_tensor.Info().AsContiguous().AsType(tcim::DataType::INT32));
+    position_i32.Buffer().CopyFromHost(pos.data(), position_i32.MemSize());
+    position_i32.CastTo(position_tensor);
+    module_->SetInput(pixel_position_ids_name_, position_tensor);
+
+    auto pooling_tensor = input_tensors_[pooling_matrix_name_];
+    std::vector<float> pooling(static_cast<size_t>(soft_tokens) * max_patches, 0.0f);
+    const int pooled_w = patch_grid_w_ / kernel;
+    for (int p = 0; p < valid_patches; ++p) {
+        const int x = p % patch_grid_w_;
+        const int y = p / patch_grid_w_;
+        const int out = (y / kernel) * pooled_w + (x / kernel);
+        if (out >= 0 && out < soft_tokens) {
+            pooling[static_cast<size_t>(out) * max_patches + p] = 1.0f / (kernel * kernel);
+        }
+    }
+    tcim::Tensor pooling_fp32 = tcim::Tensor::CreateHostTensor(
+        pooling_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    pooling_fp32.Buffer().CopyFromHost(pooling.data(), pooling_fp32.MemSize());
+    pooling_fp32.CastTo(pooling_tensor);
+    module_->SetInput(pooling_matrix_name_, pooling_tensor);
+
+    auto mask_tensor = input_tensors_[attention_mask_name_];
+    std::vector<float> mask(static_cast<size_t>(max_patches), 0.0f);
+    for (int p = valid_patches; p < max_patches; ++p) {
+        mask[p] = -65504.0f;
+    }
+    tcim::Tensor mask_fp32 = tcim::Tensor::CreateHostTensor(
+        mask_tensor.Info().AsContiguous().AsType(tcim::DataType::FLOAT32));
+    mask_fp32.Buffer().CopyFromHost(mask.data(), mask_fp32.MemSize());
+    mask_fp32.CastTo(mask_tensor);
+    module_->SetInput(attention_mask_name_, mask_tensor);
+    return true;
+}
+
+bool HoumoGemmaVision::encoding(const std::vector<float> &input_data, std::vector<float> &output_data,
+                             int out_offset) {
+    LOG_INF("houmo_gemma_vision: encoding image slice... %d,%d\n", out_offset,
+            input_data.size());
+    // nhwc to nchw
+    rgb_to_nchw(input_data);
+    std::string err_;
+    if (!patchify_inplace(nchw_data_, err_)) {
+        LOG_ERR("patchify failed: %s\n", err_.c_str());
+        return false;
+    }
+    const int valid_patches = patch_grid_w_ * patch_grid_h_;
+    if (!set_padded_visual_inputs(nchw_data_, valid_patches)) {
+        return false;
+    }
+    const auto status = houmo_run_with_retry(*module_, recovery_handle_, __func__);
+    if (status != tcim::Status::OK) {
+        LOG_ERR("%s: vision Run failed, result=%d\n", __func__,
+                static_cast<int>(status));
+        return false;
+    }
+    fill_header(output_data);
+    int offset = sizeof(CompactHeader);
+    int8_t * output_data_ptr = reinterpret_cast<int8_t *>(output_data.data());
+    for (auto &name : output_names_) {
+        tcim::Tensor output_tensor = module_->GetOutput(name);
+        memcpy(output_data_ptr + offset, output_tensor.Buffer().Data(),
+               output_tensor.MemSize());
+        offset += output_tensor.MemSize();
     }
     return true;
 }

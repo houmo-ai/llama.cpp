@@ -24,6 +24,8 @@ enum server_task_type {
     SERVER_TASK_TYPE_SLOT_SAVE,
     SERVER_TASK_TYPE_SLOT_RESTORE,
     SERVER_TASK_TYPE_SLOT_ERASE,
+    SERVER_TASK_TYPE_SLOT_PAUSE,
+    SERVER_TASK_TYPE_SLOT_RESUME,
     SERVER_TASK_TYPE_GET_LORA,
     SERVER_TASK_TYPE_SET_LORA,
 };
@@ -34,6 +36,7 @@ enum task_response_type {
     TASK_RESPONSE_TYPE_OAI_CHAT,
     TASK_RESPONSE_TYPE_OAI_CMPL,
     TASK_RESPONSE_TYPE_OAI_RESP,
+    TASK_RESPONSE_TYPE_OAI_ASR, // transcriptions API
     TASK_RESPONSE_TYPE_OAI_EMBD,
     TASK_RESPONSE_TYPE_ANTHROPIC,
 };
@@ -46,6 +49,9 @@ enum stop_type {
 };
 
 struct task_params {
+    // Lower value means higher scheduling priority. 0 is highest.
+    int32_t priority = 100;
+
     bool stream          = true;
     bool include_usage   = false;
     bool cache_prompt    = true; // remember the prompt to avoid reprocessing all prompt
@@ -67,6 +73,13 @@ struct task_params {
 
     std::vector<std::string> antiprompt;
     std::vector<std::string> response_fields;
+    bool asr_force_align = false;
+    llama_token asr_force_align_timestamp_token = LLAMA_TOKEN_NULL;
+    int32_t asr_force_align_timestamp_segment_ms = 80;
+    std::vector<std::string> asr_force_align_words;
+    std::string asr_text;
+    std::string asr_language;
+    double asr_duration = -1.0;
 
     bool timings_per_token   = false;
     bool post_sampling_probs = false;
@@ -111,14 +124,10 @@ struct task_result_state {
     const std::string oai_resp_message_id;
     std::string oai_resp_fc_id; // function call ID for current args delta
 
-    task_result_state(const common_chat_parser_params & chat_parser_params)
-        : chat_parser_params(chat_parser_params)
-        , oai_resp_id("resp_" + random_string())
-        , oai_resp_reasoning_id("rs_" + random_string())
-        , oai_resp_message_id("msg_" + random_string()) {}
+    task_result_state(const common_chat_parser_params & chat_parser_params);
 
+    bool utf8_sanitize_safe(std::string & s);
 
-    bool utf8_sanitize_safe(std::string& s);
     // parse partial tool calls and update the internal state
     common_chat_msg update_chat_msg(
         const std::string & text_added,
@@ -211,6 +220,7 @@ struct server_task {
         const llama_vocab * vocab,
         const common_params & params_base,
         const int n_ctx_slot,
+        const std::vector<llama_logit_bias> & logit_bias_eog,
         const json & data);
 
     // utility function
@@ -263,14 +273,14 @@ struct result_timings {
     int32_t cache_n = -1;
 
     int32_t prompt_n = -1;
-    double prompt_ms;
-    double prompt_per_token_ms;
-    double prompt_per_second;
+    double prompt_ms = 0.0;
+    double prompt_per_token_ms = 0.0;
+    double prompt_per_second = 0.0;
 
     int32_t predicted_n = -1;
-    double predicted_ms;
-    double predicted_per_token_ms;
-    double predicted_per_second;
+    double predicted_ms = 0.0;
+    double predicted_per_token_ms = 0.0;
+    double predicted_per_second = 0.0;
 
     // Optional speculative metrics - only included when > 0
     int32_t draft_n = 0;
@@ -336,6 +346,7 @@ struct completion_token_output {
 
 struct server_task_result_cmpl_final : server_task_result {
     std::string content;
+    json asr_force_align_data = json::array();
     llama_tokens tokens;
 
     bool stream;
@@ -346,6 +357,7 @@ struct server_task_result_cmpl_final : server_task_result {
     bool truncated;
     int32_t n_decoded;
     int32_t n_prompt_tokens;
+    int32_t n_prompt_tokens_cache;
     int32_t n_tokens_cached;
     bool has_new_line;
     std::string stopping_word;
@@ -382,12 +394,32 @@ struct server_task_result_cmpl_final : server_task_result {
         is_updated = true;
         oaicompat_msg = state.update_chat_msg(content, false, oaicompat_msg_diffs);
 
+        if (!state.chat_parser_params.echo && state.chat_parser_params.assistant_prefill) {
+            common_chat_msg delta_msg;
+            delta_msg.role = oaicompat_msg.role.empty() ? "assistant" : oaicompat_msg.role;
+
+            for (const auto & diff : oaicompat_msg_diffs) {
+                delta_msg.reasoning_content += diff.reasoning_content_delta;
+                delta_msg.content += diff.content_delta;
+                if (diff.tool_call_index != std::string::npos) {
+                    if (delta_msg.tool_calls.size() <= diff.tool_call_index) {
+                        delta_msg.tool_calls.resize(diff.tool_call_index + 1);
+                    }
+                    delta_msg.tool_calls[diff.tool_call_index] = diff.tool_call_delta;
+                }
+            }
+
+            oaicompat_msg = std::move(delta_msg);
+        }
+
         oai_resp_id = state.oai_resp_id;
         oai_resp_reasoning_id = state.oai_resp_reasoning_id;
         oai_resp_message_id = state.oai_resp_message_id;
     }
 
     json to_json_non_oaicompat();
+
+    json usage_json_oaicompat();
 
     json to_json_oaicompat();
 
@@ -398,6 +430,8 @@ struct server_task_result_cmpl_final : server_task_result {
     json to_json_oaicompat_resp();
 
     json to_json_oaicompat_resp_stream();
+
+    json to_json_oaicompat_asr();
 
     json to_json_anthropic();
 
@@ -410,6 +444,7 @@ struct server_task_result_cmpl_partial : server_task_result {
 
     int32_t n_decoded;
     int32_t n_prompt_tokens;
+    int32_t n_prompt_tokens_cache;
 
     bool post_sampling_probs;
     bool is_progress = false;
@@ -453,6 +488,8 @@ struct server_task_result_cmpl_partial : server_task_result {
     json to_json_oaicompat_chat();
 
     json to_json_oaicompat_resp();
+
+    json to_json_oaicompat_asr();
 
     json to_json_anthropic();
 };
@@ -542,6 +579,12 @@ struct server_task_result_slot_erase : server_task_result {
     virtual json to_json() override;
 };
 
+struct server_task_result_slot_state : server_task_result {
+    int id_slot = -1;
+    bool paused = false;
+    virtual json to_json() override;
+};
+
 struct server_task_result_get_lora : server_task_result {
     struct lora {
         common_adapter_lora_info info;
@@ -557,31 +600,29 @@ struct server_task_result_apply_lora : server_task_result {
     virtual json to_json() override;
 };
 
-struct server_prompt_checkpoint {
-    llama_pos pos_min;
-    llama_pos pos_max;
-
-    int64_t n_tokens;
-
-    std::vector<uint8_t> data;
+struct server_prompt_data {
+    std::vector<uint8_t> main;
+    std::vector<uint8_t> drft;
 
     size_t size() const {
-        return data.size();
+        return main.size() + drft.size();
     }
 };
 
 struct server_prompt {
     server_tokens tokens;
 
-    std::vector<uint8_t> data;
+    server_prompt_data data;
 
-    std::list<server_prompt_checkpoint> checkpoints;
+    std::list<common_prompt_checkpoint> checkpoints;
 
     size_t size() const {
-        size_t res = data.size();
+        size_t res = 0;
 
-        for (const auto & checkpoint : checkpoints) {
-            res += checkpoint.size();
+        res += data.size();
+
+        for (const auto & ckpt : checkpoints) {
+            res += ckpt.size();
         }
 
         return res;
@@ -595,7 +636,7 @@ struct server_prompt {
         return server_prompt {
             tokens.clone(),
             data,
-            checkpoints
+            checkpoints,
         };
     }
 };
@@ -618,9 +659,9 @@ struct server_prompt_cache {
 
     size_t n_tokens() const;
 
-    server_prompt * alloc(const server_prompt & prompt, size_t state_size);
+    server_prompt * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft);
 
-    bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx, int32_t id_slot);
+    bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_main, llama_context * ctx_drft, int32_t id_slot);
 
     void update();
 };

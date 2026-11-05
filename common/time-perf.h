@@ -5,6 +5,7 @@
 #include <string>
 #include <mutex>
 #include <stdio.h>
+#include "log.h"
 // --- 全局性能仓库 (单例) ---
 class PerfRegistry {
 public:
@@ -24,18 +25,21 @@ public:
         metrics_.push_back(m);
     }
     void PrintAll() {
-        printf(
+        LOG_INF(
             "\n================ GLOBAL PERFORMANCE REPORT ================\n");
-        printf("%-25s %-12s %-12s %-12s %-10s\n", "Tag", "Cur (ms)", "Avg (ms)",
+        LOG_INF("%-25s %-12s %-12s %-12s %-10s\n", "Tag", "Cur (ms)", "Avg (ms)",
                  "Max (ms)", "Count");
         for (const auto &m : metrics_) {
             double total = *m.total_ns;
             uint64_t cnt = *m.count;
             double cur = *m.current_ns;
             double maxv = *m.max_ns;
+            if (cnt == 0) {
+                continue;
+            }
             double avg = (cnt > 0) ? (total / cnt) : 0;
             // 直接传入浮点数，不再使用 std::to_string
-            printf("%-25s %-12.4f %-12.4f %-12.4f %-10llu\n",
+            LOG_INF("%-25s %-12.4f %-12.4f %-12.4f %-10llu\n",
                      m.tag.c_str(),
                      cur / 1e6,
                      avg / 1e6,
@@ -45,6 +49,16 @@ public:
             *m.count = 0;
             *m.current_ns = 0;
             *m.max_ns = 0; // <-- 重置最大值
+        }
+    }
+
+    void ResetAll() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto &m : metrics_) {
+            *m.total_ns = 0;
+            *m.count = 0;
+            *m.current_ns = 0;
+            *m.max_ns = 0;
         }
     }
 private:
@@ -72,3 +86,4 @@ private:
         count_##tag++; \
     }
 #define PERF_REPORT() PerfRegistry::Instance().PrintAll()
+#define PERF_RESET() PerfRegistry::Instance().ResetAll()

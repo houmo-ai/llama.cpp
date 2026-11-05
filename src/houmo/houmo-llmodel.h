@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -11,7 +12,10 @@
 #include "houmo-embedding_layer.h"
 #include "houmo-memory.h"
 #include "llama-model-loader.h"
+#include "llama-io.h"
 #include "ggml.h"
+#include "houmo-weight-manager-pool.h"
+#include "houmo-runtime-recovery.h"
 // houmo llm model defination
 //
 // @guoxing.xu 2025-05-23
@@ -27,27 +31,129 @@ class HouMoLLModel {
     ~HouMoLLModel();
 
     bool houmo_load(llama_model_loader & ml, std::vector<int> device_ids);
-    void houmo_init(houmo_memory_i *memory, int seq_max = 8,
+    // is_mtp: true → 本 ctx 是 MTP 草稿 context (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP)，
+    //         false → target context。由上层 llama_context::houmo_init 根据 cparams.ctx_type 传入。
+    bool houmo_init(houmo_memory_i *memory, int seq_max = 8,
           ggml_abort_callback abort_callback = nullptr,
-          void *abort_callback_data = nullptr);
+          void *abort_callback_data = nullptr,
+          bool is_mtp = false);
     int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                       float *logits);
     int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,
                       float *logits);
     int houmo_decode(std::vector<llama_token> &batches,
                      std::vector<int> &seq_ids, std::vector<float *> logits);
+    int houmo_asr_force_align(std::vector<llama_token> &tokens, int seq_id,
+                              std::vector<float *> &logits_out);
+    /**
+     * @brief Verify k draft tokens for the same sequence in a single NPU forward.
+     * @details Equivalent to prefill(k tokens) but returns the logits of every
+     * position in @p tokens (not only the last one). Used for speculative
+     * decoding verification where the target model has to sample from each
+     * of the k draft positions.
+     *
+     * Semantics:
+     *   - All @p tokens belong to the same @p seq_id and are placed at
+     *     consecutive positions base..base+k-1 where base = current KV length.
+     *   - logits_out.size() must equal tokens.size().
+     *   - logits_out[i] may be nullptr to skip writing that position.
+     *   - On success KV state advances by k tokens; caller is responsible for
+     *     rolling back rejected tail if needed.
+     *
+     * Default implementation falls back to a per-token houmo_prefill loop
+     * (correct but slow, ~k× the cost). Backends that can emit per-position
+     * logits from a single forward should override it.
+     */
+    int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+                     std::vector<float *> &logits_out);
+    int houmo_verify_accept(int seq_id, uint16_t n_accepted);
+
+    void state_write(llama_io_write_i & io, llama_seq_id seq_id,
+             llama_state_seq_flags flags, bool is_mtp) const;
+    void state_read(llama_io_read_i & io, llama_seq_id seq_id,
+            llama_state_seq_flags flags, bool is_mtp);
     int houmo_embedding(const std::map<int32_t, std::vector<llama_token>> &batches,
                         std::map<int, float *> &embeddings);
     bool is_embedding();
+    int max_parallel_sequences() const;
+    bool is_asr_force_aligner();
+    bool has_decode_model();
+
+    // ---------------- MTP (Multi-Token Prediction) ----------------
+    // 适配 llama.cpp 上游 commit 255582687 的 draft-mtp speculative 流程：
+    //   - target 模型与 MTP 模型分别为两份独立 gguf，各自加载为 llama_model +
+    //     llama_context（外部 common/speculative.cpp 已编排好）。
+    //   - 这里只在 houmo backend 内部识别"当前 ctx 是 MTP 还是 target"，
+    //     角色由 houmo_init(..., is_mtp) 参数传入，不再从 gguf tensor 名推断。
+    //   - 不修改任何公共 llama.h API。
+    //
+    // is_mtp_model(): true 表示本 ctx 用作 MTP 草稿模型。
+    bool is_mtp_model() const;
+
+    // has_mtp_modules(): true 表示该 HMM GGUF 里实际含 prefill_mtp.hmm /
+    // decode_mtp.hmm 模块，可被创建为 LLAMA_CONTEXT_TYPE_MTP。
+    bool has_mtp_modules() const;
+
+    // MTP 草稿一次推理：吃 (target_hidden_state[n], token[n]) 返回
+    //   logits[n] 以及新的 hidden_state[n] (用于 AR 串接)。
+    //   - h_in:        [n_tokens, n_embd]，通过 llama.cpp 的 float* 通道承载
+    //                  原始 fp16 hidden（每行有效数据为 n_embd * 2 bytes，
+    //                  行步长仍为 n_embd * sizeof(float)）
+    //   - tokens:      [n_tokens] 草稿当前要送入的 token id
+    //   - logits_out:  每行 n_vocab 个 fp32; nullptr 行表示该位置不取 logits
+    //   - h_out:       [n_tokens, n_embd]，同样以 float* 为 carrier 回写原始
+    //                  fp16 hidden（供下一轮草稿继续 AR 推进）；
+    //                  nullptr 表示不需要回写
+    //   - start_pos:   该批第 0 个 token 的绝对位置；MTP 无 KV cache，必须
+    //                  信任上层 speculative/seq_rm 后传入的位置，避免内部
+    //                  自增 past_seq_length 在 rollback 后漂移。
+    //   返回 0 成功，<0 失败。仅 MTP gguf (`is_mtp_model()`) 上有效。
+    int houmo_decode_mtp(const float *h_in,
+               const std::vector<llama_token> &tokens,
+               int seq_id,
+               std::vector<float *> &logits_out,
+               float *h_out,
+               int32_t start_pos = -1);
+
+    // 设置 target ctx 的 pre-norm hidden 输出去向。
+    // 调用约定: llama_context::houmo_decode 在调用 prefill/decode/verify 前
+    // 设置 dst (= cparams.embeddings_pre_norm ? embd_pre_norm.data + base : nullptr)，
+    // backend 在 Run() 完成后把 hidden_state ishmm output 拷过去。
+    // dst==nullptr 表示不需要输出。
+    // n_rows == 该次调用预计写出的行数 (与 logits_out.size() 对齐)。
+    // row_stride_floats == n_embd_。
+    void set_pre_norm_hidden_dst(float *dst, int n_rows);
     int n_decode_batch();
     int n_prefill_batch();
     uint32_t n_context_length();
+    uint32_t n_context_length(int seq_id) const;
     void lora_init(std::string file_name, void *adapter);
     void lora_set_scale(void *adapter, float scale);
     void lora_clear();
     class Impl;  // Forward declaration of the implementation class
   private:
-    Impl *impl_; // Pointer to the implementation
+    struct SeqRoute {
+        int group_index = -1;
+        int group_id = -1;
+        int local_seq_id = -1;
+        Impl *impl = nullptr;
+    };
+
+    bool route_seq(int global_seq_id, bool is_mtp, SeqRoute &route) const;
+
+    bool target_initialized_ = false;
+    bool mtp_initialized_ = false;
+    int target_seq_max_ = 0;
+    int mtp_seq_max_ = 0;
+    std::vector<Impl *> impls_;
+    std::vector<Impl *> impls_mtp_;
+    std::vector<int> group_ids_;
+    std::vector<int> mtp_group_ids_;
+    std::vector<int> local_seq_max_;
+    std::vector<int> local_seq_max_mtp_;
+    std::vector<std::unique_ptr<houmo_memory_i>> memories_;
+    std::vector<std::unique_ptr<houmo_memory_i>> memories_mtp_;
+    houmo_memory_i * memory_ = nullptr;
 };
 
 struct kv_cache_item {
@@ -58,6 +164,17 @@ struct kv_cache_item {
 struct lora_item {
     void * adapter; //记录上层lora contex指针
     float scale;  // scale 0.0 表示disable， 1.0 表示enable
+};
+struct PrefillChunk {
+    bool is_embedding = false;
+    bool bidirectional_attention = false;
+    size_t n_tokens = 0;
+    int16_t nx = 0;
+    int16_t ny = 0;
+    std::vector<llama_token> tokens;
+    std::vector<uint16_t> embeddings;
+
+    size_t size() const { return n_tokens; }
 };
 /**
 * @brief HouMoLLModel is the base class for HouMo model.
@@ -90,18 +207,103 @@ public:
       (void)embeddings; // unused parameter
       return 0;
   }
+  // Optional hard limit for backends whose physical batch is indexed by seq_id.
+  // A value of zero means that the backend does not declare such a limit.
+  virtual int max_parallel_sequences() const { return 0; }
   virtual int houmo_decode(std::vector<llama_token> &batches,
                            std::vector<int> &seq_ids,
                            std::vector<float *> logits) = 0;
+  virtual int houmo_asr_force_align(std::vector<llama_token> &tokens, int seq_id,
+                                    std::vector<float *> &logits_out) {
+      (void) tokens;
+      (void) seq_id;
+      (void) logits_out;
+      return -1;
+  }
+  /**
+   * @brief Batched verification for speculative decoding.
+   * @details See HouMoLLModel::houmo_verify. Default fallback implementation
+   * repeatedly calls houmo_prefill with a single token — correct but ~k×
+   * slower than a proper one-shot implementation. Backends should override
+   * this when they can produce per-position logits in a single forward.
+   */
+  virtual int houmo_verify(std::vector<llama_token> &tokens, int seq_id,
+                           std::vector<float *> &logits_out) {
+      if (tokens.size() != logits_out.size()) {
+          return -1;
+      }
+      for (size_t i = 0; i < tokens.size(); ++i) {
+          std::vector<llama_token> one = {tokens[i]};
+          int ret = houmo_prefill(one, seq_id, logits_out[i]);
+          if (ret != 0) {
+              return ret;
+          }
+      }
+      return 0;
+  }
+  virtual int houmo_verify_accept(int /*seq_id*/, uint16_t /*n_accepted*/) {
+    return -1;
+  }
+
+  virtual void state_write(llama_io_write_i & io, int local_seq_id,
+                           llama_state_seq_flags flags) const;
+  virtual void state_read(llama_io_read_i & io, int local_seq_id,
+                          llama_state_seq_flags flags);
+  virtual int state_position(int /*local_seq_id*/) const { return -1; }
   virtual bool is_embedding() {
     return false;
+  }
+  virtual bool is_asr_force_aligner() {
+    return asr_force_aligner_;
+  }
+  bool has_decode_model() const { return decode_model_ != nullptr; }
+
+  // ---------------- MTP hooks (default: no-op / not supported) ----------------
+  // MTP 角色由具体 Impl 类型决定。
+  virtual bool is_mtp_model() const { return wants_mtp_modules(); }
+  virtual bool has_mtp_modules() const { return wants_mtp_modules(); }
+  virtual bool wants_mtp_modules() const { return false; }
+
+  // 默认不支持 MTP draft；只有 HoumoQwen35MTP 等具体 backend 重写。
+  virtual int houmo_decode_mtp(const float * /*h_in*/,
+                               const std::vector<llama_token> & /*tokens*/,
+                               int /*seq_id*/,
+                               std::vector<float *> & /*logits_out*/,
+                               float * /*h_out*/,
+                               int32_t /*start_pos*/ = -1) {
+      return -1;
+  }
+
+  // 默认 no-op。Qwen3.5 在 Run() 后会把 ishmm 的 hidden_state 输出 memcpy
+  // 到 pre_norm_hidden_dst_ (若非空)。
+  void set_pre_norm_hidden_dst(float *dst, int n_rows) {
+      pre_norm_hidden_dst_      = dst;
+      pre_norm_hidden_dst_rows_ = n_rows;
   }
   int n_decode_batch() const { return n_decode_batch_; }
   int n_prefill_batch() const { return n_prefill_batch_; }
   uint32_t n_context_length() const { return context_length_;}
+  bool supports_seq_max(int seq_max, std::string &reason) const;
   void lora_init(std::string file_name, void *adapter);
   void lora_set_scale(void *adapter, float scale);
   void lora_clear();
+  std::shared_ptr<HoumoEmbeddingLayer> embedding_layer() {
+      return embedding_layer_;
+  }
+  void set_embedding_layer(std::shared_ptr<HoumoEmbeddingLayer> layer) {
+      embedding_layer_ = layer;
+  }
+  tcim::Module::WeightManager weight_manager() const { return wm_; }
+  void set_weight_manager(const tcim::Module::WeightManager &wm) {
+      wm_ = wm;
+      wm_configured_ = true;
+  }
+  void set_weight_manager_handle(std::shared_ptr<houmo_weight_manager_handle> handle) {
+      wm_handle_ = std::move(handle);
+      wm_ = wm_handle_->manager;
+      wm_configured_ = true;
+  }
+  void set_load_group_id(int group_id) { load_group_id_ = group_id; }
 protected:
   /**
    * @brief Initialize the model input and output.
@@ -193,6 +395,15 @@ protected:
   std::shared_ptr<tcim::Module>
   create_infer_engine(const std::string &file_name, size_t offset, size_t size,
                       std::vector<std::string> dummy_tensor_names = {});
+  void zero_tensor(tcim::Tensor &tensor) const {
+      if (tensor.Device() == tcim::Device::COMPND) {
+          for (const auto &sub_tensor : tcim::CompTensor(tensor).SubTensors()) {
+              sub_tensor.Buffer().MemSet(0);
+          }
+      } else {
+          tensor.Buffer().MemSet(0);
+      }
+  }
 
 protected:
   int prefill_length_ = 256;
@@ -205,11 +416,26 @@ protected:
   int n_decode_batch_ = 1;
   int n_split_count_ = 1;
 
-  std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_;
-  std::shared_ptr<tcim::Module> prefill_model_;
-  std::shared_ptr<tcim::Module> decode_model_;
+  // Keep the shared manager handle declared before Module objects so C++
+  // destroys Modules first. This prevents the pool entry from expiring while
+  // TCIM Modules are still releasing their device allocations.
   tcim::Module::WeightManager wm_;
+  std::shared_ptr<houmo_weight_manager_handle> wm_handle_;
+  houmo_runtime_recovery_handle_ptr recovery_handle_;
+  bool wm_configured_ = false;
 
+  std::shared_ptr<HoumoEmbeddingLayer> embedding_layer_ = nullptr;
+  std::shared_ptr<tcim::Module> prefill_model_ = nullptr;
+  std::shared_ptr<tcim::Module> decode_model_ = nullptr;
+  // MTP 相关：
+  //   - MTP 角色由 wants_mtp_modules() / 具体 Impl 类型决定。
+  //   - pre_norm_hidden_dst_/_rows_: 调用方在 prefill/decode 前通过
+  //                      set_pre_norm_hidden_dst() 注入的写出地址；Run() 后由
+  //                      具体 backend 把 hidden_state ishmm 输出 memcpy 过去。
+  //                      空指针表示本次调用无需写出。
+  float *pre_norm_hidden_dst_     = nullptr;
+  int    pre_norm_hidden_dst_rows_ = 0;
+  bool embed_npu_ = false;  // --embed-npu 标志
   std::map<std::string, tcim::Tensor> prefill_input_map_;
   std::map<std::string, tcim::Tensor> prefill_output_map_;
   std::map<std::string, tcim::Tensor> decode_input_map_;
@@ -225,10 +451,13 @@ protected:
   std::string kBlockCountEx = ".block_count";
   std::string kSpliteCount = "split.tensors.count";
   std::string kHmmInfo = "hmm.info";
+  std::string kCacheKeyWord = "model_layers_";
   int kSeqMax = 8; // maximum sequence number for single-card model
   int device_num_ = 1;
   std::vector<int> device_ids_ = {0};
   bool enable_lazy_mode_ = false;
+  bool asr_force_aligner_ = false;
+  int load_group_id_ = 0;
   houmo_memory_i *memory_ = nullptr;
   std::map<std::string, lora_item> lora_map;
   tcim::Tensor lora_mask_float_;

@@ -1,11 +1,15 @@
 # CMake equivalent of `xxd -i ${INPUT} ${OUTPUT}`
-# Usage: cmake -DINPUT=tools/server/public/index.html -DOUTPUT=tools/server/index.html.hpp -P scripts/xxd.cmake
+# Usage: cmake -DINPUT=tools/ui/dist/index.html -DOUTPUT=build/tools/ui/index.html.hpp -P scripts/xxd.cmake
 
 SET(INPUT "" CACHE STRING "Input File")
 SET(OUTPUT "" CACHE STRING "Output File")
 
 get_filename_component(filename "${INPUT}" NAME)
 string(REGEX REPLACE "\\.|-" "_" name "${filename}")
+
+if(NOT EXISTS "${INPUT}")
+    message(FATAL_ERROR "xxd input file does not exist: ${INPUT}")
+endif()
 
 file(READ "${INPUT}" hex_data HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," hex_sequence "${hex_data}")

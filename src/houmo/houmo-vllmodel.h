@@ -8,8 +8,8 @@ class HouMoVLLModel : public HouMoLLModel::Impl {
     HouMoVLLModel();
     ~HouMoVLLModel() override = default;
     virtual void houmo_init(houmo_memory_i *memory, int seq_max = 4,
-                          ggml_abort_callback abort_callback = nullptr,
-                          void *abort_callback_data = nullptr) override;
+                            ggml_abort_callback abort_callback = nullptr,
+                            void *abort_callback_data = nullptr) override;
     virtual int houmo_prefill(std::vector<llama_token> &tokens, int seq_id,
                       float *logits) override;
     virtual int houmo_prefill(const float *embeddings, int n_tokens, int seq_id,

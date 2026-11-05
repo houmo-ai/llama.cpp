@@ -6,6 +6,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "mtmd-image.h"
+#include "houmo-runtime-recovery.h"
 class HoumoVision {
   public:
     HoumoVision() = default;
@@ -25,7 +27,7 @@ class HoumoVision {
     int16_t batch_size() const {
         return batch_size_;
     }
-    bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output);
+    virtual bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output);
 
   protected:
     bool houmo_load(const std::string &file_name, std::vector<int> device_ids);
@@ -46,6 +48,7 @@ class HoumoVision {
     void parse_deviceids();
   protected:
     std::shared_ptr<tcim::Module> module_;
+    houmo_runtime_recovery_handle_ptr recovery_handle_;
     std::map<std::string, tcim::Tensor> input_tensors_;
     std::vector<std::string> output_names_;
     std::string kPatchSizeKey = "clip.vision.patch_size";
@@ -77,6 +80,24 @@ class HoumoQwenVision : public HoumoVision {
      * porting from clip.cpp
      */
     void set_windows_attention();
+};
+
+class HoumoGLMOCRVision : public HoumoVision {
+  public:
+    HoumoGLMOCRVision() : HoumoVision() {}
+    ~HoumoGLMOCRVision() override = default;
+    bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output) override;
+    bool init(const std::string &model_path, std::vector<int> device_ids) override;
+    bool encoding(const std::vector<float> &input_data,
+                  std::vector<float> &output_data, int out_offset = 0) override;
+
+  private:
+    bool patchify(const std::vector<float> &input_data, std::vector<float> &output_data,
+                  std::string &err) const;
+
+  private:
+    int temporal_patch_size_ = 2;
+    int patch_vec_len_ = 1176;
 };
 
 /*
@@ -111,4 +132,30 @@ class HoumoMinicpmVision : public HoumoVision {
     const int MAX_GRID_H = 70;
     const int MAX_GRID_W = 70;
     int32_t n_embedding_ = 3584;
+};
+
+class HoumoGemmaVision : public HoumoVision {
+  public:
+    HoumoGemmaVision(int patch_size_) : HoumoVision(), patch_size_(patch_size_) {}
+    ~HoumoGemmaVision() override = default;
+    virtual bool image_resize(clip_image_u8_ptr &input, clip_image_f32_ptr &output) override;
+    virtual bool init(const std::string &model_path, std::vector<int> device_ids) override;
+    virtual bool encoding(const std::vector<float> &input_data,
+                          std::vector<float> &output_data, int out_offset = 0) override;
+  private:
+    void choose_patch_grid(int src_w, int src_h, int &grid_w, int &grid_h) const;
+    bool patchify_inplace(std::vector<float> &input_data, std::string &err);
+    bool set_padded_visual_inputs(const std::vector<float> &patches,
+                                  int valid_patches);
+    int patch_size_ = 16;
+    int patch_vec_len_ = 768;
+    int max_patches_ = 0;
+    int image_soft_tokens_ = 0;
+    int pooling_kernel_size_ = 3;
+    int patch_grid_w_ = 0;
+    int patch_grid_h_ = 0;
+    std::string pixel_values_name_;
+    std::string pixel_position_ids_name_;
+    std::string pooling_matrix_name_;
+    std::string attention_mask_name_;
 };

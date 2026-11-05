@@ -10,6 +10,7 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>
+#include <glob.h>
 #endif
 
 #ifdef _WIN32
@@ -34,6 +35,12 @@ typedef uint32_t (*hm_sys_get_device_info_t)(struct hm_device_info *info);
 typedef int (*hm_sys_get_device_name_t)(int dev_index, char name[], int len);
 typedef int (*hm_sys_get_ddr_size_t)(int dev_index, uint64_t *ddr_size);
 typedef int (*hm_sys_get_mem_info_t)(int dev_index, struct hm_mem_info *mem_info);
+typedef int (*hm_sys_get_computing_power_t)(int dev_index);
+typedef int (*hm_sys_get_core_count_t)(int dev_index);
+typedef float (*hm_sys_get_ipu_utili_rate_t)(int dev_index);
+typedef int (*hm_sys_get_temperature_t)(int dev_index, float * temperature);
+typedef int (*hm_sys_get_driver_version_t)(char *version, size_t len);
+typedef int (*hm_sys_get_device_version_t)(int dev_index, char *version, size_t len);
 
 struct houmonpu_sdk {
     void* handle = nullptr;
@@ -41,6 +48,12 @@ struct houmonpu_sdk {
     hm_sys_get_device_name_t get_device_name = nullptr;
     hm_sys_get_ddr_size_t get_ddr_size = nullptr;
     hm_sys_get_mem_info_t get_mem_info = nullptr;
+    hm_sys_get_computing_power_t get_computing_power = nullptr;
+    hm_sys_get_core_count_t get_core_count = nullptr;
+    hm_sys_get_ipu_utili_rate_t get_ipu_utili_rate = nullptr;
+    hm_sys_get_temperature_t get_temperature = nullptr;
+    hm_sys_get_driver_version_t get_driver_version = nullptr;
+    hm_sys_get_device_version_t get_device_version = nullptr;
     bool initialized = false;
 
     static const char* get_library_name() {
@@ -49,7 +62,7 @@ struct houmonpu_sdk {
 #else
         return "libhal_xh2a.so";
 #endif
-    }
+        }
 
     bool load() {
         if (handle) return true;
@@ -125,6 +138,33 @@ struct houmonpu_sdk {
 
         // 尝试环境变量
         if (!handle) {
+            glob_t matches = {};
+            const std::string pattern = std::string("/usr/local/*-sdk/hal/lib/") + get_library_name();
+            const std::string standard_sdk = std::string("/usr/local/houmo-sdk/hal/lib/") + get_library_name();
+
+            if (glob(pattern.c_str(), 0, nullptr, &matches) == 0) {
+                for (size_t i = 0; i < matches.gl_pathc && !handle; ++i) {
+                    const std::string path = matches.gl_pathv[i];
+
+                    // The standard Houmo SDK was already attempted first.
+                    if (path == standard_sdk) {
+                        continue;
+                    }
+
+                    GGML_LOG_INFO("[HoumoNPU] Trying to load from customer SDK: %s\n", path.c_str());
+                    handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+                    if (handle) {
+                        GGML_LOG_INFO("[HoumoNPU] Successfully loaded from customer SDK: %s\n", path.c_str());
+                    } else {
+                        GGML_LOG_INFO("[HoumoNPU] Failed to load from customer SDK: %s - %s\n", path.c_str(), dlerror());
+                    }
+                }
+            }
+
+            globfree(&matches);
+        }
+
+        if (!handle) {
             const char* env_paths[] = {
                 getenv("HOUMO_SDK_PATH"),
                 getenv("HOUMO_DRV_PATH"),
@@ -170,12 +210,24 @@ struct houmonpu_sdk {
         get_device_name = (hm_sys_get_device_name_t)GetProcAddress((HMODULE)handle, "hm_sys_get_device_name");
         get_ddr_size = (hm_sys_get_ddr_size_t)GetProcAddress((HMODULE)handle, "hm_sys_get_ddr_size");
         get_mem_info = (hm_sys_get_mem_info_t)GetProcAddress((HMODULE)handle, "hm_sys_get_mem_info");
-#else
+        get_computing_power = (hm_sys_get_computing_power_t)GetProcAddress((HMODULE)handle, "hm_sys_get_computing_power");
+        get_core_count = (hm_sys_get_core_count_t)GetProcAddress((HMODULE)handle, "hm_sys_get_core_count");
+        get_ipu_utili_rate = (hm_sys_get_ipu_utili_rate_t)GetProcAddress((HMODULE)handle, "hm_sys_get_ipu_utili_rate");
+        get_temperature = (hm_sys_get_temperature_t)GetProcAddress((HMODULE)handle, "hm_sys_get_temperature");
+        get_driver_version = (hm_sys_get_driver_version_t)GetProcAddress((HMODULE)handle, "hm_sys_get_driver_version");
+        get_device_version = (hm_sys_get_device_version_t)GetProcAddress((HMODULE)handle, "hm_sys_get_device_version");
+    #else
         get_device_info = (hm_sys_get_device_info_t)dlsym(handle, "hm_sys_get_device_info");
         get_device_name = (hm_sys_get_device_name_t)dlsym(handle, "hm_sys_get_device_name");
         get_ddr_size = (hm_sys_get_ddr_size_t)dlsym(handle, "hm_sys_get_ddr_size");
         get_mem_info = (hm_sys_get_mem_info_t)dlsym(handle, "hm_sys_get_mem_info");
-#endif
+        get_computing_power = (hm_sys_get_computing_power_t)dlsym(handle, "hm_sys_get_computing_power");
+        get_core_count = (hm_sys_get_core_count_t)dlsym(handle, "hm_sys_get_core_count");
+        get_ipu_utili_rate = (hm_sys_get_ipu_utili_rate_t)dlsym(handle, "hm_sys_get_ipu_utili_rate");
+        get_temperature = (hm_sys_get_temperature_t)dlsym(handle, "hm_sys_get_temperature");
+        get_driver_version = (hm_sys_get_driver_version_t)dlsym(handle, "hm_sys_get_driver_version");
+        get_device_version = (hm_sys_get_device_version_t)dlsym(handle, "hm_sys_get_device_version");
+    #endif
 
         if (!get_device_info || !get_device_name || !get_ddr_size || !get_mem_info) {
 #ifdef _WIN32
@@ -202,6 +254,12 @@ struct houmonpu_sdk {
             get_device_name = nullptr;
             get_ddr_size = nullptr;
             get_mem_info = nullptr;
+            get_computing_power = nullptr;
+            get_core_count = nullptr;
+            get_ipu_utili_rate = nullptr;
+            get_temperature = nullptr;
+            get_driver_version = nullptr;
+            get_device_version = nullptr;
             initialized = false;
         }
     }
@@ -243,6 +301,18 @@ static ggml_houmonpu_device_info ggml_houmonpu_init() {
         return info;
     }
 
+    if (sdk.get_driver_version) {
+        char driver_version[256] = {0};
+        int version_ret = sdk.get_driver_version(driver_version, sizeof(driver_version));
+        if (version_ret == 0) {
+            GGML_LOG_INFO("[HoumoNPU] driver_version=%s\n", driver_version);
+        } else {
+            GGML_LOG_INFO("[HoumoNPU] get_driver_version failed: ret=%d\n", version_ret);
+        }
+    } else {
+        GGML_LOG_INFO("[HoumoNPU] driver_version=<symbol unavailable>\n");
+    }
+
     info.device_count = (int)count;
 
     // 获取每个设备的信息
@@ -260,6 +330,18 @@ static ggml_houmonpu_device_info ggml_houmonpu_init() {
         } else {
             snprintf(info.device_descriptions[i], sizeof(info.device_descriptions[i]),
                      "HoumoNPU Device %d", dev_index);
+        }
+
+        if (sdk.get_device_version) {
+            char device_version[256] = {0};
+            int version_ret = sdk.get_device_version(dev_index, device_version, sizeof(device_version));
+            if (version_ret == 0) {
+                GGML_LOG_INFO("[HoumoNPU]   device_version=%s\n", device_version);
+            } else {
+                GGML_LOG_INFO("[HoumoNPU]   get_device_version failed: ret=%d\n", version_ret);
+            }
+        } else {
+            GGML_LOG_INFO("[HoumoNPU]   device_version=<symbol unavailable>\n");
         }
 
         // 获取内存信息
@@ -287,6 +369,28 @@ static ggml_houmonpu_device_info ggml_houmonpu_init() {
         }
         GGML_LOG_INFO("[HoumoNPU]   Final device memory: total=%zu MB, free=%zu MB\n",
                 info.device_memory_total[i] / 1024 / 1024, info.device_memory_free[i] / 1024 / 1024);
+
+        int computing_power = -1;
+        if (sdk.get_computing_power) {
+            computing_power = sdk.get_computing_power(dev_index);
+        }
+
+        float ipu_util_rate = -1.0f;
+        if (sdk.get_ipu_utili_rate) {
+            ipu_util_rate = sdk.get_ipu_utili_rate(dev_index);
+        }
+
+        float temperature = -1.0f;
+        if (sdk.get_temperature) {
+            int temp_ret = sdk.get_temperature(dev_index, &temperature);
+            if (temp_ret != 0) {
+                temperature = -1.0f;
+                GGML_LOG_INFO("[HoumoNPU]   get_temperature failed: ret=%d\n", temp_ret);
+            }
+        }
+
+        GGML_LOG_INFO("[HoumoNPU]   Extra device info: computing_power=%d, ipu_util_rate=%.4f, temperature=%.2fC\n"
+            , computing_power, ipu_util_rate, temperature);
     }
 
     sdk.initialized = true;
@@ -339,8 +443,6 @@ static void ggml_backend_houmonpu_device_get_memory(ggml_backend_dev_t dev,
 
 static enum ggml_backend_dev_type ggml_backend_houmonpu_device_get_type(ggml_backend_dev_t dev) {
     GGML_UNUSED(dev);
-    // HW_ACCEL: 可被 --list-devices 显示，但不会被自动初始化为计算后端
-    // 后端完整实现后改为 GGML_BACKEND_DEVICE_TYPE_ACCEL
     return GGML_BACKEND_DEVICE_TYPE_HM_ACCEL;
 }
 

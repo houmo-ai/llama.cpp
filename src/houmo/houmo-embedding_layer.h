@@ -3,6 +3,10 @@
 #include <string>
 #include <stdexcept>
 #include <vector>
+#include <memory>
+
+// 前置声明 (避免头文件依赖 tcim_runtime)
+namespace tcim { class Tensor; }
 
 // 数据类型枚举（与Python导出的二进制格式对齐）
 enum class EmbeddingDtype {
@@ -15,6 +19,7 @@ enum class EmbeddingDtype {
 class HoumoEmbeddingLayer {
   public:
     HoumoEmbeddingLayer(const std::string &weight_path, int64_t offset, int64_t size);
+    ~HoumoEmbeddingLayer();  // PIMPL: 必须在 .cpp 中定义 (unique_ptr 析构需要完整类型)
 
     void get_embedding(int32_t token_id, void *data);
 
@@ -22,6 +27,12 @@ class HoumoEmbeddingLayer {
                                    void *data);
   // Overload that accepts a raw pointer + length to avoid temporary vector copies
   void get_embedding_batch(const int32_t *token_ids, size_t n, void *data);
+
+    // ---- NPU 路径 (--embed-npu) ----
+    void init_npu(int device_id = -1);  // device_id<0 时从 HOUMO_DEVICE_ID 环境变量读取
+    void get_embedding_batch_npu(const int32_t *token_ids, size_t n, void *dst, int offset_rows = 0);
+    bool is_npu_ready() const { return npu_ready_; }
+
     // ========== 工具接口 ==========
     // 获取词汇表大小
     uint32_t get_vocab_size() const { return vocab_size_; }
@@ -45,6 +56,11 @@ class HoumoEmbeddingLayer {
     std::vector<int8_t> data_;                        // int8格式权重
     uint32_t vocab_size_ = 0;                        // 词汇表大小
     uint32_t n_embd_ = 0;                            // 嵌入维度
+    bool npu_ready_ = false;                         // NPU 权重是否已上传
+
+    // NPU Device Tensor: embedding weights [vocab_size, 1, n_embd] fp16
+    struct NpuState;
+    std::unique_ptr<NpuState> npu_;                  // PIMPL 隐藏 tcim 依赖
 
     // ========== 私有工具函数 ==========
     // 验证token_id是否合法

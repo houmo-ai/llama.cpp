@@ -5,19 +5,38 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 set(TARGET server-context)
 
 add_library(${TARGET} STATIC
+    server-chat.cpp
+    server-chat.h
     server-task.cpp
     server-task.h
     server-queue.cpp
     server-queue.h
+    postmo-device-arbiter.cpp
+    postmo-device-arbiter.h
+    postmo-checkpoint-policy.cpp
+    postmo-checkpoint-policy.h
+    postmo-checkpoint-store.cpp
+    postmo-checkpoint-store.h
     server-common.cpp
     server-common.h
     server-context.cpp
     server-context.h
+    server-tools.cpp
+    server-tools.h
 )
 
-if (BUILD_SHARED_LIBS)
+#if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
-endif()
+#endif()
+
+target_include_directories(${TARGET} PRIVATE ../mtmd)
+target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
+
+
+# llama-server executable
+
+set(TARGET llama-server)
 
 target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
@@ -35,28 +54,21 @@ set(TARGET_SRCS
     server-models.cpp
     server-models.h
 )
-set(PUBLIC_ASSETS
-    index.html.gz
-    loading.html
-)
-
-foreach(asset ${PUBLIC_ASSETS})
-    set(input "${CMAKE_CURRENT_SOURCE_DIR}/public/${asset}")
-    set(output "${CMAKE_CURRENT_BINARY_DIR}/${asset}.hpp")
-    list(APPEND TARGET_SRCS ${output})
-    add_custom_command(
-        DEPENDS "${input}"
-        OUTPUT "${output}"
-        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${input}" "-DOUTPUT=${output}" -P "${PROJECT_SOURCE_DIR}/scripts/xxd.cmake"
-    )
-    set_source_files_properties(${output} PROPERTIES GENERATED TRUE)
-endforeach()
 
 add_executable(${TARGET} ${TARGET_SRCS})
 install(TARGETS ${TARGET} RUNTIME)
 
 target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(${TARGET} PRIVATE server-context PUBLIC common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PRIVATE server-context llama-ui PUBLIC llama-common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
 
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
+if (LLAMA_BUILD_TESTS)
+    add_executable(postmo-test-server-extensions
+        tests/unit/postmo-test-server-extensions.cpp
+    )
+    target_link_libraries(postmo-test-server-extensions PRIVATE server-context)
+    target_compile_features(postmo-test-server-extensions PRIVATE cxx_std_17)
+    add_test(NAME postmo-test-server-extensions COMMAND postmo-test-server-extensions)
+endif()

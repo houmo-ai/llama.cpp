@@ -11,6 +11,10 @@
 #include <set>
 
 struct server_context_impl; // private implementation
+namespace postmo {
+class checkpoint_store;
+class device_arbiter;
+}
 
 struct server_context_meta {
     std::string build_info;
@@ -21,7 +25,8 @@ struct server_context_meta {
     bool has_mtmd;
     bool has_inp_image;
     bool has_inp_audio;
-    json json_webui_settings;
+    json json_ui_settings;            // Primary: new name
+    json json_webui_settings;            // Deprecated: use json_ui_settings instead (kept for backward compat)
     int slot_n_ctx;
     enum llama_pooling_type pooling_type;
 
@@ -38,6 +43,9 @@ struct server_context_meta {
     llama_token fim_pad_token;
     llama_token fim_rep_token;
     llama_token fim_sep_token;
+
+    // sampling
+    std::vector<llama_logit_bias> logit_bias_eog;
 
     // model meta
     enum llama_vocab_type model_vocab_type;
@@ -62,7 +70,11 @@ struct server_context {
 
     // load the model and initialize llama_context
     // returns true on success
-    bool load_model(const common_params & params);
+    bool load_model(common_params & params);
+
+    // Optional process-wide device scheduling used by the PostMo threaded router.
+    // Standard llama-server leaves this unset and retains the upstream behavior.
+    void set_device_arbiter(std::shared_ptr<postmo::device_arbiter> arbiter);
 
     // this function will block main thread until termination
     void start_loop();
@@ -80,6 +92,10 @@ struct server_context {
     // get server metadata (read-only), can only be called after load_model()
     // not thread-safe, should only be used from the main thread
     server_context_meta get_meta() const;
+
+    // register a callback to be called when sleeping state changes
+    // must be set before load_model() is called
+    void on_sleeping_changed(std::function<void(bool)> callback);
 };
 
 
@@ -88,6 +104,7 @@ struct server_res_generator;
 
 struct server_routes {
     server_routes(const common_params & params, server_context & ctx_server);
+    ~server_routes();
 
     void init_routes();
 
@@ -101,15 +118,16 @@ struct server_routes {
     server_http_context::handler_t get_health;
     server_http_context::handler_t get_metrics;
     server_http_context::handler_t get_slots;
+    server_http_context::handler_t get_slot_checkpoints;
     server_http_context::handler_t post_slots;
     server_http_context::handler_t get_props;
     server_http_context::handler_t post_props;
-    server_http_context::handler_t get_api_show;
     server_http_context::handler_t post_infill;
     server_http_context::handler_t post_completions;
     server_http_context::handler_t post_completions_oai;
     server_http_context::handler_t post_chat_completions;
     server_http_context::handler_t post_responses_oai;
+    server_http_context::handler_t post_transcriptions_oai;
     server_http_context::handler_t post_anthropic_messages;
     server_http_context::handler_t post_anthropic_count_tokens;
     server_http_context::handler_t post_apply_template;
@@ -121,16 +139,27 @@ struct server_routes {
     server_http_context::handler_t post_rerank;
     server_http_context::handler_t get_lora_adapters;
     server_http_context::handler_t post_lora_adapters;
+
+    // to be used in router mode
+    json get_model_info() const;
+
+    bool warmup_system_prompt(const std::string & system_prompt);
+
 private:
     std::unique_ptr<server_res_generator> handle_completions_impl(
             const server_http_req & req,
             server_task_type type,
             const json & data,
             const std::vector<raw_buffer> & files,
+            const std::vector<size_t> & file_group_sizes,
             task_response_type res_type);
     std::unique_ptr<server_res_generator> handle_slots_save(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_restore(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_erase(const server_http_req &, int id_slot);
+    std::unique_ptr<server_res_generator> handle_slots_pause(const server_http_req &, int id_slot);
+    std::unique_ptr<server_res_generator> handle_slots_resume(const server_http_req &, int id_slot);
+    std::unique_ptr<server_res_generator> handle_slots_checkpoint(const server_http_req & req, int id_slot);
+    std::unique_ptr<server_res_generator> handle_slots_checkpoint_restore(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_embeddings_impl(const server_http_req & req, task_response_type res_type);
 
     // using unique_ptr to allow late initialization of const
@@ -141,5 +170,6 @@ private:
 
     server_queue & queue_tasks;
     server_response & queue_results;
+    std::unique_ptr<postmo::checkpoint_store> checkpoint_store;
     std::unique_ptr<server_res_generator> create_response(bool bypass_sleep = false);
 };
