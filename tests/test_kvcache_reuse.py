@@ -16,7 +16,7 @@ turns indicates successful prefix reuse.  Server-side logs provide
 the definitive evidence (checkpoint restore, rollback, etc.).
 
 Usage:
-    python test_kvcache_reuse.py [--base-url http://10.64.33.117:17701]
+    python test_kvcache_reuse.py [--base-url http://127.0.0.1:17701]
     python test_kvcache_reuse.py --test 2   # run only test 2
 """
 
@@ -26,7 +26,7 @@ import time
 import requests
 import sys
 
-BASE_URL = "http://10.64.33.117:17701"
+BASE_URL = "http://127.0.0.1:17701"
 
 
 # ---------------------------------------------------------------------------

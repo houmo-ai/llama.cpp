@@ -8,11 +8,12 @@ fi
 PLATFORM=$1
 ARCH=x86_64
 
-# SDK URLs
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.4.0/2026/07/13/2100/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-1.4.0.tar.gz"
+# SDK URLs. Set HOUMO_ARTIFACTORY_BASE_URL in the private build environment.
+HOUMO_ARTIFACTORY_BASE_URL="${HOUMO_ARTIFACTORY_BASE_URL:-https://artifacts.example.invalid}"
+xh2_dadao_sdk_url="${HOUMO_ARTIFACTORY_BASE_URL}/houmo_software/release_xh2_v1.4.0/2026/07/13/2100/windows11/houmo_tcim_runtime_xh2_windows11_x86_64-1.4.0.tar.gz"
 xh2_sw_sdk_url=""
-modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.exe"
-boringssl_url="http://artifactory.houmo.ai:80/artifactory/thirdparty_local/boringssl/boringssl-20260508.tar.gz"
+modelcli_url="${HOUMO_ARTIFACTORY_BASE_URL}/application_software/release/llama.cpp/apps/model-cli.exe"
+boringssl_url="${HOUMO_ARTIFACTORY_BASE_URL}/thirdparty_local/boringssl/boringssl-20260508.tar.gz"
 
 # 下载文件并检查是否成功
 download_file() {

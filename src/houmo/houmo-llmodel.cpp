@@ -1066,7 +1066,7 @@ int HouMoLLModel::Impl::set_xlenght_for_decode(std::vector<int> &seq_ids) {
                 }
             }
             // current_length 设置为0， 期望工具链不再计算。
-            // http://jira.houmo.ai/browse/HMSW-4468
+            // Keep current_length at zero so the toolchain does not recompute it.
             name = decode_current_length_names_[i];
             auto current_valid_length = decode_input_map_.at(name);
             set_input_data(current_valid_length, 1, current_length_vec[i]);

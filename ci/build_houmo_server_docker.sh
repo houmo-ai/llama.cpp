@@ -31,11 +31,11 @@ else
     IMAGE_NAME="llama-server-xh2:latest"
 fi
 
-BUILDER_IMAGE="${BUILDER_IMAGE:-harbor.houmo.ai/application_software/ci_hlie.cpp:v0.0.1-x86_64-ubuntu20.04}"
+BUILDER_IMAGE="${BUILDER_IMAGE:-registry.example.invalid/application_software/ci_hlie.cpp:v0.0.1-x86_64-ubuntu20.04}"
 RUNTIME_IMAGE="${RUNTIME_IMAGE:-ubuntu:20.04}"
 HOUMO_SDK_PATH="${HOUMO_SDK_PATH:-/usr/local/houmo-sdk}"
 TCIM_VERSION="${TCIM_VERSION:-1.4.0}"
-TCIM_RELEASE_BASE_URL="${TCIM_RELEASE_BASE_URL:-http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.4.0/2026/07/13/2100/ubuntu2004}"
+TCIM_RELEASE_BASE_URL="${TCIM_RELEASE_BASE_URL:-https://artifacts.example.invalid/houmo_software/release_xh2_v1.4.0/2026/07/13/2100/ubuntu2004}"
 TCIM_RUNTIME_URL="${TCIM_RUNTIME_URL:-${TCIM_RELEASE_BASE_URL}/houmo_tcim_runtime_xh2_linux_${TCIM_ARCH}-${TCIM_VERSION}.tar.gz}"
 
 if ! command -v docker >/dev/null 2>&1; then

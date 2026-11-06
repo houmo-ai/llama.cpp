@@ -34,12 +34,13 @@ case "$PLATFORM" in
         ;;
 esac
 
-# SDK URLs
-xh2_dadao_sdk_url="http://10.10.1.53:8082/artifactory/houmo_software/release_xh2_v1.4.0/2026/07/13/2100/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-1.4.0.tar.gz"
+# SDK URLs. Set HOUMO_ARTIFACTORY_BASE_URL in the private build environment.
+HOUMO_ARTIFACTORY_BASE_URL="${HOUMO_ARTIFACTORY_BASE_URL:-https://artifacts.example.invalid}"
+xh2_dadao_sdk_url="${HOUMO_ARTIFACTORY_BASE_URL}/houmo_software/release_xh2_v1.4.0/2026/07/13/2100/ubuntu2004/houmo_tcim_runtime_xh2_linux_${ARCH}-1.4.0.tar.gz"
 
-ollama_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/hlaw_ollama.${ARCH}"
-modelcli_url="http://10.10.1.53:8082/artifactory/application_software/release/llama.cpp/apps/model-cli.${ARCH}"
-boringssl_url="http://artifactory.houmo.ai:80/artifactory/thirdparty_local/boringssl/boringssl-20260508.tar.gz"
+ollama_url="${HOUMO_ARTIFACTORY_BASE_URL}/application_software/release/llama.cpp/apps/hlaw_ollama.${ARCH}"
+modelcli_url="${HOUMO_ARTIFACTORY_BASE_URL}/application_software/release/llama.cpp/apps/model-cli.${ARCH}"
+boringssl_url="${HOUMO_ARTIFACTORY_BASE_URL}/thirdparty_local/boringssl/boringssl-20260508.tar.gz"
 # 对齐策略说明：
 # - auto(默认): aarch64 默认启用 64K 对齐；x86_64 默认不启用
 # - 64k: 强制启用 64K 对齐

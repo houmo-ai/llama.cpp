@@ -77,7 +77,7 @@ On the main host build `llama.cpp` with the backends for the local devices and a
 Finally, when running `llama-cli` or `llama-server`, use the `--rpc` option to specify the host and port of each `rpc-server`:
 
 ```bash
-$ llama-cli -hf ggml-org/gemma-3-1b-it-GGUF -ngl 99 --rpc 192.168.88.10:50052,192.168.88.11:50052
+$ llama-cli -hf ggml-org/gemma-3-1b-it-GGUF -ngl 99 --rpc host-a.example.com:50052,host-b.example.com:50052
 ```
 
 By default, llama.cpp distributes model weights and the KV cache across all available devices -- both local and remote -- in proportion to each device's available memory.

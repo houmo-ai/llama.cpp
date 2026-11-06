@@ -17,7 +17,8 @@ PLATFORM="xh2"
 CURRENT_YEAR="2026"
 CURRENT_MONTH="05"
 CURRENT_DAY="06"
-URL="http://artifactory.houmo.ai:80/artifactory/houmo_software/loongarch64/${CURRENT_YEAR}/${CURRENT_MONTH}/${CURRENT_DAY}/0200/loongnix/houmo-tcim-runtime-xh2_1.3.0_loongarch64.deb"
+HOUMO_ARTIFACTORY_BASE_URL="${HOUMO_ARTIFACTORY_BASE_URL:-https://artifacts.example.invalid}"
+URL="${HOUMO_ARTIFACTORY_BASE_URL}/houmo_software/loongarch64/${CURRENT_YEAR}/${CURRENT_MONTH}/${CURRENT_DAY}/0200/loongnix/houmo-tcim-runtime-xh2_1.3.0_loongarch64.deb"
 
 download_file() {
 	local url="$1"
